@@ -57,9 +57,9 @@ See `Banmask types` below
 ###
 # Sets the default banmask number if none is given.
 #
-# Default value: 10
+# Default value: 2
 ###
-supybot.plugins.Blacklist.maskNumber: 10
+supybot.plugins.Blacklist.maskNumber: 2
 ```
 
 Banmask types:
