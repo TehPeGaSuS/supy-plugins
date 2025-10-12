@@ -37,10 +37,15 @@ import supybot
 from supybot import world
 
 # Use this for the version of this plugin.
-__version__ = ""
+__version__ = "0.2"
 
 # XXX Replace this with an appropriate author or supybot.Author instance.
-__author__ = supybot.authors.unknown
+__author__ = supybot.Author("klapvogn")
+__maintainer__ = getattr(
+    supybot.authors,
+    "klapvogn",
+    supybot.Author("klapvogn", "klapvogn", "klapvogn@proton.me"),
+)
 
 # This is a dictionary mapping supybot.Author instances to lists of
 # contributions.

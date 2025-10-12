@@ -142,6 +142,26 @@ class Blacklist(callbacks.Plugin):
             
             if not self._validate_mask(mask):
                 raise ValueError("Generated invalid mask")
+    
+    def _createMask(self, irc, target, num):
+        """Create ban mask with validation"""
+        try:
+            nick, ident, host = ircutils.splitHostmask(irc.state.nickToHostmask(target))
+            
+            # Validate components
+            if not all([nick, ident, host]):
+                raise ValueError("Invalid hostmask components")
+            
+            mask_template = self.banmasks.get(num, self.banmasks[2])
+            
+            # Create the mask - only escape nick and host, not ident
+            mask = mask_template.replace("nick", re.escape(nick)) \
+                            .replace("ident", ident) \
+                            .replace("host", re.escape(host)) \
+                            .replace("phost", re.escape(host.split(".", 1)[1]) if "." in host else re.escape(host))
+            
+            if not self._validate_mask(mask):
+                raise ValueError("Generated invalid mask")
                 
             return mask
         except Exception as e:
@@ -238,7 +258,70 @@ class Blacklist(callbacks.Plugin):
             else:
                 return "Error: All paste services unavailable"
                 
+            return mask
         except Exception as e:
+            logger.error(f"Error creating mask for {target}: {e}")
+            raise
+    
+    def _createPastebin(self, content):
+        """Create anonymous paste using Pastes.io API with retry logic"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # Pastes.io API endpoint for anonymous pastes
+                api_url = 'https://api.pastes.io/v1/pastes'
+                
+                # Prepare the JSON payload for Pastes.io (no API key needed for anonymous)
+                post_data = {
+                    'content': content,
+                    'name': 'Ban List Export',
+                    'private': False,  # Anonymous pastes can't be private
+                    'expire': 604800  # 1 week in seconds (7 days)
+                }
+                
+                # Convert to JSON and encode
+                json_data = json.dumps(post_data).encode('utf-8')
+                
+                # Create request with proper headers (no auth token needed)
+                request = urllib.request.Request(
+                    api_url,
+                    data=json_data,
+                    headers={
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'Supybot-Blacklist-Plugin/1.0'
+                    },
+                    method='POST'
+                )
+                
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    result = json.loads(response.read().decode('utf-8'))
+                
+                # Pastes.io returns a JSON response with paste details
+                if 'data' in result and 'key' in result['data']:
+                    paste_key = result['data']['key']
+                    # Return the raw paste URL
+                    return f'https://pastes.io/raw/{paste_key}'
+                else:
+                    error_msg = result.get('message', 'Unknown error')
+                    logger.warning(f"Pastes.io error: {error_msg}")
+                    if attempt == max_retries - 1:
+                        return f"Error: Paste service unavailable ({error_msg})"
+                    time.sleep(1)
+                    
+            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                logger.warning(f"Pastes.io attempt {attempt + 1} failed: {e}")
+                if attempt == max_retries - 1:
+                    return f"Error: Paste service unavailable ({str(e)})"
+                time.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Unexpected error creating paste: {e}")
+                if attempt == max_retries - 1:
+                    return f"Error: Paste service unavailable ({str(e)})"
+                time.sleep(1)
+        
+        return "Error: Paste service unavailable after multiple retries"
             logger.error(f"Fallback paste service failed: {e}")
             return f"Error: Paste services unavailable ({str(e)})"
     
