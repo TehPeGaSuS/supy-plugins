@@ -6,7 +6,7 @@ Requires Python3, Limnoria.
 
 Python 3 and score fixes. Plugin working.
 
-[o.O] ~ ZombieHunt game for supybot ~ [O.o]
+[O.o] ~ ZombieHunt game for supybot ~ [o.O]
 =======================================
 
 How to play
