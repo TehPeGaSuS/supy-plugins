@@ -388,7 +388,7 @@ class ZombieHunt(callbacks.Plugin):
                 except AssertionError:
                     pass
 
-                irc.reply("The hunt starts now!", prefixNick=False)
+                irc.reply("The zombie hunt starts now!", prefixNick=False)
         else:
             irc.error("You have to be on a channel")
 
