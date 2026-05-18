@@ -65,15 +65,23 @@ class Blacklist(callbacks.Plugin):
             return template.replace("nick", nick).replace("ident", ident).replace("host", host)
         except: return None
 
-    def _createPastebin(self, content):
-        """Uploads content to dpaste.com."""
+    def _createPastebin(self, channel, content):
+        """Uploads content to the configured paste service."""
         try:
-            api_url = 'https://dpaste.com/api/v2/'
-            post_data = {'content': content, 'syntax': 'text', 'expiry_days': 7}
-            data = urllib.parse.urlencode(post_data).encode('utf-8')
-            req = urllib.request.Request(api_url, data=data, method='POST')
+            api_url = self.registryValue('pastebinUrl', channel)
+            field = self.registryValue('pastebinField', channel)
+            boundary = '----SupybotBlacklist'
+            body = (
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{field}"; filename="banlist.txt"\r\n'
+                f'Content-Type: text/plain\r\n\r\n'
+                + content +
+                f'\r\n--{boundary}--\r\n'
+            ).encode('utf-8')
+            req = urllib.request.Request(api_url, data=body, method='POST')
+            req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
             with urllib.request.urlopen(req, timeout=10) as response:
-                return response.read().decode('utf-8').strip() + ".txt"
+                return response.read().decode('utf-8').strip()
         except Exception as e:
             logger.error(f"Pastebin upload failed: {e}")
             return "Error: Pastebin service unavailable."
@@ -216,7 +224,7 @@ class Blacklist(callbacks.Plugin):
                          name=f"auto_unban_{channel}_{mask}", 
                          args=(irc, channel, mask, True)) # True = Apaga tudo no fim
         
-        irc.reply(f"Ban of {minutes}m scheduled for {mask}.")
+        irc.replySuccess()
 
     timer = wrap(timer, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
         
@@ -271,7 +279,7 @@ class Blacklist(callbacks.Plugin):
             full_text += entry + "\n"
 
         if ban_count > max_inline:
-            url = self._createPastebin(full_text)
+            url = self._createPastebin(channel, full_text)
             irc.reply(f"Ban list too large ({ban_count} entries). View here: {url}")
         else:
             irc.reply(" | ".join(output_list))
@@ -297,6 +305,8 @@ class Blacklist(callbacks.Plugin):
         c_lower = channel.lower()
 
         if mode_change == '+b':
+            if not self.registryValue('addManualBans', channel):
+                return
             with self._db_lock:
                 exists = c_lower in self.db and mask in self.db[c_lower]
             

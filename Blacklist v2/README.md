@@ -89,3 +89,24 @@ supybot.plugins.Blacklist.banReason: User has been banned from the channel.
 
 
 Note: I'm having some issues with the `phost` masks where a `p` is added to the mask. I'll ask for a fix if I see the user again. (This is probably fixed with commit [1804a3d](https://github.com/TehPeGaSuS/supy-plugins/commit/1804a3d8b9307c46317a516b4091d3c32749ba63))
+
+```
+###
+# URL of the paste service for large ban lists.
+# Must accept multipart/form-data POST and return a plain URL.
+#
+# Default value: https://filehost.0bin.xyz/
+###
+supybot.plugins.Blacklist.pastebinUrl: https://filehost.0bin.xyz/
+```
+
+```
+###
+# Form field name expected by the paste service.
+# Use 'file' for single_php_filehost / 0x0-style services.
+# Use 'content' for dpaste.com (also append .txt to the returned URL manually).
+#
+# Default value: file
+###
+supybot.plugins.Blacklist.pastebinField: file
+```

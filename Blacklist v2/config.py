@@ -76,4 +76,13 @@ conf.registerChannelValue(Blacklist, 'banReason',
 conf.registerChannelValue(Blacklist, 'addManualBans',
         registry.Boolean(True, """Sets whether to watch for channel bans directly added by users (not using the bot) to the database."""))
 
+conf.registerChannelValue(Blacklist, 'pastebinUrl',
+        registry.String('https://filehost.0bin.xyz/', """URL of the paste service to use when the ban list is too large to display inline.
+        Must accept multipart/form-data POST and return a plain URL in the response body.
+        Examples: https://filehost.0bin.xyz/ (default), https://dpaste.com/api/v2/ (field=content, adds .txt to URL)."""))
+
+conf.registerChannelValue(Blacklist, 'pastebinField',
+        registry.String('file', """The form field name expected by the paste service.
+        Use 'file' for single_php_filehost and 0x0-style services, 'content' for dpaste.com."""))
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:
