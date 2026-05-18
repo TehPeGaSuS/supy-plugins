@@ -86,6 +86,7 @@ Banmask types:
 supybot.plugins.Blacklist.banReason: User has been banned from the channel.
 ```
 
+Pastebin configuration:
 ```
 ###
 # URL of the paste service for large ban lists.
