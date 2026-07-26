@@ -2,12 +2,11 @@ import json
 import os
 import time
 import threading
-import re
+import fnmatch
 import logging
 import urllib.request
-import urllib.parse
 from supybot.commands import *
-from supybot import callbacks, conf, ircmsgs, ircutils, schedule
+from supybot import callbacks, conf, ircmsgs, ircutils, schedule, world
 
 try:
     from supybot.i18n import PluginInternationalization
@@ -17,16 +16,18 @@ except ImportError:
 
 logger = logging.getLogger('supybot.plugins.Blacklist')
 
+
 class Blacklist(callbacks.Plugin):
-    """Manages channel security with a numbered blacklist and ID-based deletion."""
-    
+    """Manages channel security with a numbered blacklist and ID-based deletion,
+    plus an optional network-wide blacklist enforced across every channel."""
+
     banmasks = {
         0: '*!ident@host', 1: '*!*ident@host', 2: '*!*@host',
-        3: '*!*ident@*.phost', 4: '*!*@*.phost', 5: 'nick!ident@host',
-        6: 'nick!*ident@host', 7: 'nick!*@host', 8: 'nick!*ident@*.phost',
-        9: 'nick!*@*.phost', 10: '*!ident@*'
+        3: '*!*ident@*.host', 4: '*!*@*.host', 5: 'nick!ident@host',
+        6: 'nick!*ident@host', 7: 'nick!*@host', 8: 'nick!*ident@*.host',
+        9: 'nick!*@*.host', 10: '*!ident@*'
     }
-    
+
     threaded = True
 
     def __init__(self, irc):
@@ -35,6 +36,16 @@ class Blacklist(callbacks.Plugin):
         self._db_lock = threading.RLock()
         self.db = {}
         self._initdb()
+        # Nested command groups (self.exempt / self.net) are instantiated by
+        # BasePlugin.__init__ above but have no reference to this instance's
+        # DB, so we hand them one explicitly.
+        self.exempt.plugin = self
+        self.net.plugin = self
+        self._reschedule_all(irc)
+
+    # -----------------------------------------------------------------
+    # DB persistence, schema & migration
+    # -----------------------------------------------------------------
 
     def _initdb(self):
         try:
@@ -44,9 +55,51 @@ class Blacklist(callbacks.Plugin):
                 with open(self.dbfile, 'r') as f:
                     self.db = json.load(f)
             else:
-                self._dbWrite()
+                self.db = {}
+            self._migrate_legacy()
+            self.db.setdefault('channels', {})
+            self.db.setdefault('net', {'next_id': 1, 'entries': {}, 'exempt': []})
+            self.db['net'].setdefault('entries', {})
+            self.db['net'].setdefault('exempt', [])
+            self.db['net'].setdefault('next_id', 1)
+            for bucket in self.db['channels'].values():
+                bucket.setdefault('exempt', [])
+            self._dbWrite()
         except Exception as e:
             logger.error(f"Error loading DB: {e}")
+            self.db = {'channels': {}, 'net': {'next_id': 1, 'entries': {}, 'exempt': []}}
+
+    def _migrate_legacy(self):
+        """Converts the old {channel: {mask: [adder, created_at, reason,
+        is_bot_cmd, expiry_at]}} schema (positional IDs, no net list, no
+        exempt list) into the current schema with stable per-entry IDs."""
+        if not self.db or 'channels' in self.db or 'net' in self.db:
+            return
+        old = self.db
+        migrated = {}
+        for chan, masks in old.items():
+            entries = {}
+            next_id = 1
+            if not isinstance(masks, dict):
+                continue
+            for mask, data in masks.items():
+                if not isinstance(data, list):
+                    continue
+                adder = data[0] if len(data) > 0 else 'unknown'
+                created_at = data[1] if len(data) > 1 else time.time()
+                reason = data[2] if len(data) > 2 else ''
+                is_bot_cmd = data[3] if len(data) > 3 else False
+                expire_at = data[4] if len(data) > 4 else None
+                expire_mode = 'full' if expire_at else None
+                entries[mask] = {
+                    'id': next_id, 'adder': adder, 'created_at': created_at,
+                    'reason': reason, 'is_bot_cmd': is_bot_cmd,
+                    'expire_at': expire_at, 'expire_mode': expire_mode,
+                }
+                next_id += 1
+            migrated[chan] = {'next_id': next_id, 'entries': entries, 'exempt': []}
+        self.db = {'channels': migrated, 'net': {'next_id': 1, 'entries': {}, 'exempt': []}}
+        logger.info("Blacklist: migrated legacy database to the new schema.")
 
     def _dbWrite(self):
         with self._db_lock:
@@ -56,6 +109,212 @@ class Blacklist(callbacks.Plugin):
             except Exception as e:
                 logger.error(f"Error writing DB: {e}")
 
+    # -----------------------------------------------------------------
+    # Bucket / entry helpers
+    # -----------------------------------------------------------------
+
+    def _get_channel_bucket(self, channel):
+        return self.db['channels'].get(channel.lower())
+
+    def _ensure_channel_bucket(self, channel):
+        c_lower = channel.lower()
+        with self._db_lock:
+            bucket = self.db['channels'].setdefault(
+                c_lower, {'next_id': 1, 'entries': {}, 'exempt': []})
+        return bucket
+
+    def _resolve(self, bucket, token):
+        """Resolves a mask-or-ID user token to the actual mask key in bucket."""
+        if not bucket:
+            return None
+        if token.isdigit():
+            idx = int(token)
+            for m, e in bucket['entries'].items():
+                if e['id'] == idx:
+                    return m
+            return None
+        return token if token in bucket['entries'] else None
+
+    def _search_bucket(self, bucket, pattern):
+        if not bucket:
+            return []
+        needle = pattern.lower()
+        with self._db_lock:
+            items = list(bucket['entries'].items())
+        out = []
+        for m, e in items:
+            haystack = f"{m} {e['adder']} {e['reason']}".lower()
+            if needle in haystack or fnmatch.fnmatch(m.lower(), f"*{needle}*"):
+                out.append(f"[{e['id']}] {m}: {e['reason'] or '(no reason)'}")
+        return out
+
+    def _internal_add(self, channel, mask, adder, reason, is_bot_cmd=False,
+                       expire_at=None, expire_mode=None):
+        c_lower = channel.lower()
+        with self._db_lock:
+            bucket = self.db['channels'].setdefault(
+                c_lower, {'next_id': 1, 'entries': {}, 'exempt': []})
+            existing = bucket['entries'].get(mask)
+            entry_id = existing['id'] if existing else bucket['next_id']
+            if not existing:
+                bucket['next_id'] += 1
+            bucket['entries'][mask] = {
+                'id': entry_id, 'adder': adder, 'created_at': time.time(),
+                'reason': reason, 'is_bot_cmd': is_bot_cmd,
+                'expire_at': expire_at, 'expire_mode': expire_mode,
+            }
+            self._dbWrite()
+        return entry_id
+
+    def _internal_del(self, channel, mask):
+        c_lower = channel.lower()
+        with self._db_lock:
+            bucket = self.db['channels'].get(c_lower)
+            if bucket and mask in bucket['entries']:
+                del bucket['entries'][mask]
+                self._dbWrite()
+                return True
+        return False
+
+    def _net_add(self, mask, adder, reason, expire_at=None, expire_mode=None):
+        with self._db_lock:
+            bucket = self.db['net']
+            existing = bucket['entries'].get(mask)
+            entry_id = existing['id'] if existing else bucket['next_id']
+            if not existing:
+                bucket['next_id'] += 1
+            bucket['entries'][mask] = {
+                'id': entry_id, 'adder': adder, 'created_at': time.time(),
+                'reason': reason, 'is_bot_cmd': True,
+                'expire_at': expire_at, 'expire_mode': expire_mode,
+            }
+            self._dbWrite()
+        return entry_id
+
+    # -----------------------------------------------------------------
+    # Exemption checks
+    # -----------------------------------------------------------------
+
+    def _matchesAny(self, patterns, hostmask):
+        # NB: supybot.commands defines its own `any` (a wrap-spec converter),
+        # which shadows the builtin via our `from supybot.commands import *`.
+        # Spell this out as a loop instead of relying on builtin any().
+        for p in patterns:
+            if ircutils.hostmaskPatternEqual(p, hostmask):
+                return True
+        return False
+
+    def _isExempt(self, channel, hostmask):
+        if not hostmask:
+            return False
+        with self._db_lock:
+            patterns = list(self.db['net'].get('exempt', []))
+            bucket = self.db['channels'].get(channel.lower())
+            if bucket:
+                patterns += list(bucket.get('exempt', []))
+        return self._matchesAny(patterns, hostmask)
+
+    def _isExemptNet(self, hostmask):
+        if not hostmask:
+            return False
+        with self._db_lock:
+            patterns = list(self.db['net'].get('exempt', []))
+        return self._matchesAny(patterns, hostmask)
+
+    def _resolveHostmask(self, irc, target):
+        """Best-effort resolution of a nick or mask argument to a concrete
+        hostmask, for matching against exempt patterns."""
+        if ircutils.isUserHostmask(target):
+            return target
+        try:
+            return irc.state.nickToHostmask(target)
+        except KeyError:
+            return None
+
+    # -----------------------------------------------------------------
+    # Expiry scheduling
+    # -----------------------------------------------------------------
+
+    def _event_name(self, scope, channel, entry_id):
+        ch = channel.lower() if channel else '-'
+        return f"Blacklist:{scope}:{ch}:{entry_id}"
+
+    def _schedule_expiry(self, network, scope, channel, entry_id, expire_at, mode):
+        if not expire_at or not mode:
+            return
+        name = self._event_name(scope, channel, entry_id)
+        try:
+            schedule.addEvent(self._fire_expiry, expire_at, name=name,
+                               args=(network, scope, channel, entry_id, mode))
+        except AssertionError:
+            # Already scheduled (e.g. plugin reload); leave the existing timer.
+            pass
+
+    def _unschedule(self, scope, channel, entry_id):
+        name = self._event_name(scope, channel, entry_id)
+        try:
+            schedule.removeEvent(name)
+        except KeyError:
+            pass
+
+    def _reschedule_all(self, irc):
+        """Restores expiry timers lost across a bot restart. The DB is the
+        source of truth for expire_at/expire_mode; schedule.addEvent() only
+        lives in memory, so every load must repopulate it."""
+        now = time.time()
+        network = irc.network
+        for c_lower, bucket in list(self.db['channels'].items()):
+            for mask, e in list(bucket['entries'].items()):
+                expire_at = e.get('expire_at')
+                mode = e.get('expire_mode')
+                if not expire_at or not mode:
+                    continue
+                if expire_at <= now:
+                    self._fire_expiry(network, 'channel', c_lower, e['id'], mode)
+                else:
+                    self._schedule_expiry(network, 'channel', c_lower, e['id'], expire_at, mode)
+        for mask, e in list(self.db['net']['entries'].items()):
+            expire_at = e.get('expire_at')
+            mode = e.get('expire_mode')
+            if not expire_at or not mode:
+                continue
+            if expire_at <= now:
+                self._fire_expiry(network, 'net', None, e['id'], mode)
+            else:
+                self._schedule_expiry(network, 'net', None, e['id'], expire_at, mode)
+
+    def _fire_expiry(self, network, scope, channel, entry_id, mode):
+        irc = world.getIrc(network) if network else None
+        if irc is None and world.ircs:
+            irc = world.ircs[0]
+
+        mask = None
+        with self._db_lock:
+            if scope == 'channel':
+                bucket = self.db['channels'].get(channel.lower()) if channel else None
+            else:
+                bucket = self.db['net']
+            if bucket:
+                for m, e in bucket['entries'].items():
+                    if e['id'] == entry_id:
+                        mask = m
+                        break
+                if mask and mode == 'full':
+                    del bucket['entries'][mask]
+                    self._dbWrite()
+
+        if not mask or irc is None:
+            return
+        if scope == 'channel':
+            irc.queueMsg(ircmsgs.unban(channel, mask))
+        else:
+            for chan in list(irc.state.channels.keys()):
+                irc.queueMsg(ircmsgs.unban(chan, mask))
+
+    # -----------------------------------------------------------------
+    # Mask creation & pastebin
+    # -----------------------------------------------------------------
+
     def _createMask(self, irc, target, num):
         if ircutils.isUserHostmask(target): return target
         try:
@@ -64,6 +323,9 @@ class Blacklist(callbacks.Plugin):
             template = self.banmasks.get(num, self.banmasks[2])
             return template.replace("nick", nick).replace("ident", ident).replace("host", host)
         except: return None
+
+    def _createNetMask(self, irc, target):
+        return self._createMask(irc, target, self.registryValue('netMaskNumber'))
 
     def _createPastebin(self, channel, content):
         """Uploads content to the configured paste service."""
@@ -85,37 +347,29 @@ class Blacklist(callbacks.Plugin):
         except Exception as e:
             logger.error(f"Pastebin upload failed: {e}")
             return "Error: Pastebin service unavailable."
-    
-    def _internal_add(self, channel, mask, adder, reason, is_bot_cmd=False, expiry_at=None):
-        """Grava na DB com a flag is_bot_cmd e o timestamp de expiração."""
-        c_lower = channel.lower()
-        with self._db_lock:
-            if c_lower not in self.db: self.db[c_lower] = {}
-            # Agora guardamos 5 elementos: adder, created_at, reason, is_bot_cmd, expiry_at
-            self.db[c_lower][mask] = [adder, time.time(), reason, is_bot_cmd, expiry_at]
-            self._dbWrite()
 
-    def _internal_del(self, channel, mask):
-        """Remove da DB com segurança."""
-        c_lower = channel.lower()
-        with self._db_lock:
-            if c_lower in self.db and mask in self.db[c_lower]:
-                del self.db[c_lower][mask]
-                if not self.db[c_lower]:
-                    del self.db[c_lower]
-                self._dbWrite()
-                return True
-        return False
-        
-    def _timer_expire(self, irc, channel, mask, remove_from_db=True):
-        """Remove o ban do IRC. Remove da DB apenas se remove_from_db for True."""
-        if remove_from_db:
-            if self._internal_del(channel, mask):
-                logger.info(f"Full expiry: {mask} removed from IRC and DB in {channel}")
-        else:
-            logger.info(f"IRC cleanup: {mask} removed from IRC list but KEPT in bot DB for {channel}")
-        
-        irc.queueMsg(ircmsgs.unban(channel, mask))
+    def _enforceNet(self, irc, mask, reason, nick_hint=None):
+        """Applies a network-blacklist mask across every channel that has
+        enforceGlobal on, banning it and kicking any matching nick found."""
+        for chan in list(irc.state.channels.keys()):
+            if not self.registryValue('enforceGlobal', chan):
+                continue
+            irc.queueMsg(ircmsgs.ban(chan, mask))
+            chan_state = irc.state.channels[chan]
+            if nick_hint and nick_hint in chan_state.users:
+                irc.queueMsg(ircmsgs.kick(chan, nick_hint, reason))
+                continue
+            for nick in list(chan_state.users):
+                try:
+                    hm = irc.state.nickToHostmask(nick)
+                except KeyError:
+                    continue
+                if ircutils.hostmaskPatternEqual(mask, hm):
+                    irc.queueMsg(ircmsgs.kick(chan, nick, reason))
+
+    # -----------------------------------------------------------------
+    # Commands
+    # -----------------------------------------------------------------
 
     def bantype(self, irc, msg, args):
         """Lists available mask types."""
@@ -133,26 +387,26 @@ class Blacklist(callbacks.Plugin):
         if not mask:
             irc.error("Could not create hostmask.")
             return
+        real_hostmask = self._resolveHostmask(irc, target)
+        if self._isExempt(channel, real_hostmask or mask):
+            irc.error("That hostmask is exempt from the blacklist.")
+            return
         reason = reason or self.registryValue('banReason', channel)
-        
-        # Calcula o timestamp de expiração para a DB
+
         expiry = self.registryValue('banlistExpiry', channel)
-        expiry_at = time.time() + (expiry * 60) if expiry > 0 else None
-        
-        # Grava na DB como bot_cmd=True
-        self._internal_add(channel, mask, msg.nick, reason, is_bot_cmd=True)
+        expire_at = time.time() + (expiry * 60) if expiry > 0 else None
+        mode = 'irc_only' if expire_at else None
+
+        entry_id = self._internal_add(channel, mask, msg.nick, reason, is_bot_cmd=True,
+                                       expire_at=expire_at, expire_mode=mode)
         irc.queueMsg(ircmsgs.ban(channel, mask))
-        
+
         if not ircutils.isUserHostmask(target) and target in irc.state.channels[channel].users:
             irc.queueMsg(ircmsgs.kick(channel, target, reason))
 
-        # Agenda a limpeza do +b no IRC (usa expiry, e False para manter na DB)
-        expiry = self.registryValue('banlistExpiry', channel)
-        if expiry > 0:
-            schedule.addEvent(self._timer_expire, time.time() + (expiry * 60), 
-                             name=f"irc_cleanup_{channel}_{mask}", 
-                             args=(irc, channel, mask, False)) 
-            
+        if expire_at:
+            self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, mode)
+
         irc.replySuccess()
     add = wrap(add, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', optional('text')])
 
@@ -160,33 +414,17 @@ class Blacklist(callbacks.Plugin):
         """[<channel>] <mask|ID>
         Removes a mask by its string or its ID number from the list.
         """
-        c_lower = channel.lower()
-        mask_to_del = None
-
-        if target.isdigit():
-            idx = int(target)
-            with self._db_lock:
-                if c_lower in self.db:
-                    masks = list(self.db[c_lower].keys())
-                    if 1 <= idx <= len(masks):
-                        mask_to_del = masks[idx-1]
-                    else:
-                        irc.error(f"Invalid ID. Range is 1 to {len(masks)}.")
-                        return
-        else:
-            mask_to_del = target
-
-        if mask_to_del and self._internal_del(channel, mask_to_del):
-            irc.queueMsg(ircmsgs.unban(channel, mask_to_del))
-            # Tenta remover TODOS os tipos de agendamento possíveis
-            for prefix in ['auto_unban', 'irc_cleanup', 'expire']:
-                try:
-                    schedule.removeEvent(f"{prefix}_{channel}_{mask_to_del}")
-                except KeyError:
-                    pass
-            irc.replySuccess()
-        else:
+        bucket = self._get_channel_bucket(channel)
+        mask = self._resolve(bucket, target)
+        if not mask:
             irc.error(f"Ban not found for: {target}")
+            return
+
+        entry_id = bucket['entries'][mask]['id']
+        self._internal_del(channel, mask)
+        irc.queueMsg(ircmsgs.unban(channel, mask))
+        self._unschedule('channel', channel, entry_id)
+        irc.replySuccess()
     delete = wrap(delete, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
 
     def timer(self, irc, msg, args, channel, target, minutes, reason):
@@ -197,84 +435,157 @@ class Blacklist(callbacks.Plugin):
         if not mask:
             irc.error("Could not create hostmask.")
             return
+        real_hostmask = self._resolveHostmask(irc, target)
+        if self._isExempt(channel, real_hostmask or mask):
+            irc.error("That hostmask is exempt from the blacklist.")
+            return
 
-        # Se não deres minutos no IRC, ele vai buscar ao banTimerExpiry
         if minutes is None:
             minutes = self.registryValue('banTimerExpiry', channel)
             if minutes <= 0:
                 irc.error("Please specify minutes or set a default banTimerExpiry > 0.")
                 return
 
-        # Para a DB guardamos vazio (limpa a list), para o kick usamos o padrão
         db_reason = reason or ""
         kick_reason = reason or "Temporary ban"
-        
-        expiry_at = time.time() + (minutes * 60)
-        
-        # is_bot_cmd=True para o timer
-        self._internal_add(channel, mask, msg.nick, db_reason, is_bot_cmd=True, expiry_at=expiry_at)
+        expire_at = time.time() + (minutes * 60)
+
+        entry_id = self._internal_add(channel, mask, msg.nick, db_reason, is_bot_cmd=True,
+                                       expire_at=expire_at, expire_mode='full')
         irc.queueMsg(ircmsgs.ban(channel, mask))
-        
-        # Kick imediato com a razão (vê "Temporary ban" se não escreveres nada)
+
         if not ircutils.isUserHostmask(target) and target in irc.state.channels[channel].users:
             irc.queueMsg(ircmsgs.kick(channel, target, kick_reason))
-            
-        # Agenda a remoção TOTAL (IRC + DB)
-        schedule.addEvent(self._timer_expire, expiry_at, 
-                         name=f"auto_unban_{channel}_{mask}", 
-                         args=(irc, channel, mask, True)) # True = Apaga tudo no fim
-        
-        irc.replySuccess()
 
+        self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
+        irc.replySuccess()
     timer = wrap(timer, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
-        
+
+    def reason(self, irc, msg, args, channel, target, newreason):
+        """[<channel>] <mask|ID> <reason>
+        Updates the stored reason for an existing blacklist entry.
+        """
+        bucket = self._get_channel_bucket(channel)
+        mask = self._resolve(bucket, target)
+        if not mask:
+            irc.error(f"Ban not found for: {target}")
+            return
+        with self._db_lock:
+            bucket['entries'][mask]['reason'] = newreason
+            self._dbWrite()
+        irc.replySuccess()
+    reason = wrap(reason, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', 'text'])
+
+    def extend(self, irc, msg, args, channel, target, minutes):
+        """[<channel>] <mask|ID> <minutes>
+        Sets/extends the expiry of a blacklist entry to <minutes> from now.
+        The mask is fully removed (IRC ban lifted + entry deleted) when it expires.
+        """
+        bucket = self._get_channel_bucket(channel)
+        mask = self._resolve(bucket, target)
+        if not mask:
+            irc.error(f"Ban not found for: {target}")
+            return
+
+        with self._db_lock:
+            entry = bucket['entries'][mask]
+            entry_id = entry['id']
+            expire_at = time.time() + (minutes * 60)
+            entry['expire_at'] = expire_at
+            entry['expire_mode'] = 'full'
+            self._dbWrite()
+
+        self._unschedule('channel', channel, entry_id)
+        self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
+        irc.reply(f"Expiry for {mask} set to {minutes} minutes from now.")
+    extend = wrap(extend, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', 'positiveInt'])
+
+    def search(self, irc, msg, args, channel, pattern):
+        """[<channel>] <pattern>
+        Searches the channel's blacklist for entries whose mask, adder or
+        reason contain <pattern> (case-insensitive).
+        """
+        bucket = self._get_channel_bucket(channel)
+        results = self._search_bucket(bucket, pattern)
+        irc.reply(" | ".join(results) if results else "No matching entries found.")
+    search = wrap(search, [('checkChannelCapability', 'op'), 'channel', 'text'])
+
+    def clear(self, irc, msg, args, channel, confirm):
+        """<channel> confirm
+        Wipes the ENTIRE blacklist for <channel> and lifts every ban it applied.
+        You must literally pass the word "confirm".
+        """
+        if confirm.lower() != 'confirm':
+            irc.error('This removes every entry for the channel. Re-run as: clear <channel> confirm')
+            return
+
+        bucket = self._get_channel_bucket(channel)
+        with self._db_lock:
+            if not bucket or not bucket['entries']:
+                irc.reply("List is already empty.")
+                return
+            masks = list(bucket['entries'].items())
+            bucket['entries'] = {}
+            self._dbWrite()
+
+        for mask, e in masks:
+            irc.queueMsg(ircmsgs.unban(channel, mask))
+            self._unschedule('channel', channel, e['id'])
+        irc.reply(f"Cleared {len(masks)} entries from {channel}.")
+    clear = wrap(clear, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
+
     def stats(self, irc, msg, args, channel):
         """[<channel>]"""
-        c_lower = channel.lower()
-        count = len(self.db.get(c_lower, {}))
-        irc.reply(f"Channel {channel} has {count} bans in the blacklist.")
+        bucket = self._get_channel_bucket(channel)
+        count = len(bucket['entries']) if bucket else 0
+        net_count = len(self.db['net']['entries'])
+        irc.reply(f"Channel {channel} has {count} bans in the blacklist "
+                  f"({net_count} in the network blacklist).")
     stats = wrap(stats, [('checkChannelCapability', 'op'), 'channel'])
 
     def list(self, irc, msg, args, channel):
         """[<channel>]
         Lists all blacklisted masks with elapsed and remaining time.
         """
-        c_lower = channel.lower()
-        if c_lower not in self.db or not self.db[c_lower]:
+        bucket = self._get_channel_bucket(channel)
+        with self._db_lock:
+            items = list(bucket['entries'].items()) if bucket else []
+        if not items:
             irc.reply("List is empty.")
             return
 
-        ban_count = len(self.db[c_lower])
+        ban_count = len(items)
         max_inline = self.registryValue('maxInlineEntries', channel) or 5
         output_list = []
         full_text = f"Numbered Ban List for {channel} ({ban_count} entries):\n" + "="*45 + "\n"
         now = time.time()
-        
-        for i, (m, data) in enumerate(self.db[c_lower].items(), 1):
-            adder = data[0]
-            created_at = data[1]
-            reason = data[2]
-            expiry_at = data[4] if len(data) > 4 else None
-            
+
+        for m, e in items:
+            entry_id = e['id']
+            adder = e['adder']
+            created_at = e['created_at']
+            reason = e['reason']
+            expire_at = e.get('expire_at')
+            expire_mode = e.get('expire_mode')
+
             elapsed = int(now - created_at) // 60
             remaining_str = ""
-            
-            if expiry_at:
-                rem = int(expiry_at - now) // 60
+
+            if expire_at:
+                rem = int(expire_at - now) // 60
                 if rem > 0:
-                    remaining_str = f" [{rem}m left]"
+                    tag = "IRC ban lifts" if expire_mode == 'irc_only' else "expires"
+                    remaining_str = f" [{tag} in {rem}m]"
                 else:
                     remaining_str = " [expiring...]"
-            
-            # Lógica de exibição da razão: 
-            # Oculta se for vazia, "Temporary ban" ou "*manual ban"
+
             reason_display = ""
             if reason and reason not in ["Temporary ban", "*manual ban", ""]:
                 reason_display = f": {reason}"
             elif reason == "*manual ban":
                 reason_display = " [manual]"
-            
-            entry = f"[{i}] {m} ({elapsed}m ago by {adder}){remaining_str}{reason_display}"
+
+            entry = f"[{entry_id}] {m} ({elapsed}m ago by {adder}){remaining_str}{reason_display}"
             output_list.append(entry)
             full_text += entry + "\n"
 
@@ -283,9 +594,9 @@ class Blacklist(callbacks.Plugin):
             irc.reply(f"Ban list too large ({ban_count} entries). View here: {url}")
         else:
             irc.reply(" | ".join(output_list))
-            
+
     list = wrap(list, [('checkChannelCapability', 'op'), 'channel'])
-    
+
     def kick(self, irc, msg, args, channel, nick, reason):
         """[<channel>] <nick> [<reason>]"""
         if nick not in irc.state.channels[channel].users:
@@ -295,64 +606,302 @@ class Blacklist(callbacks.Plugin):
         irc.queueMsg(ircmsgs.kick(channel, nick, reason))
     kick = wrap(kick, [('checkChannelCapability', 'op'), 'channel', 'nick', optional('text')])
 
+    # -----------------------------------------------------------------
+    # Per-channel exemption list
+    # -----------------------------------------------------------------
+
+    class exempt(callbacks.Commands):
+        """Manages hostmasks that this channel's blacklist will never touch."""
+
+        plugin = None
+
+        def add(self, irc, msg, args, channel, mask):
+            """[<channel>] <hostmask>
+            Exempts <hostmask> from this channel's blacklist: `add`, `timer`
+            and auto-detected manual bans will refuse to blacklist a real
+            hostmask matching it.
+            """
+            if not ircutils.isUserHostmask(mask):
+                irc.error("Must be a nick!user@host mask (wildcards allowed).")
+                return
+            p = self.plugin
+            with p._db_lock:
+                bucket = p._ensure_channel_bucket(channel)
+                if mask not in bucket['exempt']:
+                    bucket['exempt'].append(mask)
+                    p._dbWrite()
+            irc.replySuccess()
+        add = wrap(add, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
+
+        def remove(self, irc, msg, args, channel, mask):
+            """[<channel>] <hostmask>"""
+            p = self.plugin
+            with p._db_lock:
+                bucket = p._get_channel_bucket(channel)
+                if bucket and mask in bucket['exempt']:
+                    bucket['exempt'].remove(mask)
+                    p._dbWrite()
+                    irc.replySuccess()
+                    return
+            irc.error("That mask isn't on this channel's exempt list.")
+        remove = wrap(remove, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
+
+        def list(self, irc, msg, args, channel):
+            """[<channel>]"""
+            p = self.plugin
+            bucket = p._get_channel_bucket(channel)
+            masks = bucket['exempt'] if bucket else []
+            irc.reply(", ".join(masks) if masks else "No exempt masks for this channel.")
+        list = wrap(list, [('checkChannelCapability', 'op'), 'channel'])
+
+    # -----------------------------------------------------------------
+    # Network-wide blacklist
+    # -----------------------------------------------------------------
+
+    class net(callbacks.Commands):
+        """The network-wide blacklist: entries here are enforced in every
+        channel currently enforcing it (see the enforceGlobal config)."""
+
+        plugin = None
+
+        def add(self, irc, msg, args, target, reason):
+            """<nick|hostmask> [<reason>]
+            Adds <nick|hostmask> to the network-wide blacklist and immediately
+            bans/kicks it in every channel currently enforcing it.
+            """
+            p = self.plugin
+            mask = p._createNetMask(irc, target)
+            if not mask:
+                irc.error("Could not create hostmask.")
+                return
+            real_hostmask = p._resolveHostmask(irc, target)
+            if p._isExemptNet(real_hostmask or mask):
+                irc.error("That hostmask is exempt from the network blacklist.")
+                return
+            reason = reason or "Network-wide ban."
+            p._net_add(mask, msg.nick, reason)
+            nick_hint = target if not ircutils.isUserHostmask(target) else None
+            p._enforceNet(irc, mask, reason, nick_hint)
+            irc.replySuccess()
+        add = wrap(add, ['admin', 'somethingWithoutSpaces', optional('text')])
+
+        def delete(self, irc, msg, args, target):
+            """<mask|ID>"""
+            p = self.plugin
+            bucket = p.db['net']
+            mask = p._resolve(bucket, target)
+            if not mask:
+                irc.error(f"Not found in the network blacklist: {target}")
+                return
+            entry_id = bucket['entries'][mask]['id']
+            with p._db_lock:
+                del bucket['entries'][mask]
+                p._dbWrite()
+            for chan in list(irc.state.channels.keys()):
+                irc.queueMsg(ircmsgs.unban(chan, mask))
+            p._unschedule('net', None, entry_id)
+            irc.replySuccess()
+        delete = wrap(delete, ['admin', 'somethingWithoutSpaces'])
+
+        def timer(self, irc, msg, args, target, minutes, reason):
+            """<nick|hostmask> [<minutes>] [<reason>]
+            Applies a temporary network-wide ban. If minutes are not provided,
+            uses netTimerExpiry.
+            """
+            p = self.plugin
+            mask = p._createNetMask(irc, target)
+            if not mask:
+                irc.error("Could not create hostmask.")
+                return
+            real_hostmask = p._resolveHostmask(irc, target)
+            if p._isExemptNet(real_hostmask or mask):
+                irc.error("That hostmask is exempt from the network blacklist.")
+                return
+
+            if minutes is None:
+                minutes = p.registryValue('netTimerExpiry')
+                if minutes <= 0:
+                    irc.error("Please specify minutes or set netTimerExpiry > 0.")
+                    return
+
+            reason = reason or "Temporary network-wide ban."
+            expire_at = time.time() + (minutes * 60)
+            entry_id = p._net_add(mask, msg.nick, reason, expire_at=expire_at, expire_mode='full')
+            nick_hint = target if not ircutils.isUserHostmask(target) else None
+            p._enforceNet(irc, mask, reason, nick_hint)
+            p._schedule_expiry(irc.network, 'net', None, entry_id, expire_at, 'full')
+            irc.replySuccess()
+        timer = wrap(timer, ['admin', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
+
+        def list(self, irc, msg, args):
+            """takes no arguments"""
+            p = self.plugin
+            with p._db_lock:
+                items = list(p.db['net']['entries'].items())
+            if not items:
+                irc.reply("Network blacklist is empty.")
+                return
+
+            now = time.time()
+            out = []
+            full_text = f"Network Ban List ({len(items)} entries):\n" + "="*45 + "\n"
+            for m, e in items:
+                elapsed = int(now - e['created_at']) // 60
+                remaining_str = ""
+                if e.get('expire_at'):
+                    rem = int(e['expire_at'] - now) // 60
+                    remaining_str = f" [{rem}m left]" if rem > 0 else " [expiring...]"
+                entry = f"[{e['id']}] {m} ({elapsed}m ago by {e['adder']}){remaining_str}: {e['reason']}"
+                out.append(entry)
+                full_text += entry + "\n"
+
+            max_inline = p.registryValue('maxInlineEntries', None) or 5
+            if len(items) > max_inline:
+                url = p._createPastebin(None, full_text)
+                irc.reply(f"Network ban list too large ({len(items)} entries). View here: {url}")
+            else:
+                irc.reply(" | ".join(out))
+        list = wrap(list, ['admin'])
+
+        def search(self, irc, msg, args, pattern):
+            """<pattern>"""
+            p = self.plugin
+            results = p._search_bucket(p.db['net'], pattern)
+            irc.reply(" | ".join(results) if results else "No matching entries found.")
+        search = wrap(search, ['admin', 'text'])
+
+        def clear(self, irc, msg, args, confirm):
+            """confirm
+            Wipes the ENTIRE network blacklist. You must literally pass the
+            word "confirm".
+            """
+            p = self.plugin
+            if confirm.lower() != 'confirm':
+                irc.error('This removes every network-wide entry. Re-run as: net clear confirm')
+                return
+
+            bucket = p.db['net']
+            with p._db_lock:
+                if not bucket['entries']:
+                    irc.reply("Network blacklist is already empty.")
+                    return
+                masks = list(bucket['entries'].items())
+                bucket['entries'] = {}
+                p._dbWrite()
+
+            for chan in list(irc.state.channels.keys()):
+                for mask, e in masks:
+                    irc.queueMsg(ircmsgs.unban(chan, mask))
+            for mask, e in masks:
+                p._unschedule('net', None, e['id'])
+            irc.reply(f"Cleared {len(masks)} entries from the network blacklist.")
+        clear = wrap(clear, ['admin', 'somethingWithoutSpaces'])
+
+        def exemptadd(self, irc, msg, args, mask):
+            """<hostmask>"""
+            p = self.plugin
+            if not ircutils.isUserHostmask(mask):
+                irc.error("Must be a nick!user@host mask (wildcards allowed).")
+                return
+            with p._db_lock:
+                if mask not in p.db['net']['exempt']:
+                    p.db['net']['exempt'].append(mask)
+                    p._dbWrite()
+            irc.replySuccess()
+        exemptadd = wrap(exemptadd, ['admin', 'somethingWithoutSpaces'])
+
+        def exemptremove(self, irc, msg, args, mask):
+            """<hostmask>"""
+            p = self.plugin
+            with p._db_lock:
+                if mask in p.db['net']['exempt']:
+                    p.db['net']['exempt'].remove(mask)
+                    p._dbWrite()
+                    irc.replySuccess()
+                    return
+            irc.error("That mask isn't on the network exempt list.")
+        exemptremove = wrap(exemptremove, ['admin', 'somethingWithoutSpaces'])
+
+        def exemptlist(self, irc, msg, args):
+            """takes no arguments"""
+            p = self.plugin
+            masks = p.db['net']['exempt']
+            irc.reply(", ".join(masks) if masks else "No exempt masks on the network blacklist.")
+        exemptlist = wrap(exemptlist, ['admin'])
+
+    # -----------------------------------------------------------------
+    # IRC event handlers
+    # -----------------------------------------------------------------
+
     def doMode(self, irc, msg):
-        """Sincroniza a DB com bans/unbans manuais no IRC."""
+        """Syncs the DB with manual bans/unbans made directly on IRC."""
         channel = msg.args[0]
-        if len(msg.args) < 3 or ircutils.strEqual(msg.nick, irc.nick): 
+        if len(msg.args) < 3 or ircutils.strEqual(msg.nick, irc.nick):
             return
-            
+
         mode_change, mask = msg.args[1], msg.args[2]
         c_lower = channel.lower()
 
         if mode_change == '+b':
             if not self.registryValue('addManualBans', channel):
                 return
+            if self._isExempt(channel, mask):
+                return
             with self._db_lock:
-                exists = c_lower in self.db and mask in self.db[c_lower]
-            
+                bucket = self.db['channels'].get(c_lower)
+                exists = bucket is not None and mask in bucket['entries']
+
             if not exists:
                 expiry = self.registryValue('banlistExpiry', channel)
-                expiry_at = time.time() + (expiry * 60) if expiry > 0 else None
-                
-                self._internal_add(channel, mask, msg.nick, "*manual ban", is_bot_cmd=False, expiry_at=expiry_at)
-                if expiry > 0:
-                    schedule.addEvent(self._timer_expire, expiry_at, 
-                                     name=f"expire_{channel}_{mask}", 
-                                     args=(irc, channel, mask, True))
-        
+                expire_at = time.time() + (expiry * 60) if expiry > 0 else None
+                mode = 'full' if expire_at else None
+
+                entry_id = self._internal_add(channel, mask, msg.nick, "*manual ban",
+                                               is_bot_cmd=False, expire_at=expire_at,
+                                               expire_mode=mode)
+                if expire_at:
+                    self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, mode)
+
         elif mode_change == '-b':
             with self._db_lock:
-                entry = self.db.get(c_lower, {}).get(mask)
-                
+                bucket = self.db['channels'].get(c_lower)
+                entry = bucket['entries'].get(mask) if bucket else None
+
             if entry:
-                # Verificamos se foi um comando do bot (índice 3 na lista)
-                # Se for bot_cmd=True, NÃO apagamos da DB, apenas paramos os timers
-                is_bot_cmd = entry[3] if len(entry) > 3 else False
-                
-                if not is_bot_cmd:
+                # Bot-added blacklist entries are kept on disk even if manually
+                # unbanned on IRC (they'll be re-applied on next join);
+                # manually-added ones are dropped entirely.
+                if not entry['is_bot_cmd']:
                     self._internal_del(channel, mask)
                     logger.info(f"Manual unban: {mask} removed from DB (was manual ban)")
                 else:
                     logger.info(f"Manual unban: {mask} kept in DB (is bot blacklist entry)")
-
-            # Limpamos os timers de qualquer forma para não dar erro depois
-            for prefix in ['auto_unban', 'irc_cleanup', 'expire']:
-                try:
-                    schedule.removeEvent(f"{prefix}_{channel}_{mask}")
-                except KeyError:
-                    pass
+                self._unschedule('channel', channel, entry['id'])
 
     def doJoin(self, irc, msg):
-        if ircutils.strEqual(msg.nick, irc.nick): return
+        if ircutils.strEqual(msg.nick, irc.nick):
+            return
         channel = msg.args[0]
         c_lower = channel.lower()
-        enabled = self.registryValue('enabled', channel)
-        if enabled and c_lower in self.db:
-            for mask in self.db[c_lower]:
+
+        if self.registryValue('enforceGlobal', channel):
+            with self._db_lock:
+                net_items = list(self.db['net']['entries'].items())
+            for mask, e in net_items:
                 if ircutils.hostmaskPatternEqual(mask, msg.prefix):
-                    reason = self.db[c_lower][mask][2]
                     irc.queueMsg(ircmsgs.ban(channel, mask))
-                    irc.queueMsg(ircmsgs.kick(channel, msg.nick, reason))
-                    break
+                    irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason'] or "Network-wide ban."))
+                    return
+
+        if self.registryValue('enabled', channel):
+            with self._db_lock:
+                bucket = self.db['channels'].get(c_lower)
+                items = list(bucket['entries'].items()) if bucket else []
+            for mask, e in items:
+                if ircutils.hostmaskPatternEqual(mask, msg.prefix):
+                    irc.queueMsg(ircmsgs.ban(channel, mask))
+                    irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason']))
+                    return
+
 
 Class = Blacklist

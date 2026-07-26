@@ -47,11 +47,11 @@ def configure(advanced):
     from supybot.questions import expect, anything, something, yn
     conf.registerPlugin("Blacklist", True)
 
-class CurrencyCommand(registry.Integer):
+class BanmaskNumber(registry.Integer):
     def setValue(self, num):
         if num > max(plugin.Blacklist.banmasks):
             raise registry.InvalidRegistryValue(f"Number must be between 0 and {max(plugin.Blacklist.banmasks)}.")
-        registry.String.setValue(self, num)
+        super().setValue(num)
 
 Blacklist = conf.registerPlugin('Blacklist')
 
@@ -68,13 +68,24 @@ conf.registerChannelValue(Blacklist, 'banTimerExpiry',
         registry.PositiveInteger(30, """Sets the numer of minutes before a timed ban expires if none is given."""))
 
 conf.registerChannelValue(Blacklist, 'maskNumber',
-        CurrencyCommand(2, """Sets the default banmask number if none is given."""))
+        BanmaskNumber(2, """Sets the default banmask number if none is given."""))
 
 conf.registerChannelValue(Blacklist, 'banReason',
         registry.String("User has been banned from the channel.", """Sets the default blacklist message if none is given."""))
 
 conf.registerChannelValue(Blacklist, 'addManualBans',
         registry.Boolean(True, """Sets whether to watch for channel bans directly added by users (not using the bot) to the database."""))
+
+conf.registerChannelValue(Blacklist, 'enforceGlobal',
+        registry.Boolean(True, """Sets whether this channel enforces the network-wide (net) blacklist:
+        entries added with "net add"/"net timer" will be banned/kicked here, and joins are checked
+        against the network blacklist in addition to this channel's own list."""))
+
+conf.registerGlobalValue(Blacklist, 'netMaskNumber',
+        BanmaskNumber(2, """Sets the default banmask number used for network-wide (net) blacklist entries."""))
+
+conf.registerGlobalValue(Blacklist, 'netTimerExpiry',
+        registry.PositiveInteger(30, """Sets the number of minutes before a "net timer" ban expires if none is given."""))
 
 conf.registerChannelValue(Blacklist, 'pastebinUrl',
         registry.String('https://filehost.0bin.xyz/', """URL of the paste service to use when the ban list is too large to display inline.
