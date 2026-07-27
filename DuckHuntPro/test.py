@@ -28,12 +28,14 @@
 ###
 
 import random
+import re
 import time
 import urllib.parse
 from datetime import datetime
 
 from supybot.test import *
 import supybot.schedule as schedule
+import supybot.drivers as drivers
 from supybot import ircmsgs
 
 from . import data
@@ -86,6 +88,26 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         while self.irc.takeMsg() is not None:
             pass
 
+    def _drainWait(self, minCount, timeout=2.0):
+        """Like _drain(), but polls (same pattern _feedMsg uses internally)
+        instead of assuming every queued message is already sitting there --
+        DuckHuntPro is `threaded = True`, so a command that calls irc.reply()
+        several times in a loop can still be mid-loop in its background
+        thread when a plain takeMsg() would already return None. Stops once
+        at least minCount messages have been collected and takeMsg() goes
+        quiet, or the timeout elapses."""
+        msgs = []
+        deadline = time.time() + timeout
+        while True:
+            m = self.irc.takeMsg()
+            if m is not None:
+                msgs.append(m)
+                continue
+            if len(msgs) >= minCount or time.time() >= deadline:
+                return msgs
+            time.sleep(0.01)
+            drivers.run()
+
     def _richPlayer(self, nick=None):
         nick = nick or self.nick
         player = self._cb().db.player(self.irc.network, self.channel, nick)
@@ -109,12 +131,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         else:
             self.fail('Expected _WebNotFound, nothing was raised')
 
-    def _putDuck(self, is_golden=False, hp_total=1):
+    def _putDuck(self, is_golden=False, hp_total=1, is_fake=False):
         cb = self._cb()
-        cb._activeDuck[self._key()] = {
+        cb._activeDuck.setdefault(self._key(), []).append({
             'spawned_at': time.time(), 'is_golden': is_golden,
             'hp_total': hp_total, 'hp_left': hp_total, 'shots_fired': 0,
-        }
+            'is_fake': is_fake,
+        })
         return cb
 
     def testLevelTableSanity(self):
@@ -149,7 +172,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
         self.assertEqual(player['xp'], 0)  # -1 penalty clamped to 0
         self.assertEqual(player['stats']['missed'], 1)
-        self.assertEqual(cb._activeDuck[key]['shots_fired'], 1)
+        self.assertEqual(cb._activeDuck[key][0]['shots_fired'], 1)
 
     def testDuckFleesAfterConfiguredMisses(self):
         conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
@@ -165,7 +188,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._rng = ScriptedRNG([100, 0])
         self.assertNotError('bang')
         self.assertTrue(key in cb._activeDuck)
-        self.assertEqual(cb._activeDuck[key]['hp_left'], 1)
+        self.assertEqual(cb._activeDuck[key][0]['hp_left'], 1)
 
         cb._rng = ScriptedRNG([100, 0])
         self.assertNotError('bang')
@@ -279,7 +302,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._rng = ScriptedRNG([0, 4])
         cb._spawnDuck(self.irc, self.channel)
         self.assertTrue(key in cb._activeDuck)
-        duck = cb._activeDuck[key]
+        duck = cb._activeDuck[key][0]
         self.assertTrue(duck['is_golden'])
         self.assertEqual(duck['hp_total'], 4)
         m = self.irc.takeMsg()
@@ -302,6 +325,20 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testDuckshootersEmptyChannel(self):
         self.assertRegexp('duckshooters', 'yet')
+
+    def testDuckshootersCountIsConfigurable(self):
+        cb = self._cb()
+        network = self.irc.network
+        for i, nick in enumerate(['alice', 'bob', 'carol', 'dave', 'erin']):
+            cb.db.player(network, self.channel, nick)['xp'] = 100 + i
+        cb.db.save()
+        conf.supybot.plugins.DuckHuntPro.topShootersCount.setValue(5)
+        m = self.getMsg('duckshooters')  # header
+        rest = self._drainWait(minCount=5)
+        lines = [m.args[1]] + [r.args[1] for r in rest]
+        self.assertEqual(len(lines), 6)  # header + 5 shooters
+        self.assertTrue(any('erin' in line for line in lines))  # highest xp
+        self.assertTrue(any('alice' in line for line in lines))  # lowest xp, still in top 5
 
     def testNextQuarterResetCalculation(self):
         cb = self._cb()
@@ -650,7 +687,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         chan = cb.db.getChannel(self.irc.network, self.channel)
         firesAt = chan['fake_ducks_pending'][0]['fires_at']
         cb._fireSpecialSpawn(self.irc.network, self.channel, firesAt)
-        duck = cb._activeDuck[self._key()]
+        duck = cb._activeDuck[self._key()][0]
         self.assertTrue(duck['is_fake'])
         self.assertFalse(duck['is_golden'])
         cb._removeDuck(self.irc.network, self.channel)
@@ -788,7 +825,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._rng = ScriptedRNG([100, 100])  # no jam, miss
         self.assertNotError('bang')
         self.assertTrue(self._key() in cb._activeDuck)  # didn't flee
-        self.assertEqual(cb._activeDuck[self._key()]['shots_fired'], 0)
+        self.assertEqual(cb._activeDuck[self._key()][0]['shots_fired'], 0)
 
     def testSightBoostsAccuracyForOneShotThenConsumed(self):
         cb = self._cb()
@@ -845,10 +882,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         db.giveItem(player, 'four_leaf_clover', time.time(), duration=86400, value=5)
         cb.db.save()
-        cb._activeDuck[self._key()] = {
-            'spawned_at': time.time(), 'is_golden': False,
-            'hp_total': 1, 'hp_left': 1, 'shots_fired': 0, 'is_fake': True,
-        }
+        self._putDuck(is_fake=True)
         cb._rng = ScriptedRNG([100, 0])  # no jam, hit
         self.assertNotError('bang')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
@@ -1182,18 +1216,27 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertNotError('admin delete alice')
         self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'alice') is None)
 
-    def testAdminPlanningShowsFlightCount(self):
+    def testAdminPlanningShowsTimeList(self):
         cb = self._cb()
         chan = cb.db.channel(self.irc.network, self.channel)
-        chan['planned_flights'] = [time.time() + 100]
+        t1 = datetime(2026, 1, 1, 3, 14).timestamp()
+        t2 = datetime(2026, 1, 1, 9, 5).timestamp()
+        chan['planned_flights'] = [t2, t1]  # out of order on purpose
         cb.db.save()
-        self.assertNotError('admin planning')
+        m = self.assertNotError('admin planning')
+        self.assertTrue('03:14' in m.args[1] and '09:05' in m.args[1])
+        self.assertTrue(m.args[1].index('03:14') < m.args[1].index('09:05'))  # sorted
+
+    def testAdminPlanningEmpty(self):
+        self.assertRegexp('admin planning', 'No flights')
 
     def testAdminReplanningRebuildsSchedule(self):
         cb = self._cb()
-        self.assertNotError('admin replanning')
+        m = self.assertNotError('admin replanning')
         chan = cb.db.getChannel(self.irc.network, self.channel)
         self.assertTrue(len(chan['planned_flights']) > 0)
+        # Message shows the actual new times, not just a generic "done".
+        self.assertTrue(re.search(r'\d{2}:\d{2}', m.args[1]))
 
     def testAdminLaunchForcesImmediateSpawn(self):
         cb = self._cb()
@@ -1201,10 +1244,14 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertTrue(self._key() in cb._activeDuck)
         cb._removeDuck(self.irc.network, self.channel)
 
-    def testAdminLaunchBlockedWhenDuckAlreadyPresent(self):
+    def testAdminLaunchAddsToExistingDucksInsteadOfBlocking(self):
+        # Matches Duck_Hunt.tcl's !ducklaunch: never checks for an existing
+        # duck, so launching while one's already in flight just adds a
+        # second one rather than being refused.
         cb = self._cb()
         self._putDuck()
-        self.assertRegexp('admin launch', 'already in flight')
+        self.assertNotError('admin launch')
+        self.assertEqual(len(cb._activeDuck[self._key()]), 2)
 
     def testAdminExportWritesFile(self):
         cb = self._cb()
@@ -1234,6 +1281,135 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertNotError('bang')
         self._drain()
         self.assertRegexp('bang', 'slow down')
+
+    # -----------------------------------------------------------------
+    # Multi-duck (removing the single-duck-per-channel cap)
+    # -----------------------------------------------------------------
+
+    def testMultipleDucksCanCoexist(self):
+        cb = self._cb()
+        cb._rng = ScriptedRNG([0, 4])  # golden-chance succeeds, hp roll -> 4
+        cb._spawnDuck(self.irc, self.channel)
+        cb._rng = ScriptedRNG([100])  # golden-chance fails
+        cb._spawnDuck(self.irc, self.channel)
+        ducks = cb._activeDuck[self._key()]
+        self.assertEqual(len(ducks), 2)
+        self.assertTrue(ducks[0]['is_golden'])
+        self.assertFalse(ducks[1]['is_golden'])
+        cb._removeDuck(self.irc.network, self.channel)
+        cb._removeDuck(self.irc.network, self.channel)
+
+    def testBangTargetsOldestDuckFirst(self):
+        # Matches Duck_Hunt.tcl's hit_a_duck: always list-head (FIFO), never
+        # random/closest-to-escaping/shotgun-spread.
+        cb = self._cb()
+        self._putDuck(hp_total=1)               # oldest -- should die
+        self._putDuck(is_golden=True, hp_total=5)  # newer -- should survive
+        cb._rng = ScriptedRNG([100, 0])  # no jam, hit
+        self.assertNotError('bang')
+        ducks = cb._activeDuck[self._key()]
+        self.assertEqual(len(ducks), 1)
+        self.assertTrue(ducks[0]['is_golden'])
+
+    def testKillingOneDuckDoesNotAffectAnotherWithScaringOff(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
+        conf.supybot.plugins.DuckHuntPro.successfulShotsAlsoScareDucks.setValue(False)
+        self._putDuck(hp_total=1)
+        self._putDuck(hp_total=1)
+        cb._rng = ScriptedRNG([100, 0])  # no jam, hit
+        self.assertNotError('bang')
+        ducks = cb._activeDuck.get(self._key())
+        self.assertEqual(len(ducks), 1)
+        self.assertEqual(ducks[0]['shots_fired'], 0)
+
+    def testSuccessfulHitScaresOtherDucksWhenEnabled(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
+        conf.supybot.plugins.DuckHuntPro.successfulShotsAlsoScareDucks.setValue(True)
+        self._putDuck(hp_total=1)  # oldest -- killed outright
+        self._putDuck(hp_total=1)  # should flee from the scare propagation
+        cb._rng = ScriptedRNG([100, 0])  # no jam, hit
+        self.assertNotError('bang')
+        self.assertTrue(self._key() not in cb._activeDuck)  # one killed, one fled
+
+    def testMissAlwaysScaresAllDucksRegardlessOfSetting(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
+        conf.supybot.plugins.DuckHuntPro.successfulShotsAlsoScareDucks.setValue(False)
+        self._putDuck(hp_total=1)
+        self._putDuck(hp_total=1)
+        cb._rng = ScriptedRNG([100, 100])  # no jam, miss
+        self.assertNotError('bang')
+        self.assertTrue(self._key() not in cb._activeDuck)  # both fled
+
+    def testGoldenAndFakeDucksAreImmuneToScaring(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
+        self._putDuck(is_golden=True, hp_total=5)
+        self._putDuck(is_fake=True, hp_total=1)
+        cb._rng = ScriptedRNG([100, 100])  # no jam, miss
+        self.assertNotError('bang')
+        ducks = cb._activeDuck.get(self._key())
+        self.assertEqual(len(ducks), 2)
+
+    def testSilencerPreventsScaringEveryDuckNotJustTarget(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        db.giveItem(player, 'silencer', time.time(), duration=86400)
+        cb.db.save()
+        self._putDuck(hp_total=1)
+        self._putDuck(hp_total=1)
+        cb._rng = ScriptedRNG([100, 100])  # no jam, miss
+        self.assertNotError('bang')
+        ducks = cb._activeDuck.get(self._key())
+        self.assertEqual(len(ducks), 2)
+        self.assertTrue(all(d['shots_fired'] == 0 for d in ducks))
+
+    def testEscapeRemovesOnlyTheExpiredDuck(self):
+        cb = self._cb()
+        key = self._key()
+        self._putDuck(hp_total=1)
+        self._putDuck(hp_total=1)
+        ducks = cb._activeDuck[key]
+        expired, survivor = ducks[0]['spawned_at'], ducks[1]['spawned_at']
+        cb._duckEscapes(self.irc.network, self.channel, expired)
+        remaining = cb._activeDuck.get(key)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]['spawned_at'], survivor)
+        cb._removeDuck(self.irc.network, self.channel)
+
+    def testGunHandBackMode2WaitsForAllDucksGone(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.gunHandBackMode.setValue(2)
+        conf.supybot.plugins.DuckHuntPro.successfulShotsAlsoScareDucks.setValue(False)
+        other = cb.db.player(self.irc.network, self.channel, 'someoneElse')
+        other['gun_state'] = 'confiscated'
+        cb.db.save()
+        self._putDuck(hp_total=1)
+        self._putDuck(hp_total=1)
+        cb._rng = ScriptedRNG([100, 0])  # no jam, hit -- kills only the oldest
+        self.assertNotError('bang')
+        other = cb.db.getPlayer(self.irc.network, self.channel, 'someoneElse')
+        self.assertEqual(other['gun_state'], 'confiscated')  # one duck remains
+        cb._removeDuck(self.irc.network, self.channel)
+        cb._maybeHandBackOnDuckGone(self.irc.network, self.channel)
+        other = cb.db.getPlayer(self.irc.network, self.channel, 'someoneElse')
+        self.assertEqual(other['gun_state'], 'armed')
+
+    def testSpecialSpawnCoexistsWithAnExistingDuck(self):
+        cb = self._cb()
+        self._putDuck(hp_total=1)
+        self._richPlayer()
+        self.assertNotError('shop buy fake_duck')
+        chan = cb.db.getChannel(self.irc.network, self.channel)
+        firesAt = chan['fake_ducks_pending'][0]['fires_at']
+        cb._fireSpecialSpawn(self.irc.network, self.channel, firesAt)
+        ducks = cb._activeDuck[self._key()]
+        self.assertEqual(len(ducks), 2)
+        cb._removeDuck(self.irc.network, self.channel)
+        cb._removeDuck(self.irc.network, self.channel)
 
     def testSameChannelNameDifferentNetworksAreIndependent(self):
         cb = self._cb()

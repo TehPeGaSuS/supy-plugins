@@ -6,10 +6,11 @@ Menz Agitat -- a much deeper game than the existing `PT/DuckHunt` plugin
 social/PvP mechanics). It's a separate plugin, not a replacement; see
 "Known limitations" below if you plan to run both at once.
 
-**All 3 planned phases are done**: the core spawn/shoot/level loop, the
-full 23-item shop economy with the kill drop table, and friendly-fire/
-ricochet accidents, weapon confiscation with 3 auto-return modes,
-anti-highlight duck art, automatic nick-change stat fusion, an admin
+**All 3 planned phases are done, including multiple simultaneous ducks per
+channel** (no hard cap, matching the original): the core spawn/shoot/level
+loop, the full 23-item shop economy with the kill drop table, and
+friendly-fire/ricochet accidents, weapon confiscation with 3 auto-return
+modes, anti-highlight duck art, automatic nick-change stat fusion, an admin
 toolbox, and antiflood. See "Known limitations" below for the handful of
 deliberate simplifications made along the way (all flagged, none hidden).
 
@@ -28,6 +29,26 @@ channel), not channel alone, so `#duckhunt` on one IRC network and
 `#duckhunt` on another are two completely separate games sharing nothing
 but the plugin code.
 
+## Multiple ducks
+
+Any number of ducks can be in flight on a channel at once -- spawning
+never checks whether one's already there, matching Duck_Hunt.tcl (no cap
+exists in the original either; concurrency there is just an emergent
+result of spawn timing versus `escapeTime`). `bang` always targets the
+**oldest** duck still in flight (first spawned, first shot -- never
+random, never "closest to escaping," never a shotgun spread across all of
+them), exactly matching the original's `hit_a_duck`, which always operates
+on the head of its duck-session list. Each duck has its own independent
+escape timer, so one can fly off while others are still up.
+
+`successfulShotsAlsoScareDucks` (default on) controls whether a *kill*
+also scares every *other* duck currently in flight (a *miss* always does,
+regardless of this setting) -- both bump every flying duck's own
+scare-shot counter, and any of them that reaches `shotsBeforeDuckFlee`
+flees immediately, except golden and fake/mechanical ducks, which are
+always immune. A `silencer` blocks this scaring effect entirely for that
+shot, for every duck, not just the one aimed at.
+
 ## Commands
 
 - `bang [<channel>]` -- shoot at the current duck.
@@ -36,10 +57,11 @@ but the plugin code.
   `reload <plugin>` command.)
 - `duckstats [<channel>] [<nick>]` -- your hunting stats, or someone else's.
 - `lastduck [<channel>]` -- how long ago the last duck flew here.
-- `duckshooters [<channel>]` -- top 3 shooters this season, ranked by xp
-  (kills as tiebreaker).
+- `duckshooters [<channel>]` -- top shooters this season, ranked by xp
+  (kills as tiebreaker). How many is set by `topShootersCount` (default 3).
 - `duckchampions [<channel>]` -- top 3 shooters from the most recently
-  completed season (see "Quarterly reset" below).
+  completed season (see "Quarterly reset" below; this one is a fixed top 3,
+  not affected by `topShootersCount`).
 - `shop list [<channel>]` -- lists everything for sale with cost and a
   one-line description.
 - `shop buy <item> [<target>] [<channel>]` -- buys `<item>`, spending your
@@ -137,10 +159,10 @@ confiscations return via `gunHandBackMode`:
 
 1. **Daily**, at a fixed local time (`autoGunHandBackTime`, default
    `00:00`).
-2. **Whenever the channel's duck count drops back to zero** (killed,
-   fled, or escaped) -- simplified from the original's "per hunting
-   session" semantics since this port caps at one duck in flight at a
-   time, so every resolution already empties the queue.
+2. **Whenever the channel's duck count drops back to zero** -- i.e. the
+   whole "session" (every duck currently in flight, not just whichever one
+   was just resolved) has to empty out, not just any single kill/flee/
+   escape. Matches Duck_Hunt.tcl's `gun_hand_back_mode==2` exactly.
 3. **Never automatically** -- only `rearm` returns a weapon.
 
 ## Anti-highlight duck art
@@ -173,8 +195,8 @@ anti-confiscation-dodge measure.
 - `rename <channel> <old> <new>` -- pure rename; refuses if `<new>` already
   has a profile (use `fusion` instead).
 - `delete <channel> <nick>` -- deletes a profile entirely.
-- `planning <channel>` -- shows how many flights are currently scheduled
-  and when the next one is.
+- `planning <channel>` -- lists today's planned duck-flight times (HH:MM,
+  local time), matching Duck_Hunt.tcl's `duckplanning` output.
 - `replanning <channel>` -- forces an immediate recompute of the day's
   remaining schedule.
 - `launch <channel> [golden]` -- force-spawns a duck right now, bypassing
@@ -235,7 +257,7 @@ All values are per-channel (`supybot.plugins.DuckHuntPro.<name>`), except
 | `goldenDuckMinHP` / `goldenDuckMaxHP` | 3 / 5 | Golden duck hit points range. |
 | `duckSleepHours` | (empty) | Space-separated hours (0-23) with no flights, e.g. `2 3 4 5`. |
 | `shotsBeforeDuckFlee` | 3 | Non-lethal shots before a (non-golden) duck flees. -1 = never. |
-| `successfulShotsAlsoScareDucks` | True | Reserved for when multiple ducks can be in flight at once; currently unused, since this port caps it at one duck per channel. |
+| `successfulShotsAlsoScareDucks` | True | Whether a kill also scares every other duck currently in flight (a miss always does). See "Multiple ducks" above. |
 | `escapeTime` | 300 | Seconds before an unshot duck escapes. |
 | `unlimitedAmmoPerClip` / `unlimitedAmmoClips` | False | Disable ammo/clip limits. |
 | `antiHighlight` | False | Randomizes duck-flight art to defeat highlight-triggered auto-shoot scripts. |
@@ -244,6 +266,7 @@ All values are per-channel (`supybot.plugins.DuckHuntPro.<name>`), except
 | `devoiceOnMiss` | False | Devoice a player who misses. |
 | `postInitDelay` (global) | 60 | Seconds after load/join before planning a channel's first day of flights. |
 | `quarterlyResetEnabled` (global) | True | Auto-archive and reset every channel's standings on the 1st of Jan/Apr/Jul/Oct. |
+| `topShootersCount` | 3 | How many players `duckshooters` shows. |
 | `web.enable` (global) | False | Serve the read-only web dashboard (see below). |
 | `minXpForShopping` | 0 | Floor on a player's post-purchase xp balance. |
 | `dropsEnabled` | True | Whether kills can also drop a bonus item/xp-book. |
@@ -274,12 +297,12 @@ key a language dict doesn't define.
 
 ## Known limitations
 
-- At most one duck in flight per channel at a time (the original script
-  supports several at once, e.g. via decoys/bread/fake ducks stacking). A
-  `decoy`/`fake_duck` purchase is silently dropped if a duck is already in
-  flight when its timer fires. `successfulShotsAlsoScareDucks` is a
-  reserved config knob for that future multi-duck case; it's currently
-  unread by the code.
+- Escaping deliberately deviates from the original: Duck_Hunt.tcl's escape
+  callback always removes list-head regardless of which duck's own timer
+  actually fired (harmless in practice there, since escape deadlines are
+  normally monotonic with spawn order, but not identity-safe). This port
+  removes the specific duck whose timer fired instead, since it costs
+  nothing to track correctly here.
 - If you flip `enabled` on for a channel the bot already joined a while ago
   (rather than at load time or via a fresh join), flight planning won't
   kick in until the plugin reloads. Toggling it right after `!load` or

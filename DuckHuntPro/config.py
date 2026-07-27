@@ -107,6 +107,10 @@ conf.registerGlobalValue(DuckHuntPro, 'quarterlyResetEnabled',
     registry.Boolean(True, """Whether to automatically archive and reset every
     channel's standings on the 1st of January/April/July/October."""))
 
+conf.registerChannelValue(DuckHuntPro, 'topShootersCount',
+    registry.PositiveInteger(3, """How many players `duckshooters` shows,
+    ranked by xp (kills as tiebreaker)."""))
+
 conf.registerGroup(DuckHuntPro, 'web')
 
 conf.registerGlobalValue(DuckHuntPro.web, 'enable',

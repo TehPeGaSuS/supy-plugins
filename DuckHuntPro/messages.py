@@ -114,10 +114,9 @@ MESSAGES = {
         'admin_fusion_ok': '{sources} merged into {dest}.',
         'admin_list_empty': 'No players recorded here yet.',
         'admin_planning_empty': 'No flights currently planned for this channel.',
-        'admin_planning_line': '{count} duck(s) planned; next in {when}.',
-        'admin_replanning_ok': "This channel's schedule has been replanned.",
+        'admin_planning_line': 'Planned duck soarings for the current day on {channel}: {times}',
+        'admin_replanning_ok': 'A new planning has been computed for duck soarings on {channel}: {times}',
         'admin_launch_ok': 'A duck has been launched immediately.',
-        'admin_launch_blocked': 'A duck is already in flight.',
         'admin_export_ok': 'Player stats exported to {path}.',
 
         'antiflood_blocked': '{nick}, slow down -- try that again in a bit.',

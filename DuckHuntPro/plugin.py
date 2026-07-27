@@ -70,7 +70,9 @@ class DuckHuntPro(callbacks.Plugin):
         dbPath = os.path.join(str(conf.supybot.directories.data),
                                'DuckHuntPro', 'duckhuntpro.json')
         self.db = Database(dbPath)
-        self._activeDuck = {}    # (network(lower), channel(lower)) -> duck dict
+        self._activeDuck = {}    # (network(lower), channel(lower)) -> [duck dict, ...]
+                                 # oldest-first; multiple ducks coexist,
+                                 # bang()/accidents always target index 0
         self._scheduled = set()  # event names we've scheduled, for die()
         self._httpRunning = False
         self._floodWindows = {}  # (network, channel, nick) -> [timestamps]
@@ -457,10 +459,15 @@ class DuckHuntPro(callbacks.Plugin):
             self._scheduleGunHandBack(network, channelName)
 
     def _maybeHandBackOnDuckGone(self, network, channelName):
-        """Mode 2: temporarily-confiscated weapons return once the channel
-        has no duck in flight (matches Duck_Hunt.tcl's per-session hand-
-        back, simplified since this port caps at one duck in flight at a
-        time -- every resolution already empties the "queue")."""
+        """Mode 2: temporarily-confiscated weapons return once the
+        channel's whole "session" (every duck currently in flight, not
+        just the one just resolved) has emptied out -- matches
+        Duck_Hunt.tcl's gun_hand_back_mode==2, which is wired to the
+        duck_sessions dict entry for that channel being fully unset, not
+        to any single duck's resolution."""
+        key = (network.lower(), channelName.lower())
+        if self._activeDuck.get(key):
+            return  # other ducks still in flight -- session isn't over
         if self.registryValue('gunHandBackMode', channelName) == 2:
             self.db.handBackWeapons(network, channelName)
 
@@ -521,15 +528,13 @@ class DuckHuntPro(callbacks.Plugin):
             return
         if channelName not in irc.state.channels:
             return
-        key = (network.lower(), channelName.lower())
-        if key in self._activeDuck:
-            return  # phase 1: at most one duck in flight per channel
         self._spawnDuck(irc, channelName)
 
     def _fireSpecialSpawn(self, network, channelName, firesAt):
         """Fires a decoy- or fake_duck-purchased spawn scheduled by
-        `_scheduleSpecialSpawn`. Silently dropped if a duck is already in
-        flight (Phase 1/2's single-duck-per-channel cap still applies)."""
+        `_scheduleSpecialSpawn`. Matches Duck_Hunt.tcl: spawning never
+        checks whether a duck is already in flight -- multiple ducks can
+        (and routinely do) coexist on the same channel."""
         chan = self.db.channel(network, channelName)
         with self.db.lock:
             entry = None
@@ -547,9 +552,6 @@ class DuckHuntPro(callbacks.Plugin):
         if irc is None or channelName not in irc.state.channels:
             return
         if not self.registryValue('enabled', channelName):
-            return
-        key = (network.lower(), channelName.lower())
-        if key in self._activeDuck:
             return
         self._spawnDuck(irc, channelName, forceNonGolden=entry['force_non_golden'],
                          isFake=(entry['kind'] == 'fake_duck'), buyer=entry.get('buyer'))
@@ -607,11 +609,11 @@ class DuckHuntPro(callbacks.Plugin):
             hpTotal = self._rng.randint(minHp, maxHp)
 
         now = time.time()
-        self._activeDuck[key] = {
+        self._activeDuck.setdefault(key, []).append({
             'spawned_at': now, 'is_golden': isGolden,
             'hp_total': hpTotal, 'hp_left': hpTotal, 'shots_fired': 0,
             'is_fake': isFake,
-        }
+        })
 
         chan = self.db.channel(irc.network, channelName)
         with self.db.lock:
@@ -634,23 +636,49 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduleEvent(name, escapeAt, self._duckEscapes, (irc.network, channelName, now))
 
     def _duckEscapes(self, network, channelName, spawnedAt):
-        key = (network.lower(), channelName.lower())
-        duck = self._activeDuck.get(key)
-        if not duck or duck['spawned_at'] != spawnedAt:
+        # Removes the SPECIFIC duck whose own escape timer fired (matched
+        # by spawned_at), not just "whichever duck is oldest" -- a
+        # deliberate improvement over Duck_Hunt.tcl's terminate_duck_session,
+        # which always operates on list-head regardless of which duck's
+        # utimer actually fired. In the original this is harmless in
+        # practice (escape deadlines are normally monotonic with spawn
+        # order), but it's not identity-safe, and tracking identity costs
+        # nothing here since every duck's spawned_at is already threaded
+        # through its own scheduled event.
+        duck = self._removeDuck(network, channelName, spawnedAt=spawnedAt)
+        if duck is None:
             return  # already killed or fled
-        del self._activeDuck[key]
         irc = self._getIrc(network)
         if irc:
             lang = self.registryValue('language', channelName)
             irc.queueMsg(ircmsgs.privmsg(channelName, messages.get(lang, 'duck_escaped')))
         self._maybeHandBackOnDuckGone(network, channelName)
 
-    def _removeDuck(self, network, channelName):
+    def _removeDuck(self, network, channelName, spawnedAt=None):
+        """Removes one duck from the channel's in-flight list and
+        unschedules its escape timer. With no `spawnedAt`, removes the
+        oldest (list head) -- the one `bang()`/accidents always target,
+        matching Duck_Hunt.tcl's FIFO rule. Returns the removed duck dict,
+        or None if there was nothing to remove (already gone)."""
         key = (network.lower(), channelName.lower())
-        duck = self._activeDuck.pop(key, None)
-        if duck:
-            name = "DuckHuntPro:escape:%s:%s:%r" % (network, key[1], duck['spawned_at'])
-            self._unschedule(name)
+        ducks = self._activeDuck.get(key)
+        if not ducks:
+            return None
+        if spawnedAt is None:
+            duck = ducks.pop(0)
+        else:
+            duck = None
+            for i, d in enumerate(ducks):
+                if d['spawned_at'] == spawnedAt:
+                    duck = ducks.pop(i)
+                    break
+            if duck is None:
+                return None
+        if not ducks:
+            del self._activeDuck[key]
+        name = "DuckHuntPro:escape:%s:%s:%r" % (network, channelName.lower(), duck['spawned_at'])
+        self._unschedule(name)
+        return duck
 
     def _setVoice(self, irc, channel, nick, voice):
         try:
@@ -674,6 +702,32 @@ class DuckHuntPro(callbacks.Plugin):
             return "%dm%ds" % (minutes, seconds)
         hours, minutes = divmod(minutes, 60)
         return "%dh%dm" % (hours, minutes)
+
+    def _ducksScaring(self, irc, channel, network, lang):
+        """Ports Duck_Hunt.tcl's ducks_scaring: every gunshot that reaches
+        this point (a miss always; a successful hit only if
+        successfulShotsAlsoScareDucks is on) bumps EVERY duck currently in
+        flight on this channel's scare counter by one -- not just the one
+        that was aimed at. Any duck whose counter reaches
+        shotsBeforeDuckFlee flees immediately, except golden and fake/
+        mechanical ducks, which are always immune (matches the original's
+        explicit exemptions)."""
+        key = (network.lower(), channel.lower())
+        ducks = self._activeDuck.get(key)
+        if not ducks:
+            return 0
+        fleeAfter = self.registryValue('shotsBeforeDuckFlee', channel)
+        fled = 0
+        for duck in list(ducks):
+            duck['shots_fired'] += 1
+            if (fleeAfter >= 0 and duck['shots_fired'] >= fleeAfter
+                    and not duck['is_golden'] and not duck.get('is_fake', False)):
+                self._removeDuck(network, channel, spawnedAt=duck['spawned_at'])
+                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(lang, 'duck_fled')))
+                fled += 1
+        if fled:
+            self._maybeHandBackOnDuckGone(network, channel)
+        return fled
 
     # -----------------------------------------------------------------
     # Commands
@@ -708,7 +762,12 @@ class DuckHuntPro(callbacks.Plugin):
                                     attacker=bucket.get('value') or '?', remaining=remaining))
             return
 
-        duck = self._activeDuck.get(key)
+        ducks = self._activeDuck.get(key)
+        duck = ducks[0] if ducks else None  # oldest duck always the target,
+        # matching Duck_Hunt.tcl's hit_a_duck (always operates on the
+        # duck-session list head, since new ducks are always appended --
+        # a "shotgun spread" or "closest to escaping" model was never a
+        # thing in the original: it's strictly first-spawned-first-shot).
         if duck is None and db.itemActive(player, 'infrared_detector', now):
             db.consumeItemUse(player, 'infrared_detector')
             self.db.save()
@@ -782,19 +841,17 @@ class DuckHuntPro(callbacks.Plugin):
                                     attacker=mirror.get('value') or '?'))
 
         if self._rng.uniform(0, 100) >= accuracy:
-            if not db.itemActive(player, 'silencer', now):
-                duck['shots_fired'] += 1
             player['xp'] = max(0, player['xp'] + lvl.xp_missed_shot)
             player['stats']['missed'] += 1
             self.db.save()
             irc.reply(messages.get(lang, 'miss', nick=msg.nick, xp=lvl.xp_missed_shot))
             if self.registryValue('devoiceOnMiss', channel):
                 self._setVoice(irc, channel, msg.nick, False)
-            fleeAfter = self.registryValue('shotsBeforeDuckFlee', channel)
-            if fleeAfter >= 0 and duck['shots_fired'] >= fleeAfter and not duck['is_golden']:
-                self._removeDuck(network, channel)
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(lang, 'duck_fled')))
-                self._maybeHandBackOnDuckGone(network, channel)
+            # A miss always risks scaring every duck currently in flight
+            # (not just the one aimed at) -- matches Duck_Hunt.tcl's
+            # ducks_scaring, unconditionally called on every missed shot.
+            if not db.itemActive(player, 'silencer', now):
+                self._ducksScaring(irc, channel, network, lang)
             self._resolveAccident(irc, channel, network, msg.nick, True, lang)
             return
 
@@ -805,6 +862,12 @@ class DuckHuntPro(callbacks.Plugin):
                 damage = dmg
                 break
         self._resolveDuckHit(irc, channel, network, msg.nick, lang, damage)
+        # A successful hit only scares the OTHER ducks still in flight if
+        # successfulShotsAlsoScareDucks is on (default on, matches the
+        # original's default) -- unlike a miss, which always scares.
+        if (not db.itemActive(player, 'silencer', now)
+                and self.registryValue('successfulShotsAlsoScareDucks', channel)):
+            self._ducksScaring(irc, channel, network, lang)
     bang = wrap(bang, ['channel'])
 
     def _resolveDuckHit(self, irc, channel, network, shooterNick, lang, damage, isLucky=False):
@@ -814,9 +877,10 @@ class DuckHuntPro(callbacks.Plugin):
         Shared by bang()'s direct-hit path and _resolveAccident()'s
         ricochet-into-duck ("lucky shot") path."""
         key = (network.lower(), channel.lower())
-        duck = self._activeDuck.get(key)
-        if duck is None:
+        ducks = self._activeDuck.get(key)
+        if not ducks:
             return
+        duck = ducks[0]  # oldest -- always the target, see bang()
         player = self.db.player(network, channel, shooterNick)
         duck['hp_left'] -= damage
         if duck['hp_left'] > 0:
@@ -960,8 +1024,7 @@ class DuckHuntPro(callbacks.Plugin):
                 irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
                     lang, 'accident_deflected', victim=victimNick)))
                 ricochets += 1
-                duck = self._activeDuck.get(key)
-                if (duck is not None
+                if (self._activeDuck.get(key)
                         and self._rng.uniform(0, 100) < data.CHANCE_RICOCHET_TOWARDS_DUCK):
                     irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
                         lang, 'ricochet_towards_duck')))
@@ -1086,11 +1149,12 @@ class DuckHuntPro(callbacks.Plugin):
 
     def duckshooters(self, irc, msg, args, channel):
         """[<channel>]
-        Shows the top 3 shooters (ranked by xp, kills as tiebreaker) on
-        this channel's current season.
+        Shows the top shooters (ranked by xp, kills as tiebreaker) on this
+        channel's current season. How many is set by topShootersCount.
         """
         lang = self.registryValue('language', channel)
-        top = self.db.topPlayers(irc.network, channel, n=3)
+        count = self.registryValue('topShootersCount', channel)
+        top = self.db.topPlayers(irc.network, channel, n=count)
         if not top:
             irc.reply(messages.get(lang, 'shooters_empty'))
             return
@@ -1566,24 +1630,27 @@ class DuckHuntPro(callbacks.Plugin):
 
         def planning(self, irc, msg, args, channel):
             """[<channel>]
-            Shows how many duck flights are currently planned for this
-            channel, and when the next one is.
+            Shows the local time (HH:MM) of every duck flight currently
+            planned for today on this channel, matching Duck_Hunt.tcl's
+            duckplanning output.
             """
             p = self.plugin
             lang = p.registryValue('language', channel)
             chan = p.db.getChannel(irc.network, channel)
-            flights = chan.get('planned_flights', []) if chan else []
+            flights = sorted(chan.get('planned_flights', [])) if chan else []
             if not flights:
                 irc.reply(messages.get(lang, 'admin_planning_empty'))
                 return
-            when = p._formatDuration(max(0, min(flights) - time.time()))
-            irc.reply(messages.get(lang, 'admin_planning_line', count=len(flights), when=when))
+            times = ', '.join(datetime.fromtimestamp(t).strftime('%H:%M') for t in flights)
+            irc.reply(messages.get(lang, 'admin_planning_line', channel=channel, times=times))
         planning = wrap(planning, ['admin', 'channel'])
 
         def replanning(self, irc, msg, args, channel):
             """[<channel>]
             Forces an immediate recompute of this channel's remaining duck
-            schedule (same logic as the daily self-replan, triggered early).
+            schedule (same logic as the daily self-replan, triggered
+            early), then shows the new times -- matching Duck_Hunt.tcl's
+            duckreplanning output.
             """
             p = self.plugin
             network = irc.network
@@ -1594,20 +1661,21 @@ class DuckHuntPro(callbacks.Plugin):
                     p._unschedule("DuckHuntPro:flight:%s:%s:%r" % (network, channel.lower(), t))
                 p._unschedule("DuckHuntPro:plan:%s:%s" % (network, channel.lower()))
             p._planDay(network, channel)
-            irc.reply(messages.get(lang, 'admin_replanning_ok'))
+            chan = p.db.getChannel(network, channel)
+            flights = sorted(chan.get('planned_flights', [])) if chan else []
+            times = ', '.join(datetime.fromtimestamp(t).strftime('%H:%M') for t in flights)
+            irc.reply(messages.get(lang, 'admin_replanning_ok', channel=channel, times=times))
         replanning = wrap(replanning, ['admin', 'channel'])
 
         def launch(self, irc, msg, args, channel, golden):
             """[<channel>] [golden]
             Immediately force-spawns a duck, bypassing the schedule
-            entirely. Pass a true value to force it golden.
+            entirely. Pass a true value to force it golden. Adds to
+            whatever's already in flight -- matches Duck_Hunt.tcl's
+            !ducklaunch, which never checks for an existing duck either.
             """
             p = self.plugin
             lang = p.registryValue('language', channel)
-            key = (irc.network.lower(), channel.lower())
-            if key in p._activeDuck:
-                irc.reply(messages.get(lang, 'admin_launch_blocked'))
-                return
             p._spawnDuck(irc, channel, forceGolden=bool(golden))
             irc.reply(messages.get(lang, 'admin_launch_ok'))
         launch = wrap(launch, ['admin', 'channel', optional('boolean')])

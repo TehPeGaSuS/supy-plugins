@@ -1,12 +1,86 @@
 # DuckHuntPro -- progress & roadmap
 
-**Status: all 3 planned phases are complete (2026-07-27). Full parity
-achieved with Duck_Hunt.tcl v2.11**, plus the extra gathered requirements
-(best-shooters, quarterly reset, web dashboard, network-independence). 109
-tests passing via `supybot-test`. Nothing is currently planned beyond this
--- the sections below are a historical build log, not a live TODO list,
-except "Known limitations" in `README.md` which documents the handful of
-deliberate, permanent simplifications.
+**Status: all 3 planned phases are complete (2026-07-27, committed/pushed
+as `14fd0ae`)**, plus the extra gathered requirements (best-shooters,
+quarterly reset, web dashboard, network-independence), a `topShootersCount`
+config knob, and multi-duck support (all added after the initial ship, see
+below). 121 tests passing via `supybot-test`. The sections below are a
+historical build log, not a live TODO list, except "Known limitations" in
+`README.md` which documents the deliberate, permanent simplifications.
+
+**Multi-duck support (added post-ship, 2026-07-27).** The initial ship
+capped every channel at one duck in flight at a time -- a real gap from
+"full parity," called out by the user right after shipping (see the
+now-resolved correction this replaced). Removed entirely: `_activeDuck` is
+now `{(network, channel): [duck, duck, ...]}`, oldest-first, instead of a
+single dict; spawning (`_fireSpawn`, `_fireSpecialSpawn`, `admin launch`)
+no longer checks for an existing duck before adding another, matching
+Duck_Hunt.tcl exactly (confirmed via a dedicated research pass: the
+original has no concurrent-duck cap either -- concurrency there is just an
+emergent result of spawn timing vs. `escapeTime`). Key design points,
+transcribed from the original's `duck_sessions` dict-of-lists rather than
+guessed:
+- **Targeting is strict FIFO** -- `bang()`/ricochet-into-duck always hits
+  `ducks[0]` (oldest), matching `hit_a_duck`'s unconditional list-head
+  operation. Never random, never "closest to escaping," never a shotgun
+  spread across every duck in flight.
+- **`successfulShotsAlsoScareDucks` finally wired up** (previously a
+  registered-but-unread no-op knob) via a new `_ducksScaring()` method
+  ported from `ducks_scaring`: a miss *always* bumps every currently-flying
+  duck's own scare counter by one (not just the one aimed at); a kill only
+  does this if the setting is on. Any duck (except golden/fake, always
+  immune) whose counter reaches `shotsBeforeDuckFlee` flees immediately.
+  `silencer` blocks this scaring effect entirely for that shot, for every
+  duck, not just the target.
+- **Per-duck escape identity, a deliberate improvement over literal
+  fidelity**: Duck_Hunt.tcl's escape callback (`terminate_duck_session`)
+  always removes list-head regardless of which specific duck's `utimer`
+  fired -- harmless there since escape deadlines are normally monotonic
+  with spawn order, but not identity-safe. This port's `_duckEscapes`
+  removes the *specific* duck matching the timer's own `spawned_at`
+  instead, since every duck's spawn time was already threaded through its
+  scheduled event name for restart-safety -- tracking identity cost
+  nothing extra here, so there was no reason to replicate a bug just for
+  bug-for-bug fidelity. Documented as a deviation, not hidden.
+- **Gun-hand-back mode 2 fixed to consider the whole session**: previously
+  fired after *any* kill (correct only because there was always exactly
+  one duck); now correctly waits for the channel's entire duck list to
+  empty out, matching `gun_hand_back_mode==2`'s real semantics (confirmed
+  via research: "session" = "whatever's concurrently in flight right now,"
+  not a fixed batch or timer).
+- `admin.launch`'s "duck already in flight" refusal was removed --
+  Duck_Hunt.tcl's `!ducklaunch` never checked either; it always adds
+  another duck.
+- 11 new tests covering coexistence, FIFO targeting, cross-duck scare
+  propagation (both hit- and miss-triggered), golden/fake immunity,
+  silencer blocking scaring for every duck, per-duck escape identity, and
+  mode-2 waiting for full session end.
+
+**`duckplanning`/`duckreplanning` output format fixed to match the
+original** (also post-ship, user provided real TCL output as reference):
+both now list every planned flight's local HH:MM time
+(`00:34, 01:57, 02:38, ...`), not a generic "N flights, next in Xm" summary
+invented during the initial build without checking the original's actual
+output shape.
+
+**`topShootersCount` (added post-ship, 2026-07-27).** User wanted
+`duckshooters` to show more than a hard-coded top 3 (e.g. top 5). Added a
+`registerChannelValue` knob, default 3 (keeping existing behavior for
+anyone already running it), read at command time instead of a literal `3`.
+Deliberately scoped to `duckshooters` only, not `duckchampions` (the
+archived quarterly-reset leaderboard) -- user's explicit call, since
+`duckchampions` is a snapshot of history rather than a live progression
+view. Found via testing (not review): a new test driving `duckshooters`
+with 5 players hit a real timing gap -- `DuckHuntPro` is `threaded = True`,
+so a command that calls `irc.reply()` in a loop can still be mid-loop in
+its background thread when a bare `self.irc.takeMsg()` (no poll/wait)
+already returns `None`, understating how many messages actually got
+queued. Fixed by adding a `_drainWait()` test helper that polls (same
+`time.sleep` + `drivers.run()` pattern `_feedMsg` uses internally) instead
+of assuming everything is already sitting in the queue. The original
+2-player `testDuckshootersRanksByXp` test was left as-is since it hasn't
+shown this flakiness in practice, but the same latent risk technically
+applies to it too -- worth switching to `_drainWait()` if it ever flakes.
 
 Working notes for resuming this project in a later session. See also the
 original design plan at `~/.claude/plans/zany-finding-emerson.md` (architecture
