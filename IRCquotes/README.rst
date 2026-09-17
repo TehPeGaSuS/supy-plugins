@@ -63,4 +63,8 @@ script's ``templates/default/{index.html,style.css}``, refreshed with a
 more modern palette and automatic light/dark mode (dark by default,
 switching to light if the visitor's browser prefers it).
 
+Since Limnoria's built-in HTTP server has no TLS support of its own and
+normally isn't meant to be exposed directly, example Apache reverse-proxy
+vhosts (plaintext and TLS) are provided under ``webservers/``.
+
 .. _commands-IRCquotes:

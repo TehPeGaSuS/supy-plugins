@@ -1,0 +1,46 @@
+# Example Apache vhost reverse-proxying the IRCquotes web interface over
+# TLS, with a plain-HTTP vhost that just redirects to it.
+#
+# TLS is terminated here in Apache -- the bot's built-in HTTP server does
+# not speak TLS itself, so this always proxies to it over plain HTTP on
+# localhost.
+#
+# Requires mod_proxy, mod_proxy_http and mod_ssl:
+#
+#   a2enmod proxy proxy_http ssl
+#   a2ensite ircquotes-tls
+#
+# Adjust ServerName, the certificate paths, and the backend host:port to
+# match your bot's supybot.servers.http.port (default 8080) and where
+# it's reachable from this Apache instance.
+#
+# On the bot side, also set the public URL so any links it emits point
+# here instead of http://<hostname>:8080/:
+#
+#   config supybot.servers.http.publicUrl https://quotes.example.com/
+
+<VirtualHost *:80>
+    ServerName quotes.example.com
+
+    RewriteEngine On
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName quotes.example.com
+
+    SSLEngine on
+    SSLCertificateFile      /etc/letsencrypt/live/quotes.example.com/fullchain.pem
+    SSLCertificateKeyFile   /etc/letsencrypt/live/quotes.example.com/privkey.pem
+
+    ProxyPreserveHost On
+
+    # Only expose the IRCquotes endpoint (and its static assets under the
+    # same prefix, e.g. /ircquotes/style.css), not the whole bot HTTP
+    # server / plugin index.
+    ProxyPass        /ircquotes/ http://127.0.0.1:8080/ircquotes/
+    ProxyPassReverse /ircquotes/ http://127.0.0.1:8080/ircquotes/
+
+    ErrorLog  ${APACHE_LOG_DIR}/ircquotes-tls-error.log
+    CustomLog ${APACHE_LOG_DIR}/ircquotes-tls-access.log combined
+</VirtualHost>
