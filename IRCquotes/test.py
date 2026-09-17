@@ -176,7 +176,8 @@ class IRCquotesTestCase(ChannelPluginTestCase):
             # The base is set once; network and channel get appended
             # automatically to build the full page URL.
             self.assertResponse('quotepage',
-                'https://quotes.example.com/ircquotes/%s/%s/' % (
+                '%s Quotes: https://quotes.example.com/ircquotes/%s/%s/' % (
+                    self.channel,
                     utils.web.urlquote(self.irc.network),
                     utils.web.urlquote(self.channel)))
 

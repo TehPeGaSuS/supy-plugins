@@ -1347,7 +1347,7 @@ class IRCquotes(callbacks.Plugin):
         self._checkEnabled(irc, channel)
         url = self._quotePageUrl(irc, channel)
         if url:
-            irc.reply(url)
+            irc.reply(_('%s Quotes: %s') % (channel, url))
         else:
             irc.error(_('No web page has been configured for %s.') %
                       channel)

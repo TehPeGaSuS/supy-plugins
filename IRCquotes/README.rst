@@ -57,10 +57,10 @@ Commands
 - ``quotestats [<channel>]`` -- number of (non-deleted) quotes in the
   database. Also appends the ``web.publicUrl`` link, if one is set for
   the channel.
-- ``quotepage [<channel>]`` -- shows the URL where <channel>'s quotes can
-  be browsed on the web, built from ``supybot.plugins.IRCquotes.web.
-  publicUrl`` plus the network and channel, if that base is set (same
-  idea as the original script's ``html_page_url``).
+- ``quotepage [<channel>]`` -- replies with ``<channel> Quotes: <url>``,
+  the URL built from ``supybot.plugins.IRCquotes.web.publicUrl`` plus
+  the network and channel, if that base is set (same idea as the
+  original script's ``html_page_url``).
 
 Permissions
 -----------
