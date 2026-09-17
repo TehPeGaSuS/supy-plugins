@@ -27,6 +27,8 @@
 # POSSIBILITY OF SUCH DAMAGE.
 ###
 
+import supybot.ircutils as ircutils
+
 from supybot.test import *
 
 class IRCquotesTestCase(ChannelPluginTestCase):
@@ -63,7 +65,29 @@ class IRCquotesTestCase(ChannelPluginTestCase):
         with conf.supybot.databases.plugins.requireRegistration.context(False):
             self.assertNotError('addquote to be deleted')
             self.assertNotError('delquote 1')
-            self.assertError('quoteget 1')
+            # Numbering is preserved: the id stays valid, but the content
+            # is hidden instead of the quote vanishing entirely.
+            self.assertRegexp('quoteget 1', 'has been deleted')
+            self.assertError('delquote 1') # already deleted
+            # Not an error reply, just a plain notice -- can't vote on a
+            # deleted quote.
+            self.assertRegexp('votequote 1 +', 'cannot be voted')
+            self.assertNotError('undelquote 1')
+            self.assertRegexp('quoteget 1', 'to be deleted')
+
+    def testForceDelQuote(self):
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            self.assertNotError('addquote to be purged')
+            self.assertNotError('forcedelquote 1')
+            self.assertError('quoteget 1') # gone for good, no such record
+
+    def testAddCapability(self):
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            with conf.supybot.plugins.IRCquotes.addCapability.context('op'):
+                noCapPrefix = ircutils.joinHostmask(
+                    self.nick, 'user', '__no_testcap__.domain.tld')
+                self.assertError('addquote nope, not an op',
+                                  frm=noCapPrefix)
 
     def testDisabled(self):
         with conf.supybot.databases.plugins.requireRegistration.context(False):

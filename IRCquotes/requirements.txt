@@ -1,0 +1,11 @@
+# IRCquotes has no third-party Python dependencies beyond Limnoria
+# itself (limnoria / supybot, which this plugin runs inside of) and the
+# Python standard library (time, random, fnmatch, html).
+#
+# This file is intentionally near-empty; it exists so tooling that scans
+# for a requirements.txt per plugin finds one. If you install Limnoria
+# from PyPI rather than running from a source checkout, uncomment the
+# line below to pin it as a courtesy -- it is not required if you are
+# already running Limnoria (the plugin lives inside it).
+#
+# limnoria

@@ -28,6 +28,7 @@
 ###
 
 import time
+import random
 import fnmatch
 import html as html_escape
 
@@ -348,7 +349,7 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
                              'here.',
                 })
             return
-        records = list(self._plugin.db.select(channel, lambda r: True,
+        records = list(self._plugin.db.select(channel, lambda r: not r.deleted,
                                                reverse=True))
         if records:
             rows = '\n'.join(
@@ -441,12 +442,18 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
                     ('likes', (int, 0)),
                     ('dislikes', (int, 0)),
                     ('voters', (utils.safeEval, '')),
+                    ('deleted', (utils.safeEval, False)),
+                    ('deletedBy', (utils.safeEval, '')),
+                    ('deletedAt', (float, 0)),
                 ]
 
             def add(self, at, by, text, **kwargs):
                 kwargs.setdefault('likes', 0)
                 kwargs.setdefault('dislikes', 0)
                 kwargs.setdefault('voters', '')
+                kwargs.setdefault('deleted', False)
+                kwargs.setdefault('deletedBy', '')
+                kwargs.setdefault('deletedAt', 0)
                 record = self.Record(at=at, by=by, text=text, **kwargs)
                 # Call dbi.DB.add() directly (not via super(self.__class__,
                 # self), which the base ChannelIdDatabasePlugin.DB.DB.add()
@@ -543,15 +550,49 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
                 irc.network, channel)():
             irc.error(_('Quotes are disabled in %s.') % channel, Raise=True)
 
+    def _requireOp(self, irc, msg, channel):
+        cap = ircdb.makeChannelCapability(channel, 'op')
+        if not ircdb.checkCapability(msg.prefix, cap):
+            irc.errorNoCapability(cap, Raise=True)
+
+    def _requireCapability(self, irc, msg, channel, capname):
+        # capname is a bare capability name (e.g. "op", "trusted"); it's
+        # turned into the usual "#channel,<capability>" form. An already
+        # fully-qualified capability (containing a comma, e.g.
+        # "#channel,op") is accepted as-is.
+        if not capname:
+            return
+        cap = capname if ',' in capname \
+            else ircdb.makeChannelCapability(channel, capname)
+        if not ircdb.checkCapability(msg.prefix, cap):
+            irc.errorNoCapability(cap, Raise=True)
+
+    def showRecord(self, record):
+        # Deleted quotes keep their id and slot in the database (so
+        # numbering never shifts, same as the original script), but their
+        # content is hidden from normal display.
+        if record.deleted:
+            return _('#%s: (This quote has been deleted)') % record.id
+        return plugins.ChannelIdDatabasePlugin.showRecord(self, record)
+
     @internationalizeDocstring
     def addquote(self, irc, msg, args, channel, text):
         """[<channel>] <text>
 
         Adds <text> as a new quote to the quotes database for <channel>.
-        <channel> is only necessary if the message isn't sent in the channel
-        itself.
+        If supybot.plugins.IRCquotes.addCapability is set (e.g. to "op"),
+        only users with that channel capability may use this command.
+        <channel> is only necessary if the message isn't sent in the
+        channel itself.
         """
         self._checkEnabled(irc, channel)
+        self._requireCapability(irc, msg, channel,
+            self.registryValue('addCapability', channel))
+        if self.registryValue('requireAddRegistration', channel):
+            try:
+                ircdb.users.getUser(msg.prefix)
+            except KeyError:
+                irc.errorNotRegistered(Raise=True)
         user = self.getUserId(irc, msg.prefix, channel) or msg.prefix
         at = time.time()
         self.addValidator(irc, text)
@@ -589,6 +630,9 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         except KeyError:
             self.noSuchRecord(irc, channel, id)
             return
+        if record.deleted:
+            irc.reply(self.showRecord(record))
+            return
         username = plugins.getUserName(record.by)
         irc.reply(_('Quote #%s added by %s on %s; %s like(s), '
                     '%s dislike(s).') %
@@ -597,25 +641,105 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
     quoteinfo = wrap(quoteinfo, ['channeldb', 'id'])
 
     @internationalizeDocstring
+    def deletedquoteinfo(self, irc, msg, args, channel, id):
+        """[<channel>] <id>
+
+        Shows full details (including the original text) about a deleted
+        quote: who added it, who deleted it, and when. Requires being a
+        channel op.
+        """
+        self._checkEnabled(irc, channel)
+        self._requireOp(irc, msg, channel)
+        try:
+            record = self.db.get(channel, id)
+        except KeyError:
+            self.noSuchRecord(irc, channel, id)
+            return
+        if not record.deleted:
+            irc.error(_('Quote #%s has not been deleted.') % id)
+            return
+        author = plugins.getUserName(record.by)
+        deleter = plugins.getUserName(record.deletedBy)
+        irc.reply(_('Quote #%s (added by %s on %s, deleted by %s on %s): '
+                    '%s') % (
+            record.id, author, utils.str.timestamp(record.at),
+            deleter, utils.str.timestamp(record.deletedAt),
+            utils.str.quoted(record.text)))
+    deletedquoteinfo = wrap(deletedquoteinfo, ['channeldb', 'id'])
+
+    @internationalizeDocstring
     def delquote(self, irc, msg, args, channel, id):
         """[<channel>] <id>
 
-        Removes the quote with id <id> from <channel>'s quotes database.
-        You must be the original author of the quote, or a channel op, to
-        remove it (same as the original script's author-or-admin rule).
-        <channel> is only necessary if the message isn't sent in the channel
-        itself.
+        Marks the quote with id <id> as deleted in <channel>'s quotes
+        database. You must be the original author of the quote, or a
+        channel op, to delete it (same as the original script's
+        author-or-admin rule). The quote keeps its id and slot in the
+        database (so numbering never shifts) but its content is hidden;
+        see undelquote to restore it, or forcedelquote to purge it for
+        good. <channel> is only necessary if the message isn't sent in the
+        channel itself.
         """
         self._checkEnabled(irc, channel)
         user = self.getUserId(irc, msg.prefix, channel) or msg.prefix
         try:
             record = self.db.get(channel, id)
             self.checkChangeAllowed(irc, msg, channel, user, record)
-            self.db.remove(channel, id)
+            if record.deleted:
+                irc.error(_('Quote #%s is already deleted.') % id)
+                return
+            record.deleted = True
+            record.deletedBy = user
+            record.deletedAt = time.time()
+            self.db.set(channel, id, record)
             irc.replySuccess()
         except KeyError:
             self.noSuchRecord(irc, channel, id)
     delquote = wrap(delquote, ['channeldb', 'id'])
+
+    @internationalizeDocstring
+    def undelquote(self, irc, msg, args, channel, id):
+        """[<channel>] <id>
+
+        Restores a quote previously removed with delquote. Requires being
+        a channel op (in the original script, undelquote/forcedelquote/
+        deletedquoteinfo were all master/channel-master-only, unlike the
+        looser author-or-op delquote). <channel> is only necessary if the
+        message isn't sent in the channel itself.
+        """
+        self._checkEnabled(irc, channel)
+        self._requireOp(irc, msg, channel)
+        try:
+            record = self.db.get(channel, id)
+            if not record.deleted:
+                irc.error(_('Quote #%s is not deleted.') % id)
+                return
+            record.deleted = False
+            record.deletedBy = ''
+            record.deletedAt = 0
+            self.db.set(channel, id, record)
+            irc.replySuccess()
+        except KeyError:
+            self.noSuchRecord(irc, channel, id)
+    undelquote = wrap(undelquote, ['channeldb', 'id'])
+
+    @internationalizeDocstring
+    def forcedelquote(self, irc, msg, args, channel, id):
+        """[<channel>] <id>
+
+        Permanently purges the quote with id <id> from <channel>'s quotes
+        database (unlike delquote, this cannot be undone with undelquote).
+        Requires being a channel op.
+        """
+        self._checkEnabled(irc, channel)
+        self._requireOp(irc, msg, channel)
+        try:
+            self.db.get(channel, id)
+            self.db.remove(channel, id)
+            irc.replySuccess()
+        except KeyError:
+            self.noSuchRecord(irc, channel, id)
+    forcedelquote = wrap(forcedelquote, ['channeldb', 'id'])
 
     @internationalizeDocstring
     def randquote(self, irc, msg, args, channel):
@@ -625,9 +749,9 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         is only necessary if the message isn't sent in the channel itself.
         """
         self._checkEnabled(irc, channel)
-        quote = self.db.random(channel)
-        if quote:
-            irc.reply(self.showRecord(quote))
+        candidates = list(self.db.select(channel, lambda r: not r.deleted))
+        if candidates:
+            irc.reply(self.showRecord(random.choice(candidates)))
         else:
             irc.error(_('I have no quotes in my database for %s.') %
                       channel)
@@ -639,13 +763,14 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
 
         Returns the most recently added quote from <channel>'s database, or
         the <index>'th most recent one if <index> is given (1 is the most
-        recent). <channel> is only necessary if the message isn't sent in the
-        channel itself.
+        recent). Deleted quotes are skipped. <channel> is only necessary if
+        the message isn't sent in the channel itself.
         """
         self._checkEnabled(irc, channel)
         if index < 1:
             irc.error(_('<index> must be at least 1.'), Raise=True)
-        records = list(self.db.select(channel, lambda r: True, reverse=True))
+        records = list(self.db.select(channel, lambda r: not r.deleted,
+                                      reverse=True))
         if len(records) < index:
             irc.error(_('I have fewer than %s quotes in my database for '
                         '%s.') % (index, channel))
@@ -659,10 +784,10 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
 
         Searches <channel>'s quotes database for quotes matching <glob>
         (a case-insensitive '*'-glob against the quote text), optionally
-        restricted to quotes added by <user>.
+        restricted to quotes added by <user>. Deleted quotes are excluded.
         """
         self._checkEnabled(irc, channel)
-        predicates = []
+        predicates = [lambda r: not r.deleted]
         for (opt, arg) in optlist:
             if opt == 'by':
                 predicates.append(lambda r, arg=arg: r.by == arg.id)
@@ -707,6 +832,11 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             self.noSuchRecord(irc, channel, id)
             return
 
+        if record.deleted:
+            irc.reply(_('#%s: This quote has been deleted and cannot be '
+                        'voted.') % id)
+            return
+
         voters = set(v for v in record.voters.split(',') if v)
         alreadyVoted = voterId in voters
 
@@ -746,7 +876,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         itself.
         """
         self._checkEnabled(irc, channel)
-        n = self.db.size(channel)
+        n = len(list(self.db.select(channel, lambda r: not r.deleted)))
         irc.reply(format(_('There %b %n in my database.'),
                           n, (n, 'quote')))
     quotestats = wrap(quotestats, ['channeldb'])
