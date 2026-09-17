@@ -44,8 +44,11 @@ def configure(advanced):
 IRCquotes = conf.registerPlugin('IRCquotes')
 
 conf.registerChannelValue(IRCquotes, 'enabled',
-    registry.Boolean(True, _("""Determines whether the quotes commands
-    (addquote, quote, delquote, etc.) are enabled in this channel.""")))
+    registry.Boolean(False, _("""Determines whether the quotes commands
+    (addquote, quoteget, delquote, etc.) are enabled in this channel.
+    Disabled by default: it's an opt-in feature, so enable it per
+    channel with "config channel <channel> plugins.IRCquotes.enabled
+    true".""")))
 
 conf.registerChannelValue(IRCquotes, 'requireVoteRegistration',
     registry.Boolean(False, _("""Determines whether users must be registered

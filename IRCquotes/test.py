@@ -34,6 +34,12 @@ from supybot.test import *
 class IRCquotesTestCase(ChannelPluginTestCase):
     plugins = ('IRCquotes', 'User')
 
+    def setUp(self):
+        ChannelPluginTestCase.setUp(self)
+        # Quotes are opt-in (disabled by default); enable them for the
+        # test channel so the other tests don't have to.
+        conf.supybot.plugins.IRCquotes.enabled.setValue(True)
+
     def testAddAndGet(self):
         with conf.supybot.databases.plugins.requireRegistration.context(False):
             self.assertNotError('addquote hello world')

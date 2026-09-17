@@ -72,7 +72,9 @@ Configuration
 --------------
 
 - ``supybot.plugins.IRCquotes.enabled`` (channel) -- turn quotes on/off
-  for a channel.
+  for a channel. Disabled by default (opt-in): run
+  ``config channel <channel> plugins.IRCquotes.enabled true`` to turn it
+  on for a channel.
 - ``supybot.plugins.IRCquotes.requireVoteRegistration`` (channel) --
   require registration with the bot to vote.
 - ``supybot.plugins.IRCquotes.addCapability`` (channel) -- if set to a
