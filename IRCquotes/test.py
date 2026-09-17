@@ -176,4 +176,19 @@ class IRCquotesTestCase(ChannelPluginTestCase):
                          in handler.headers)
         self.assertTrue('quoteid' in handler.body)
 
+    def testWebIndexCards(self):
+        cb = self.irc.getCallback('IRCquotes')
+        webcb = ircquotes_plugin.IRCquotesWebCallback()
+        webcb._plugin = cb
+        handler = _FakeHttpHandler()
+        webcb.send_response = handler.send_response
+        webcb.send_header = handler.send_header
+        webcb.end_headers = handler.end_headers
+        webcb.wfile = handler
+        with conf.supybot.plugins.IRCquotes.web.channel.context(True):
+            webcb.doGetOrHead(handler, '/', True)
+        self.assertEqual(handler.status, 200)
+        self.assertTrue('network-card' in handler.body)
+        self.assertTrue(self.channel in handler.body)
+
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

@@ -60,71 +60,79 @@ PAGE_SKELETON = """\
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>%(title)s</title>
   <link rel="stylesheet" href="/ircquotes/style.css" type="text/css" />
 </head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand">""" + _('IRCquotes') + """</span>
+      <button id="theme-toggle" type="button"
+              aria-label=\"""" + _('Toggle color theme') + """\">🌓</button>
+    </div>
+  </header>
+  <div id="content">
 %(body)s
+  </div>
+  <script>
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById('theme-toggle');
+    var stored = null;
+    try { stored = localStorage.getItem('ircquotes-theme'); } catch (e) {}
+    if (stored === 'light' || stored === 'dark') {
+      root.setAttribute('data-theme', stored);
+    }
+    btn.addEventListener('click', function () {
+      var current = root.getAttribute('data-theme');
+      if (!current) {
+        var prefersLight = window.matchMedia &&
+          window.matchMedia('(prefers-color-scheme: light)').matches;
+        current = prefersLight ? 'light' : 'dark';
+      }
+      var next = current === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('ircquotes-theme', next); } catch (e) {}
+    });
+  })();
+  </script>
+</body>
 </html>"""
 
 DEFAULT_TEMPLATES = {
     'ircquotes/index.html': PAGE_SKELETON % {
         'title': _('IRC Quotes'),
         'body': """\
-<body>
-  <div id="content">
-    <div id="header">
-      <div id="ombreh1"></div>
-      <h1>""" + _('IRC Quotes') + """</h1>
-    </div>
-    <form action="." method="post">
-      <label for="chan">""" + _('Channel name:') + """</label>
+    <h1>""" + _('IRC Quotes') + """</h1>
+    %(cards)s
+    <form class="jumpform" action="." method="post">
+      <label for="chan">""" + _('Or jump to a channel by name:') + """</label>
       <input type="text" placeholder="#channel" name="chan" id="chan" />
       <input type="submit" name="submit" value=\"""" + _('view') + """\" />
-    </form>
-  </div>
-</body>""",
+    </form>""",
     },
     'ircquotes/channel.html': PAGE_SKELETON % {
         'title': _('Quotes of %(channel)s'),
         'body': """\
-<body>
-  <div id="content">
-    <div id="header">
-      <div id="ombreh1"></div>
-      <h1>""" + _('Quotes of %(channel)s') + """</h1>
-      <div id="informations">
-        <div id="infosalon">
-          <div id="listeinfos">
-            <span class="li">""" + _('Network:') + """ <span
-              class="variablef">%(network)s</span></span>
-            <span class="li">""" + _('Channel:') + """ <span
-              class="variablef">%(channel)s</span></span>
-            <span class="li">""" + _('Bot:') + """ <span
-              class="variablef">%(botnick)s</span></span>
-          </div>
-          <div id="infotime">""" + _('%(count)s quote(s) in the '
+    <h1>""" + _('Quotes of %(channel)s') + """</h1>
+    <div class="infobar">
+      <span class="infoitem">""" + _('Network:') + """ <span
+        class="infovalue">%(network)s</span></span>
+      <span class="infoitem">""" + _('Channel:') + """ <span
+        class="infovalue">%(channel)s</span></span>
+      <span class="infoitem">""" + _('Bot:') + """ <span
+        class="infovalue">%(botnick)s</span></span>
+      <div class="infocount">""" + _('%(count)s quote(s) in the '
                                       'database.') + """</div>
-        </div>
-      </div>
     </div>
-    <br />
 %(topquotes)s
-    <div id="archives">
-      <div id="arch">
-        <div id="ombrearch">
-          <div id="quotes">
+    <div class="panel" id="quotes">
 %(topquotes_titled)s
-            %(rows)s
-          </div>
-        </div>
-      </div>
+      %(rows)s
     </div>
-    <div id="footer">
-      <div id="lif3">""" + _('IRCquotes, ported from Public Quotes '
-                              'System') + """</div>
-    </div>
-  </div>
-</body>""",
+    <footer class="pagefooter">""" + _('IRCquotes, ported from Public '
+                                        'Quotes System') + """</footer>""",
     },
     'ircquotes/style.css': """\
 /* IRCquotes web style -- a modernized take on Public Quotes System's
@@ -143,9 +151,10 @@ DEFAULT_TEMPLATES = {
     --shadow: rgba(0, 0, 0, 0.35);
     --border: #2a2e3a;
 }
-/* Light theme, used only if the visitor's OS/browser prefers light. */
+/* Automatic light theme, only used until the visitor picks one via the
+   toggle button (data-theme then takes over, see below). */
 @media (prefers-color-scheme: light) {
-    :root {
+    :root:not([data-theme="dark"]) {
         --bg: #f4f5f7;
         --panel: #ffffff;
         --panel-alt: #eef0f4;
@@ -159,8 +168,23 @@ DEFAULT_TEMPLATES = {
         --border: #e2e5eb;
     }
 }
+/* Explicit theme picked via the toggle button, overriding system
+   preference either way. */
+:root[data-theme="light"] {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --panel-alt: #eef0f4;
+    --accent: #2563eb;
+    --accent-soft: #7c3aed;
+    --text: #1f2430;
+    --text-dim: #667085;
+    --positive: #16a34a;
+    --negative: #dc2626;
+    --shadow: rgba(20, 20, 30, 0.08);
+    --border: #e2e5eb;
+}
+* { box-sizing: border-box; }
 html, body {
-    text-align: center;
     margin: 0;
     padding: 0;
     font: 0.95em/1.5 "Inter", "Segoe UI", helvetica, arial, sans-serif;
@@ -169,42 +193,59 @@ html, body {
 }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-#content { width: 1000px; margin: 0 auto; }
-#header { padding: 0; margin: 0; width: 100%; }
-#ombreh1 {
-    margin-top: 44px;
-    margin-left: 83px;
-    margin-right: 77px;
+.topbar {
     background-color: var(--panel);
-    height: 35px;
-    border-radius: 10px;
+    border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.brand { font-weight: 700; color: var(--accent); font-size: 1.1em; }
+#theme-toggle {
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 1em;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text);
+}
+#theme-toggle:hover { border-color: var(--accent); }
+#content {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 28px 20px 40px 20px;
+    text-align: center;
 }
 h1 {
-    margin-top: -38px;
-    margin-left: 80px;
-    margin-right: 80px;
-    font-size: 1.8em;
-    font-weight: 600;
-    text-align: center;
-    background: linear-gradient(135deg, var(--panel-alt), var(--panel));
+    margin: 0 0 20px 0;
+    font-size: 1.6em;
+    font-weight: 700;
     color: var(--accent);
-    height: 35px;
-    line-height: 35px;
-    border-radius: 10px;
-    box-shadow: 0 4px 14px var(--shadow);
 }
-form {
-    margin: 20px auto;
-    text-align: center;
+.jumpform {
+    margin: 24px 0 0 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
 }
-form input[type="text"] {
+.jumpform label { color: var(--text-dim); }
+.jumpform input[type="text"] {
     padding: 6px 10px;
     border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--panel);
     color: var(--text);
 }
-form input[type="submit"] {
+.jumpform input[type="submit"] {
     padding: 6px 14px;
     border-radius: 6px;
     border: none;
@@ -213,53 +254,65 @@ form input[type="submit"] {
     font-weight: 600;
     cursor: pointer;
 }
-#informations {
-    margin: 10px 5% 10px 5%;
+.networks {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 16px;
+    margin: 0;
 }
-#infosalon { text-align: center; min-height: 30px; }
-#infotime { margin-top: 5px; text-align: center; color: var(--text-dim); }
-.variablef { font-weight: 600; color: var(--text); }
-.li { margin-left: 20px; margin-right: 20px; }
-#topquotes {
-    position: relative;
-    color: var(--text);
-    padding: 10px 14px;
-    margin-bottom: 10px;
-    background-color: var(--panel-alt);
-    border-radius: 10px;
-}
-#titles {
-    font-size: 1.3em;
-    font-weight: 600;
-    color: var(--accent-soft);
-    margin-bottom: 6px;
-}
-#archives {
-    clear: both;
-    padding: 0;
-    margin-top: 10px;
-    width: 1000px;
+.network-card {
+    width: 100%;
+    max-width: 260px;
     text-align: left;
-}
-#arch {
-    margin-top: 25px;
-    margin-left: 83px;
-    margin-right: 77px;
-    width: 1000px;
-}
-#ombrearch {
-    padding: 0;
-    width: 840px;
+    padding: 14px 18px;
     background-color: var(--panel);
     border-radius: 10px;
     box-shadow: 0 4px 14px var(--shadow);
 }
-#quotes {
-    position: relative;
+.network-card h2 {
+    margin: 0 0 10px 0;
+    font-size: 1.1em;
+    font-weight: 600;
+    color: var(--accent-soft);
+}
+.network-card ul.channel-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.network-card ul.channel-list li {
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+}
+.network-card ul.channel-list li:last-child { border-bottom: none; }
+.network-card ul.channel-list a { color: var(--accent); }
+.no-networks { color: var(--text-dim); }
+.infobar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px 20px;
+    margin: 0 0 24px 0;
+    color: var(--text-dim);
+}
+.infovalue { font-weight: 600; color: var(--text); }
+.infocount { width: 100%; margin-top: 4px; }
+.panel {
+    text-align: left;
     color: var(--text);
-    padding: 10px 14px;
+    padding: 14px 18px;
     background-color: var(--panel);
     border-radius: 10px;
+    box-shadow: 0 4px 14px var(--shadow);
+    margin-bottom: 10px;
+}
+.panel.topquotes { background-color: var(--panel-alt); }
+.paneltitle {
+    font-size: 1.2em;
+    font-weight: 600;
+    color: var(--accent-soft);
+    margin-bottom: 10px;
 }
 .quote {
     padding: 10px 4px;
@@ -272,20 +325,14 @@ form input[type="submit"] {
 .quoterating { color: var(--text-dim); font-size: 0.75em; float: right; }
 .positiverating { color: var(--positive); font-weight: 600; }
 .negativerating { color: var(--negative); font-weight: 600; }
-#footer {
-    clear: both;
-    padding: 0;
-    width: 1000px;
+.pagefooter {
+    text-align: center;
     color: var(--text-dim);
     font-size: 0.8em;
+    padding-top: 10px;
 }
-#lif3 {
-    padding-top: 5px;
-    padding-bottom: 10px;
-    width: 100%;
-    text-align: center;
-    background-color: var(--panel);
-    border-radius: 0 0 10px 10px;
+@media (max-width: 480px) {
+    .infobar { flex-direction: column; gap: 2px; }
 }
 """,
 }
@@ -318,6 +365,35 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             'at': utils.str.timestamp(record.at),
         }
 
+    def _renderNetworkCards(self):
+        # One card per connected network, listing the channels there whose
+        # quotes have been opted into being browsable (web.channel).
+        channelsByNetwork = {}
+        for irc in world.ircs:
+            channels = sorted(
+                channel for channel in irc.state.channels
+                if self._plugin.registryValue('web.channel', channel))
+            if channels:
+                channelsByNetwork[irc.network] = channels
+        if not channelsByNetwork:
+            return '<p class="no-networks">%s</p>' % \
+                html_escape.escape(_('No channels are browsable here yet.'))
+        cards = []
+        for network in sorted(channelsByNetwork):
+            links = '\n'.join(
+                '    <li><a href="/ircquotes/%s/">%s</a></li>' % (
+                    utils.web.urlquote(channel),
+                    html_escape.escape(channel))
+                for channel in channelsByNetwork[network])
+            cards.append("""\
+<div class="network-card">
+  <h2>%s</h2>
+  <ul class="channel-list">
+%s
+  </ul>
+</div>""" % (html_escape.escape(network), links))
+        return '<div class="networks">\n%s\n</div>' % '\n'.join(cards)
+
     def doGetOrHead(self, handler, path, write_content):
         parts = [p for p in path.split('/') if p]
         if not parts:
@@ -325,7 +401,8 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
             if write_content:
-                self.write(httpserver.get_template('ircquotes/index.html'))
+                self.write(httpserver.get_template('ircquotes/index.html') %
+                    {'cards': self._renderNetworkCards()})
             return
         if parts == ['style.css']:
             self.send_response(200)
@@ -366,30 +443,28 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             rows = '<p>%s</p>' % _('No quotes yet.')
 
         # "Top quotes" panel: the best-rated quotes, ported from the
-        # original's %TOPQUOTES% block. Only shown once something has
-        # actually been rated.
+        # original's toggleable, count-configurable html_show_best_rated_
+        # quotes/%TOPQUOTES% feature. Only shown once something has
+        # actually been rated (and if enabled for this channel).
+        topQuotesEnabled = self._plugin.registryValue(
+            'web.topQuotesEnabled', channel)
+        topQuotesCount = self._plugin.registryValue(
+            'web.topQuotesCount', channel)
         rated = [r for r in records if r.likes or r.dislikes]
         rated.sort(key=lambda r: (r.likes - r.dislikes), reverse=True)
-        top = rated[:3]
+        top = rated[:topQuotesCount] if topQuotesEnabled else []
         if top:
             top_rows = '\n'.join(
                 self._renderQuote(r, plugins.getUserName(r.by))
                 for r in top)
             topquotes = """\
-    <div id="archives">
-      <div id="arch">
-        <div id="ombrearch">
-          <div id="topquotes">
-            <div id="titles">%s</div>
-            %s
-          </div>
-        </div>
-      </div>
-    </div>
-    <br style="clear:both;" />""" % (
+    <div class="panel topquotes">
+      <div class="paneltitle">%s</div>
+      %s
+    </div>""" % (
                 html_escape.escape(_('Top %d quote(s)...') % len(top)),
                 top_rows)
-            topquotes_titled = '<div id="titles">%s</div>' % \
+            topquotes_titled = '<div class="paneltitle">%s</div>' % \
                 html_escape.escape(_('All quotes...'))
         else:
             topquotes = ''

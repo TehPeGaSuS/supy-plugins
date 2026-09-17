@@ -92,16 +92,29 @@ Configuration
   database over the bot's built-in HTTP server (``supybot.servers.http``).
 - ``supybot.plugins.IRCquotes.web.channel`` (channel) -- allow a specific
   channel's quotes to be browsed on the web.
+- ``supybot.plugins.IRCquotes.web.topQuotesEnabled`` (channel) -- show a
+  "top quotes" panel of the best-rated quotes above the full list, same
+  as the original script's toggleable ``html_show_best_rated_quotes``.
+  Enabled by default.
+- ``supybot.plugins.IRCquotes.web.topQuotesCount`` (channel) -- how many
+  quotes appear in that panel (same idea as the original's
+  ``num_best_rated_quotes``). Defaults to 5.
 
 Web interface
 -------------
 
 When enabled, quotes are browsable at ``/ircquotes/<channel>/`` on the
-bot's HTTP server. The page's look (dark background, "shadowed" header
-bar, rounded panels, top-quotes panel) is ported from the original
-script's ``templates/default/{index.html,style.css}``, refreshed with a
-more modern palette and automatic light/dark mode (dark by default,
-switching to light if the visitor's browser prefers it).
+bot's HTTP server. The page's look (dark background, rounded panels,
+top-quotes panel) draws on the original script's
+``templates/default/{index.html,style.css}``, redesigned with a cleaner
+responsive layout and a manual light/dark toggle button (dark by
+default; falls back to the visitor's OS/browser preference until they
+pick one explicitly, remembered via ``localStorage``).
+
+Landing on ``/ircquotes/`` itself shows a card per connected network,
+each listing the channels there whose ``web.channel`` is enabled, linking
+straight to their quotes page (plus a manual "jump to a channel" field
+as a fallback).
 
 Since Limnoria's built-in HTTP server has no TLS support of its own and
 normally isn't meant to be exposed directly, example Apache reverse-proxy

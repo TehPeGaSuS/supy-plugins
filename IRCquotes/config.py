@@ -81,6 +81,12 @@ conf.registerGlobalValue(IRCquotes.web, 'enable',
 conf.registerChannelValue(IRCquotes.web, 'channel',
     registry.Boolean(False, _("""Determines whether this channel's quotes
     can be displayed via the web server.""")))
+conf.registerChannelValue(IRCquotes.web, 'topQuotesEnabled',
+    registry.Boolean(True, _("""Determines whether the web page shows a
+    "top quotes" panel of the best-rated quotes, above the full list.""")))
+conf.registerChannelValue(IRCquotes.web, 'topQuotesCount',
+    registry.PositiveInteger(5, _("""Determines how many quotes are shown
+    in the "top quotes" panel, when enabled.""")))
 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
