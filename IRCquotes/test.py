@@ -87,15 +87,43 @@ class IRCquotesTestCase(ChannelPluginTestCase):
             self.assertNotError('addquote a needle in a haystack')
             self.assertRegexp('findquote *needle*', 'needle')
 
+    def testFindQuoteMaxResults(self):
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            for i in range(5):
+                self.assertNotError('addquote needle %d' % i)
+            with conf.supybot.plugins.IRCquotes.findQuoteMaxResults.context(2):
+                self.assertRegexp('findquote *needle*', 'showing 2')
+
+    def testMinQuoteLength(self):
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            with conf.supybot.plugins.IRCquotes.minQuoteChars.context(10):
+                self.assertError('addquote short')
+                self.assertNotError('addquote long enough now')
+            with conf.supybot.plugins.IRCquotes.minQuoteWords.context(3):
+                self.assertError('addquote two words')
+                self.assertNotError('addquote this has three words')
+
     def testVoteQuote(self):
         with conf.supybot.databases.plugins.requireRegistration.context(False):
             self.assertNotError('addquote votable quote')
             self.assertNotError('votequote 1 +')
             self.assertRegexp('quoteinfo 1', '1 like')
-            self.assertError('votequote 1 +') # already voted
+            self.assertError('votequote 1 +') # already voted that way
             self.assertNotError('votequote 1 0') # clear vote
+            self.assertError('votequote 1 0') # nothing to clear
             self.assertNotError('votequote 1 -')
             self.assertRegexp('quoteinfo 1', '1 dislike')
+
+    def testVoteQuoteDirectSwitch(self):
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            self.assertNotError('addquote switchable quote')
+            self.assertNotError('votequote 1 +')
+            self.assertRegexp('quoteinfo 1', '1 like\\(s\\), 0 dislike')
+            # Switch directly from + to - without clearing first.
+            self.assertNotError('votequote 1 -')
+            self.assertRegexp('quoteinfo 1', '0 like\\(s\\), 1 dislike')
+            self.assertNotError('votequote 1 +')
+            self.assertRegexp('quoteinfo 1', '1 like\\(s\\), 0 dislike')
 
     def testDelQuote(self):
         with conf.supybot.databases.plugins.requireRegistration.context(False):

@@ -24,7 +24,9 @@ id numbering, which is almost certainly not what you want.
 Commands
 --------
 
-- ``addquote [<channel>] <text>`` -- add a quote.
+- ``addquote [<channel>] <text>`` -- add a quote. Can be gated by
+  minQuoteChars/minQuoteWords (both disabled by default; see
+  Configuration).
 - ``quoteget [<channel>] <id>`` -- show a quote by id.
 - ``quoteinfo [<channel>] <id>`` -- show a quote's author, timestamp and
   vote counts.
@@ -44,11 +46,14 @@ Commands
 - ``lastquote [<channel>] [<index>]`` -- show the most recently added
   quote, or the <index>'th most recent (deleted quotes are skipped).
 - ``findquote [<channel>] [--by <user>] [<glob>]`` -- search quotes
-  (deleted quotes are excluded).
+  (deleted quotes are excluded). Results are capped at
+  ``findQuoteMaxResults`` (default 20; 0 for no limit), noting how many
+  were found if the list was truncated.
 - ``votequote [<channel>] <id> [+|-|0]`` -- like/dislike/clear your vote
-  on a quote. Each user may cast one vote per quote. Voting on a deleted
-  quote replies with ``#<id>: This quote has been deleted and cannot be
-  voted.`` instead of erroring.
+  on a quote. Each user may cast one vote per quote, but can switch
+  directly between ``+`` and ``-`` without clearing first; ``0`` clears
+  it entirely. Voting on a deleted quote replies with ``#<id>: This
+  quote has been deleted and cannot be voted.`` instead of erroring.
 - ``quotestats [<channel>]`` -- number of (non-deleted) quotes in the
   database.
 
@@ -99,6 +104,16 @@ Configuration
   additional effect if addCapability is already set to something.
 - ``supybot.plugins.IRCquotes.autoRandQuoteInterval`` (channel) -- seconds
   between automatic random-quote announcements (0 disables it).
+- ``supybot.plugins.IRCquotes.findQuoteMaxResults`` (channel) -- maximum
+  number of matches findquote lists in one reply (same idea as the
+  original's max_findquote/max_findquote_total). Defaults to 20; 0 for
+  no limit.
+- ``supybot.plugins.IRCquotes.minQuoteChars`` (channel) -- if non-zero,
+  addquote refuses quotes shorter than this many characters (same idea
+  as the original's min_chars_to_quote). Disabled (0) by default.
+- ``supybot.plugins.IRCquotes.minQuoteWords`` (channel) -- if non-zero,
+  addquote refuses quotes with fewer words than this (same idea as the
+  original's min_words_to_quote). Disabled (0) by default.
 - ``supybot.plugins.IRCquotes.web.enable`` (global) -- serve the quotes
   database over the bot's built-in HTTP server (``supybot.servers.http``).
 - ``supybot.plugins.IRCquotes.web.channel`` (channel) -- allow a specific

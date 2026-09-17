@@ -74,6 +74,22 @@ conf.registerChannelValue(IRCquotes, 'autoRandQuoteInterval',
     bot automatically announces a random quote in this channel. Set to 0
     to disable automatic announcing (the default).""")))
 
+conf.registerChannelValue(IRCquotes, 'findQuoteMaxResults',
+    registry.NonNegativeInteger(20, _("""Determines the maximum number of
+    matches findquote will list in a single reply (same idea as the
+    original script's max_findquote/max_findquote_total). Set to 0 for
+    no limit.""")))
+
+conf.registerChannelValue(IRCquotes, 'minQuoteChars',
+    registry.NonNegativeInteger(0, _("""If non-zero, addquote will refuse
+    quotes shorter than this many characters (same idea as the original
+    script's min_chars_to_quote). Disabled (0) by default.""")))
+
+conf.registerChannelValue(IRCquotes, 'minQuoteWords',
+    registry.NonNegativeInteger(0, _("""If non-zero, addquote will refuse
+    quotes with fewer words than this (same idea as the original script's
+    min_words_to_quote). Disabled (0) by default.""")))
+
 conf.registerGroup(IRCquotes, 'web')
 conf.registerGlobalValue(IRCquotes.web, 'enable',
     registry.Boolean(False, _("""Determines whether the quotes database will

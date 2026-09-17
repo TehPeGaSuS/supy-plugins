@@ -996,6 +996,14 @@ class IRCquotes(callbacks.Plugin):
         if not cap and self.registryValue('requireAddRegistration', channel):
             cap = 'op'
         self._requireCapability(irc, msg, channel, cap)
+        minChars = self.registryValue('minQuoteChars', channel)
+        if minChars and len(text) < minChars:
+            irc.error(_('Quotes must be at least %d character(s) long.') %
+                      minChars, Raise=True)
+        minWords = self.registryValue('minQuoteWords', channel)
+        if minWords and len(text.split()) < minWords:
+            irc.error(_('Quotes must be at least %d word(s) long.') %
+                      minWords, Raise=True)
         user = self.getUserId(irc, msg.prefix, channel) or msg.prefix
         at = time.time()
         id = self.db.add(irc.network, channel, at, user, text)
@@ -1199,9 +1207,17 @@ class IRCquotes(callbacks.Plugin):
             return all(predicate(record) for predicate in predicates)
         candidates = list(self.db.select(irc.network, channel, p))
         if candidates:
+            total = len(candidates)
+            maxResults = self.registryValue('findQuoteMaxResults', channel)
+            if maxResults and total > maxResults:
+                candidates = candidates[:maxResults]
             L = [self.searchSerializeRecord(r) for r in candidates]
             L.sort()
-            irc.reply(format(_('%s found: %L'), len(L), L))
+            if maxResults and total > maxResults:
+                irc.reply(format(_('%s found (showing %s): %L'),
+                                  total, maxResults, L))
+            else:
+                irc.reply(format(_('%s found: %L'), total, L))
         else:
             irc.reply(_('No matching quotes were found.'))
     findquote = wrap(findquote, ['channel',
@@ -1214,7 +1230,8 @@ class IRCquotes(callbacks.Plugin):
 
         Votes on the quote with id <id> in <channel>'s quotes database. Use
         '+' to like it (the default), '-' to dislike it, or '0' to clear
-        your previous vote.
+        your previous vote. Switching directly from '+' to '-' (or vice
+        versa) is allowed without clearing first.
         """
         self._checkEnabled(irc, channel)
         if conf.supybot.plugins.IRCquotes.requireVoteRegistration.getSpecific(
@@ -1237,28 +1254,48 @@ class IRCquotes(callbacks.Plugin):
                         'voted.') % id)
             return
 
-        voters = set(v for v in record.voters.split(',') if v)
-        alreadyVoted = voterId in voters
+        # Each voter's prior direction ('+' or '-') is tracked so a vote
+        # can be switched directly, not just cleared then re-cast. Old
+        # data (a bare id with no '=direction') is treated as a legacy
+        # '+' vote.
+        voters = {}
+        for entry in record.voters.split(','):
+            if not entry:
+                continue
+            voter, _sep, voterDirection = entry.partition('=')
+            voters[voter] = voterDirection or '+'
+        previousDirection = voters.get(voterId)
+
+        def _decrement(d):
+            if d == '+':
+                record.likes = max(0, record.likes - 1)
+            elif d == '-':
+                record.dislikes = max(0, record.dislikes - 1)
 
         if direction == '0':
-            if alreadyVoted:
-                voters.discard(voterId)
-            record.voters = ','.join(voters)
+            if previousDirection is None:
+                irc.error(_('You have not voted on quote #%s.') % id)
+                return
+            _decrement(previousDirection)
+            del voters[voterId]
+            record.voters = ','.join('%s=%s' % kv for kv in voters.items())
             self.db.set(irc.network, channel, id, record)
             irc.replySuccess(_('Your vote for quote #%s has been cleared.')
                               % id)
             return
 
-        if alreadyVoted:
-            irc.error(_('You have already voted on quote #%s.') % id)
+        if previousDirection == direction:
+            irc.error(_('You have already voted %s on quote #%s.') %
+                       (direction, id))
             return
 
+        _decrement(previousDirection)
         if direction == '-':
             record.dislikes += 1
         else:
             record.likes += 1
-        voters.add(voterId)
-        record.voters = ','.join(voters)
+        voters[voterId] = direction
+        record.voters = ','.join('%s=%s' % kv for kv in voters.items())
         self.db.set(irc.network, channel, id, record)
         irc.replySuccess(_('Quote #%s now has %s like(s) and %s '
                            'dislike(s).') % (id, record.likes,
