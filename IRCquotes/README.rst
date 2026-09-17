@@ -56,6 +56,9 @@ Commands
   quote has been deleted and cannot be voted.`` instead of erroring.
 - ``quotestats [<channel>]`` -- number of (non-deleted) quotes in the
   database.
+- ``quotepage [<channel>]`` -- shows the URL where <channel>'s quotes can
+  be browsed on the web, if ``supybot.plugins.IRCquotes.web.publicUrl``
+  is set for it (same idea as the original script's ``html_page_url``).
 
 Permissions
 -----------
@@ -118,6 +121,10 @@ Configuration
   database over the bot's built-in HTTP server (``supybot.servers.http``).
 - ``supybot.plugins.IRCquotes.web.channel`` (channel) -- allow a specific
   channel's quotes to be browsed on the web.
+- ``supybot.plugins.IRCquotes.web.publicUrl`` (channel) -- the
+  externally-reachable URL where this channel's quotes can be browsed
+  (e.g. behind a reverse proxy), shown by the ``quotepage`` command.
+  Empty (the default) means nothing to show.
 - ``supybot.plugins.IRCquotes.web.topQuotesEnabled`` (channel) -- show a
   "top quotes" panel of the best-rated quotes above the full list, same
   as the original script's toggleable ``html_show_best_rated_quotes``.

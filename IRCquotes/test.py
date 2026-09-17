@@ -169,6 +169,12 @@ class IRCquotesTestCase(ChannelPluginTestCase):
             with conf.supybot.plugins.IRCquotes.enabled.context(False):
                 self.assertError('addquote nope')
 
+    def testQuotePage(self):
+        self.assertError('quotepage') # not configured by default
+        with conf.supybot.plugins.IRCquotes.web.publicUrl.context(
+                'https://quotes.example.com/ircquotes/'):
+            self.assertRegexp('quotepage', 'quotes.example.com')
+
     def testScheduleAutoRandQuote(self):
         # Regression test: _scheduleFor() used to call a nonexistent
         # schedule.schedule.count() and crash the moment a channel had a

@@ -1318,6 +1318,23 @@ class IRCquotes(callbacks.Plugin):
                           n, (n, 'quote')))
     quotestats = wrap(quotestats, ['channel'])
 
+    @internationalizeDocstring
+    def quotepage(self, irc, msg, args, channel):
+        """[<channel>]
+
+        Shows the URL where <channel>'s quotes can be browsed on the web,
+        if supybot.plugins.IRCquotes.web.publicUrl has been configured for
+        it.
+        """
+        self._checkEnabled(irc, channel)
+        url = self.registryValue('web.publicUrl', channel)
+        if url:
+            irc.reply(url)
+        else:
+            irc.error(_('No web page has been configured for %s.') %
+                      channel)
+    quotepage = wrap(quotepage, ['channel'])
+
 
 Class = IRCquotes
 
