@@ -103,6 +103,29 @@ class QuotesDB:
                 )
             """)
             self._conn.commit()
+            self._normalizeExistingChannels()
+
+    def _normalizeExistingChannels(self):
+        # One-time migration for rows written before channel names were
+        # normalized to lowercase at write-time (see _key()): fold any
+        # mixed-case channel already on disk down to the same key a fresh
+        # write would use now, so old and new rows for the "same" channel
+        # don't end up split across two different cases.
+        cur = self._conn.execute("SELECT DISTINCT channel FROM quotes")
+        for (storedChannel,) in cur.fetchall():
+            normalized = self._key(storedChannel)
+            if normalized == storedChannel:
+                continue
+            try:
+                self._conn.execute(
+                    "UPDATE quotes SET channel=? WHERE channel=?",
+                    (normalized, storedChannel))
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                # A row already exists under the normalized key for the
+                # same (network, id) -- extremely unlikely, but don't
+                # crash the plugin over it; leave the old row as-is.
+                self._conn.rollback()
 
     def close(self):
         with self._lock:
@@ -115,7 +138,18 @@ class QuotesDB:
         return QuoteRecord(id, at, by, text, likes, dislikes, voters,
                             deleted, deletedBy, deletedAt)
 
+    @staticmethod
+    def _key(channel):
+        # IRC channel names are case-insensitive, but SQLite string
+        # comparison isn't -- without this, "#Software" (e.g. the literal
+        # case a PRIVMSG target happened to arrive in) and "#software"
+        # (e.g. the case the channel was originally joined under, used to
+        # build the web UI's links) would be treated as two different
+        # channels and silently never see each other's quotes.
+        return ircutils.toLower(channel)
+
     def add(self, network, channel, at, by, text):
+        channel = self._key(channel)
         with self._lock:
             cur = self._conn.execute(
                 "SELECT COALESCE(MAX(id), 0) + 1 FROM quotes "
@@ -129,6 +163,7 @@ class QuotesDB:
             return newId
 
     def get(self, network, channel, id):
+        channel = self._key(channel)
         cur = self._conn.execute(
             "SELECT * FROM quotes WHERE network=? AND channel=? AND id=?",
             (network, channel, id))
@@ -138,6 +173,7 @@ class QuotesDB:
         return self._rowToRecord(row)
 
     def set(self, network, channel, id, record):
+        channel = self._key(channel)
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE quotes SET at=?, by=?, text=?, likes=?, dislikes=?, "
@@ -151,6 +187,7 @@ class QuotesDB:
                 raise KeyError(id)
 
     def remove(self, network, channel, id):
+        channel = self._key(channel)
         with self._lock:
             cur = self._conn.execute(
                 "DELETE FROM quotes WHERE network=? AND channel=? AND id=?",
@@ -160,6 +197,7 @@ class QuotesDB:
                 raise KeyError(id)
 
     def select(self, network, channel, predicate, reverse=False):
+        channel = self._key(channel)
         order = 'DESC' if reverse else 'ASC'
         cur = self._conn.execute(
             "SELECT * FROM quotes WHERE network=? AND channel=? "
@@ -170,6 +208,7 @@ class QuotesDB:
                 yield record
 
     def random(self, network, channel):
+        channel = self._key(channel)
         cur = self._conn.execute(
             "SELECT * FROM quotes WHERE network=? AND channel=? "
             "AND deleted=0 ORDER BY RANDOM() LIMIT 1", (network, channel))
@@ -177,6 +216,7 @@ class QuotesDB:
         return self._rowToRecord(row) if row else None
 
     def size(self, network, channel):
+        channel = self._key(channel)
         cur = self._conn.execute(
             "SELECT COUNT(*) FROM quotes WHERE network=? AND channel=? "
             "AND deleted=0", (network, channel))
@@ -631,13 +671,30 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
         # network is taken directly from the URL rather than guessed by
         # scanning world.ircs for the channel name, since the same channel
         # name can exist -- with entirely different quotes -- on more than
-        # one network the bot is connected to.
+        # one network the bot is connected to. The match itself is
+        # case-insensitive (matching how IRC network names are normally
+        # treated), but once found we use the *canonical* casing from the
+        # Irc object for the database lookup and display, since the quotes
+        # were stored under irc.network's exact casing at add-time -- not
+        # whatever case the visitor happened to type in the URL.
         irc = None
         for candidate in world.ircs:
             if ircutils.strEqual(candidate.network, network):
                 irc = candidate
                 break
-        botnick = irc.nick if irc else _('unknown')
+        if irc is None:
+            self.send_response(404)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            if write_content:
+                self.write(httpserver.get_template('generic/error.html') % {
+                    'title': 'IRCquotes - unknown network',
+                    'error': 'The bot is not connected to a network named '
+                             '%s.' % html_escape.escape(network),
+                })
+            return
+        network = irc.network
+        botnick = irc.nick
 
         records = list(self._plugin.db.select(
             network, channel, lambda r: not r.deleted, reverse=True))

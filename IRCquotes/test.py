@@ -27,6 +27,9 @@
 # POSSIBILITY OF SUCH DAMAGE.
 ###
 
+import os
+import tempfile
+
 import supybot.utils as utils
 import supybot.ircutils as ircutils
 
@@ -209,6 +212,42 @@ class IRCquotesTestCase(ChannelPluginTestCase):
         self.assertEqual(recB.text, 'hello from B')
         self.assertEqual(cb.db.size('NetworkA', '#software'), 1)
         self.assertEqual(cb.db.size('NetworkB', '#software'), 1)
+
+    def testChannelCaseIsNormalized(self):
+        # Regression test: a PRIVMSG target's case (e.g. "#Software", as
+        # actually used by the client) can differ from the case a channel
+        # was joined/tracked under (e.g. "#software", used to build the
+        # web UI's links). Both must resolve to the same stored quote.
+        cb = self.irc.getCallback('IRCquotes')
+        id_ = cb.db.add('NetworkA', '#Software', time.time(), 'someone',
+                         'case test')
+        self.assertEqual(cb.db.get('NetworkA', '#software', id_).text,
+                          'case test')
+        self.assertEqual(cb.db.size('NetworkA', '#SOFTWARE'), 1)
+
+    def testExistingMixedCaseChannelsAreMigrated(self):
+        # Rows written before this normalization existed (mixed-case
+        # channel already on disk) must still be found after a fresh
+        # QuotesDB() is opened on that file.
+        fd, dbPath = tempfile.mkstemp(suffix='.db')
+        os.close(fd)
+        try:
+            db1 = ircquotes_plugin.QuotesDB(dbPath)
+            db1._conn.execute(
+                "INSERT INTO quotes (network, channel, id, at, by, text) "
+                "VALUES ('NetworkA', '#Software', 1, 0, 'someone', "
+                "'pre-existing')")
+            db1._conn.commit()
+            db1.close()
+            db2 = ircquotes_plugin.QuotesDB(dbPath)
+            try:
+                self.assertEqual(
+                    db2.get('NetworkA', '#software', 1).text,
+                    'pre-existing')
+            finally:
+                db2.close()
+        finally:
+            os.remove(dbPath)
 
     def testWebChannelPageUsesUrlNetwork(self):
         # Regression test: the web page used to guess the network by
