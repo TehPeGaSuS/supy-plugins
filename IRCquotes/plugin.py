@@ -559,7 +559,12 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         # capname is a bare capability name (e.g. "op", "trusted"); it's
         # turned into the usual "#channel,<capability>" form. An already
         # fully-qualified capability (containing a comma, e.g.
-        # "#channel,op") is accepted as-is.
+        # "#channel,op") is accepted as-is. This is always checked against
+        # ircdb (i.e. requires the user be registered with the bot and
+        # granted the capability) -- deliberately not satisfied by merely
+        # being opped on IRC, since that status isn't tied to any bot-side
+        # identity and destructive commands (undelquote, forcedelquote,
+        # deletedquoteinfo) shouldn't trust it.
         if not capname:
             return
         cap = capname if ',' in capname \
