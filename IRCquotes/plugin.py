@@ -343,13 +343,12 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
     name = 'IRCquotes web interface'
 
     def _renderQuote(self, record, username):
-        rating = ''
-        if record.likes:
-            rating += '<span class="positiverating">+%d</span> ' % \
-                record.likes
-        if record.dislikes:
-            rating += '<span class="negativerating">-%d</span>' % \
+        rating = (
+            _('Likes: <span class="positiverating">%d</span>') % record.likes
+            + ' | ' +
+            _('Dislikes: <span class="negativerating">%d</span>') %
                 record.dislikes
+        )
         return """\
 <div class="quote">
   <span class="quoteid">#%(id)s</span>
