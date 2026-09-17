@@ -31,6 +31,32 @@ import supybot.ircutils as ircutils
 
 from supybot.test import *
 
+from . import plugin as ircquotes_plugin
+
+class _FakeHttpHandler:
+    """Minimal stand-in for the bits of SupyHTTPRequestHandler that
+    doGetOrHead() writes to, without needing a live socket/server."""
+    def __init__(self):
+        self.status = None
+        self.headers = []
+        self.chunks = []
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, name, value):
+        self.headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, b):
+        self.chunks.append(b)
+
+    @property
+    def body(self):
+        return b''.join(self.chunks).decode('utf-8')
+
 class IRCquotesTestCase(ChannelPluginTestCase):
     plugins = ('IRCquotes', 'User')
 
@@ -129,5 +155,25 @@ class IRCquotesTestCase(ChannelPluginTestCase):
             finally:
                 if name in schedule.schedule.events:
                     schedule.removeEvent(name)
+
+    def testWebStyleCss(self):
+        # Regression test: the web callback's routing only handled the
+        # index page and per-channel listing paths, so a request for
+        # /ircquotes/style.css (which every rendered page links to) fell
+        # through to the "is this a channel?" branch and 404ed -- meaning
+        # the page never actually got styled when hit directly.
+        cb = self.irc.getCallback('IRCquotes')
+        webcb = ircquotes_plugin.IRCquotesWebCallback()
+        webcb._plugin = cb
+        handler = _FakeHttpHandler()
+        webcb.send_response = handler.send_response
+        webcb.send_header = handler.send_header
+        webcb.end_headers = handler.end_headers
+        webcb.wfile = handler
+        webcb.doGetOrHead(handler, '/style.css', True)
+        self.assertEqual(handler.status, 200)
+        self.assertTrue(('Content-type', 'text/css; charset=utf-8')
+                         in handler.headers)
+        self.assertTrue('quoteid' in handler.body)
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

@@ -327,6 +327,13 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             if write_content:
                 self.write(httpserver.get_template('ircquotes/index.html'))
             return
+        if parts == ['style.css']:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/css; charset=utf-8')
+            self.end_headers()
+            if write_content:
+                self.write(httpserver.get_template('ircquotes/style.css'))
+            return
         channel = utils.web.urlunquote(parts[0])
         if not ircutils.isChannel(channel):
             self.send_response(404)
