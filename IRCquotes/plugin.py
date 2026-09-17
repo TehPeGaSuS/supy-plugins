@@ -1314,8 +1314,11 @@ class IRCquotes(callbacks.Plugin):
         """
         self._checkEnabled(irc, channel)
         n = self.db.size(irc.network, channel)
-        irc.reply(format(_('There %b %n in my database.'),
-                          n, (n, 'quote')))
+        reply = format(_('There %b %n in my database.'), n, (n, 'quote'))
+        url = self.registryValue('web.publicUrl', channel)
+        if url:
+            reply += _(' View %s quotes at %s') % (channel, url)
+        irc.reply(reply)
     quotestats = wrap(quotestats, ['channel'])
 
     @internationalizeDocstring

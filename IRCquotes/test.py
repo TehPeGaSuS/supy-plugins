@@ -175,6 +175,14 @@ class IRCquotesTestCase(ChannelPluginTestCase):
                 'https://quotes.example.com/ircquotes/'):
             self.assertRegexp('quotepage', 'quotes.example.com')
 
+    def testQuoteStatsShowsUrlWhenConfigured(self):
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            self.assertNotError('addquote for stats')
+        self.assertNotRegexp('quotestats', 'quotes.example.com')
+        with conf.supybot.plugins.IRCquotes.web.publicUrl.context(
+                'https://quotes.example.com/ircquotes/'):
+            self.assertRegexp('quotestats', 'quotes.example.com')
+
     def testScheduleAutoRandQuote(self):
         # Regression test: _scheduleFor() used to call a nonexistent
         # schedule.schedule.count() and crash the moment a channel had a

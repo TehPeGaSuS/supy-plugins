@@ -55,7 +55,8 @@ Commands
   it entirely. Voting on a deleted quote replies with ``#<id>: This
   quote has been deleted and cannot be voted.`` instead of erroring.
 - ``quotestats [<channel>]`` -- number of (non-deleted) quotes in the
-  database.
+  database. Also appends the ``web.publicUrl`` link, if one is set for
+  the channel.
 - ``quotepage [<channel>]`` -- shows the URL where <channel>'s quotes can
   be browsed on the web, if ``supybot.plugins.IRCquotes.web.publicUrl``
   is set for it (same idea as the original script's ``html_page_url``).
