@@ -515,23 +515,35 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             'at': utils.str.timestamp(record.at),
         }
 
-    def _renderNetworkCards(self):
+    def _renderNetworkCards(self, onlyChannel=None):
         # One card per connected network, listing the channels there whose
-        # quotes have been opted into being browsable (web.channel).
+        # quotes have been opted into being browsable (web.channel). If
+        # onlyChannel is given, cards are filtered down to networks that
+        # have that exact channel -- used to disambiguate the "jump to a
+        # channel" form when the same channel name exists on more than
+        # one network.
         channelsByNetwork = {}
         for irc in world.ircs:
             channels = sorted(
                 channel for channel in irc.state.channels
-                if self._plugin.registryValue('web.channel', channel))
+                if self._plugin.registryValue('web.channel', channel)
+                and (onlyChannel is None or
+                     ircutils.strEqual(channel, onlyChannel)))
             if channels:
                 channelsByNetwork[irc.network] = channels
         if not channelsByNetwork:
+            if onlyChannel is None:
+                message = _('No channels are browsable here yet.')
+            else:
+                message = _('No network has a browsable quotes page for '
+                            '%s.') % onlyChannel
             return '<p class="no-networks">%s</p>' % \
-                html_escape.escape(_('No channels are browsable here yet.'))
+                html_escape.escape(message)
         cards = []
         for network in sorted(channelsByNetwork):
             links = '\n'.join(
-                '    <li><a href="/ircquotes/%s/">%s</a></li>' % (
+                '    <li><a href="/ircquotes/%s/%s/">%s</a></li>' % (
+                    utils.web.urlquote(network),
                     utils.web.urlquote(channel),
                     html_escape.escape(channel))
                 for channel in channelsByNetwork[network])
@@ -581,7 +593,19 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             if write_content:
                 self.write(httpserver.get_template('ircquotes/style.css'))
             return
-        channel = utils.web.urlunquote(parts[0])
+        if len(parts) < 2:
+            self.send_response(404)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            if write_content:
+                self.write(httpserver.get_template('generic/error.html') % {
+                    'title': 'IRCquotes - not found',
+                    'error': 'Expected /ircquotes/&lt;network&gt;/'
+                             '&lt;channel&gt;/.',
+                })
+            return
+        network = utils.web.urlunquote(parts[0])
+        channel = utils.web.urlunquote(parts[1])
         if not ircutils.isChannel(channel):
             self.send_response(404)
             self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -604,17 +628,15 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
                 })
             return
 
-        # Quotes are keyed by (network, channel), so we need to know which
-        # network this channel belongs to. If the same channel name is
-        # web-enabled on more than one network, this will only ever show
-        # whichever one the bot happens to find first.
+        # network is taken directly from the URL rather than guessed by
+        # scanning world.ircs for the channel name, since the same channel
+        # name can exist -- with entirely different quotes -- on more than
+        # one network the bot is connected to.
         irc = None
         for candidate in world.ircs:
-            if channel in candidate.state.channels:
+            if ircutils.strEqual(candidate.network, network):
                 irc = candidate
                 break
-        irc = irc or (world.ircs[0] if world.ircs else None)
-        network = irc.network if irc else _('unknown')
         botnick = irc.nick if irc else _('unknown')
 
         records = list(self._plugin.db.select(
@@ -692,16 +714,34 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             })
 
     def doPost(self, handler, path, form):
-        if 'chan' in form:
-            self.send_response(303)
-            self.send_header('Location',
-                './%s/' % utils.web.urlquote(form['chan'].value))
-            self.end_headers()
-        else:
+        if 'chan' not in form:
             self.send_response(400)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
             self.write("Missing field 'chan'.")
+            return
+        channel = form['chan'].value
+        matches = sorted(
+            irc.network for irc in world.ircs
+            if channel in irc.state.channels
+            and self._plugin.registryValue('web.channel', channel))
+        if len(matches) == 1:
+            # Only one network has this channel web-enabled: go straight
+            # there.
+            self.send_response(303)
+            self.send_header('Location', './%s/%s/' % (
+                utils.web.urlquote(matches[0]),
+                utils.web.urlquote(channel)))
+            self.end_headers()
+            return
+        # Zero or multiple matches: show network cards filtered down to
+        # this channel name, so the visitor can either see there's nothing
+        # to show, or pick which network they meant.
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.write(httpserver.get_template('ircquotes/index.html') %
+            {'cards': self._renderNetworkCards(onlyChannel=channel)})
 
 
 class IRCquotes(callbacks.Plugin):

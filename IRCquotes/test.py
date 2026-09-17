@@ -27,6 +27,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 ###
 
+import supybot.utils as utils
 import supybot.ircutils as ircutils
 
 from supybot.test import *
@@ -208,5 +209,67 @@ class IRCquotesTestCase(ChannelPluginTestCase):
         self.assertEqual(recB.text, 'hello from B')
         self.assertEqual(cb.db.size('NetworkA', '#software'), 1)
         self.assertEqual(cb.db.size('NetworkB', '#software'), 1)
+
+    def testWebChannelPageUsesUrlNetwork(self):
+        # Regression test: the web page used to guess the network by
+        # scanning world.ircs for the first Irc with a matching channel
+        # name, which breaks the moment the same channel name is
+        # web-enabled on more than one network. The network must now come
+        # straight from the URL instead.
+        cb = self.irc.getCallback('IRCquotes')
+        cb.db.add(self.irc.network, self.channel, time.time(), 'someone',
+                  'from the real network')
+        cb.db.add('SomeOtherNetwork', self.channel, time.time(), 'someone',
+                  'from a different network')
+        webcb = ircquotes_plugin.IRCquotesWebCallback()
+        webcb._plugin = cb
+        handler = _FakeHttpHandler()
+        webcb.send_response = handler.send_response
+        webcb.send_header = handler.send_header
+        webcb.end_headers = handler.end_headers
+        webcb.wfile = handler
+        path = '/%s/%s/' % (utils.web.urlquote(self.irc.network),
+                             utils.web.urlquote(self.channel))
+        with conf.supybot.plugins.IRCquotes.web.channel.context(True):
+            webcb.doGetOrHead(handler, path, True)
+        self.assertEqual(handler.status, 200)
+        self.assertTrue('from the real network' in handler.body)
+        self.assertTrue('from a different network' not in handler.body)
+
+    def testWebJumpFormSingleMatchRedirects(self):
+        webcb = ircquotes_plugin.IRCquotesWebCallback()
+        webcb._plugin = self.irc.getCallback('IRCquotes')
+        handler = _FakeHttpHandler()
+        webcb.send_response = handler.send_response
+        webcb.send_header = handler.send_header
+        webcb.end_headers = handler.end_headers
+        webcb.wfile = handler
+        class _Value:
+            def __init__(self, value):
+                self.value = value
+        form = {'chan': _Value(self.channel)}
+        with conf.supybot.plugins.IRCquotes.web.channel.context(True):
+            webcb.doPost(handler, '/', form)
+        self.assertEqual(handler.status, 303)
+        location = dict(handler.headers)['Location']
+        self.assertEqual(location, './%s/%s/' % (
+            utils.web.urlquote(self.irc.network),
+            utils.web.urlquote(self.channel)))
+
+    def testWebJumpFormNoMatchShowsMessage(self):
+        webcb = ircquotes_plugin.IRCquotesWebCallback()
+        webcb._plugin = self.irc.getCallback('IRCquotes')
+        handler = _FakeHttpHandler()
+        webcb.send_response = handler.send_response
+        webcb.send_header = handler.send_header
+        webcb.end_headers = handler.end_headers
+        webcb.wfile = handler
+        class _Value:
+            def __init__(self, value):
+                self.value = value
+        form = {'chan': _Value('#nonexistent')}
+        webcb.doPost(handler, '/', form)
+        self.assertEqual(handler.status, 200)
+        self.assertTrue('No network has a browsable' in handler.body)
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
