@@ -586,18 +586,16 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
 
         Adds <text> as a new quote to the quotes database for <channel>.
         If supybot.plugins.IRCquotes.addCapability is set (e.g. to "op"),
-        only users with that channel capability may use this command.
-        <channel> is only necessary if the message isn't sent in the
-        channel itself.
+        only users with that channel capability may use this command; if
+        it's left empty but requireAddRegistration is enabled, it defaults
+        to requiring "op". <channel> is only necessary if the message
+        isn't sent in the channel itself.
         """
         self._checkEnabled(irc, channel)
-        self._requireCapability(irc, msg, channel,
-            self.registryValue('addCapability', channel))
-        if self.registryValue('requireAddRegistration', channel):
-            try:
-                ircdb.users.getUser(msg.prefix)
-            except KeyError:
-                irc.errorNotRegistered(Raise=True)
+        cap = self.registryValue('addCapability', channel)
+        if not cap and self.registryValue('requireAddRegistration', channel):
+            cap = 'op'
+        self._requireCapability(irc, msg, channel, cap)
         user = self.getUserId(irc, msg.prefix, channel) or msg.prefix
         at = time.time()
         self.addValidator(irc, text)

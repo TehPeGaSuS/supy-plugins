@@ -89,6 +89,17 @@ class IRCquotesTestCase(ChannelPluginTestCase):
                 self.assertError('addquote nope, not an op',
                                   frm=noCapPrefix)
 
+    def testRequireAddRegistrationDefaultsToOp(self):
+        # With addCapability left empty, requireAddRegistration alone
+        # should behave the same as addCapability = 'op'.
+        with conf.supybot.databases.plugins.requireRegistration.context(False):
+            with conf.supybot.plugins.IRCquotes.requireAddRegistration.context(True):
+                noCapPrefix = ircutils.joinHostmask(
+                    self.nick, 'user', '__no_testcap__.domain.tld')
+                self.assertError('addquote nope, not registered/op',
+                                  frm=noCapPrefix)
+                self.assertNotError('addquote yep, this passes')
+
     def testDisabled(self):
         with conf.supybot.databases.plugins.requireRegistration.context(False):
             with conf.supybot.plugins.IRCquotes.enabled.context(False):

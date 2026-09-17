@@ -63,9 +63,10 @@ with per-channel Eggdrop flags. Here:
 - ``addquote`` can optionally be gated too, which the original script
   didn't support directly: set
   ``supybot.plugins.IRCquotes.addCapability`` to a capability name (e.g.
-  ``op``) to require it, and/or
-  ``supybot.plugins.IRCquotes.requireAddRegistration`` to require bot
-  registration.
+  ``op`` or ``trusted``) to require it. If you'd rather not pick a
+  specific capability, just enabling
+  ``supybot.plugins.IRCquotes.requireAddRegistration`` has the same
+  effect as setting addCapability to ``op``.
 
 Configuration
 --------------
@@ -74,12 +75,15 @@ Configuration
   for a channel.
 - ``supybot.plugins.IRCquotes.requireVoteRegistration`` (channel) --
   require registration with the bot to vote.
-- ``supybot.plugins.IRCquotes.requireAddRegistration`` (channel) --
-  require registration with the bot to add quotes.
 - ``supybot.plugins.IRCquotes.addCapability`` (channel) -- if set to a
   capability name (e.g. ``op`` or ``trusted``), only users with that
   channel capability (equivalent to ``#channel,<capability>``) may add
-  quotes. Empty (the default) allows anyone.
+  quotes. Empty (the default) allows anyone, unless
+  requireAddRegistration is also set.
+- ``supybot.plugins.IRCquotes.requireAddRegistration`` (channel) -- when
+  addCapability is left empty, enabling this defaults it to ``op``
+  (i.e. equivalent to setting addCapability to ``op``). Has no
+  additional effect if addCapability is already set to something.
 - ``supybot.plugins.IRCquotes.autoRandQuoteInterval`` (channel) -- seconds
   between automatic random-quote announcements (0 disables it).
 - ``supybot.plugins.IRCquotes.web.enable`` (global) -- serve the quotes

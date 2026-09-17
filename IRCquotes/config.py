@@ -52,15 +52,19 @@ conf.registerChannelValue(IRCquotes, 'requireVoteRegistration',
     with the bot in order to vote on quotes with votequote.""")))
 
 conf.registerChannelValue(IRCquotes, 'requireAddRegistration',
-    registry.Boolean(False, _("""Determines whether users must be registered
-    with the bot in order to add quotes with addquote.""")))
+    registry.Boolean(False, _("""Determines whether adding quotes with
+    addquote requires some form of registered-user gating. If
+    addCapability is left empty, enabling this defaults it to requiring
+    the "op" capability; if addCapability is already set to something
+    specific, this setting has no additional effect (any capability
+    check already implies the user must be registered).""")))
 
 conf.registerChannelValue(IRCquotes, 'addCapability',
     registry.String('', _("""If set to a capability name (e.g. "op" or
     "trusted"), only users with that channel capability (equivalent to
-    "#channel,<capability>") may add quotes with addquote. Leave empty
-    (the default) to let anyone add quotes, subject to
-    requireAddRegistration.""")))
+    "#channel,<capability>") may add quotes with addquote. Leave empty to
+    let anyone add quotes -- unless requireAddRegistration is also
+    enabled, in which case empty defaults to "op".""")))
 
 conf.registerChannelValue(IRCquotes, 'autoRandQuoteInterval',
     registry.NonNegativeInteger(0, _("""Determines how often, in seconds, the
