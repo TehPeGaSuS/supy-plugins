@@ -516,7 +516,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         interval = conf.supybot.plugins.IRCquotes.autoRandQuoteInterval.getSpecific(
             irc.network, channel)()
         name = self._eventName(irc.network, channel)
-        if schedule.schedule.count(name):
+        if name in schedule.schedule.events:
             schedule.removeEvent(name)
         if not interval:
             return
@@ -536,7 +536,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             return
         channel = msg.args[0]
         name = self._eventName(irc.network, channel)
-        if not schedule.schedule.count(name):
+        if name not in schedule.schedule.events:
             self._scheduleFor(irc, channel)
 
     ###

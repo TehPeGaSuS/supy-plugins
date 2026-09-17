@@ -111,4 +111,23 @@ class IRCquotesTestCase(ChannelPluginTestCase):
             with conf.supybot.plugins.IRCquotes.enabled.context(False):
                 self.assertError('addquote nope')
 
+    def testScheduleAutoRandQuote(self):
+        # Regression test: _scheduleFor() used to call a nonexistent
+        # schedule.schedule.count() and crash the moment a channel had a
+        # non-zero autoRandQuoteInterval (e.g. right on plugin load).
+        import supybot.schedule as schedule
+        cb = self.irc.getCallback('IRCquotes')
+        with conf.supybot.plugins.IRCquotes.autoRandQuoteInterval.context(60):
+            cb._scheduleFor(self.irc, self.channel)
+            name = cb._eventName(self.irc.network, self.channel)
+            try:
+                self.assertTrue(name in schedule.schedule.events)
+                # Calling it again (as __init__/doJoin do) must not raise
+                # either, and should just reschedule in place.
+                cb._scheduleFor(self.irc, self.channel)
+                self.assertTrue(name in schedule.schedule.events)
+            finally:
+                if name in schedule.schedule.events:
+                    schedule.removeEvent(name)
+
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
