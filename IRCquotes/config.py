@@ -87,6 +87,11 @@ conf.registerChannelValue(IRCquotes.web, 'topQuotesEnabled',
 conf.registerChannelValue(IRCquotes.web, 'topQuotesCount',
     registry.PositiveInteger(5, _("""Determines how many quotes are shown
     in the "top quotes" panel, when enabled.""")))
+conf.registerChannelValue(IRCquotes.web, 'quotesPerPage',
+    registry.NonNegativeInteger(50, _("""Determines how many quotes are
+    shown per page on the web interface, same as the original script's
+    html_quotes_per_page. Set to 0 to show every quote on a single
+    page.""")))
 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

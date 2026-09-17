@@ -10,6 +10,17 @@ Per-channel quotes database with voting and an optional periodic "random
 quote" announcer, ported from the Eggdrop TCL script "Public Quotes
 System" (v2.52).
 
+Storage
+-------
+
+Unlike most Limnoria plugins, which key their channel database purely by
+channel name, IRCquotes keeps a single SQLite database for every network
+at once, at ``<data dir>/IRCquotes/ircquotes.db``, with every quote keyed
+by ``(network, channel, id)``. This matters if the bot is on more than
+one network: a plain per-channel-name keying scheme would make e.g.
+``#software`` on two different networks share the exact same quotes and
+id numbering, which is almost certainly not what you want.
+
 Commands
 --------
 

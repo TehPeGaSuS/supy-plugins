@@ -191,4 +191,22 @@ class IRCquotesTestCase(ChannelPluginTestCase):
         self.assertTrue('network-card' in handler.body)
         self.assertTrue(self.channel in handler.body)
 
+    def testMultiNetworkIsolation(self):
+        # The whole point of keying the database by (network, channel):
+        # the same channel name on two different networks must not share
+        # quotes or id numbering.
+        cb = self.irc.getCallback('IRCquotes')
+        idA = cb.db.add('NetworkA', '#software', time.time(), 'someone',
+                         'hello from A')
+        idB = cb.db.add('NetworkB', '#software', time.time(), 'someone',
+                         'hello from B')
+        self.assertEqual(idA, 1)
+        self.assertEqual(idB, 1)
+        recA = cb.db.get('NetworkA', '#software', 1)
+        recB = cb.db.get('NetworkB', '#software', 1)
+        self.assertEqual(recA.text, 'hello from A')
+        self.assertEqual(recB.text, 'hello from B')
+        self.assertEqual(cb.db.size('NetworkA', '#software'), 1)
+        self.assertEqual(cb.db.size('NetworkB', '#software'), 1)
+
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

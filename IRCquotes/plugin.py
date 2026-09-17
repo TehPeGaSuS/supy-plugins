@@ -27,24 +27,160 @@
 # POSSIBILITY OF SUCH DAMAGE.
 ###
 
+import os
 import time
-import random
+import string
+import sqlite3
 import fnmatch
+import threading
 import html as html_escape
+import urllib.parse
 
 import supybot.conf as conf
-import supybot.dbi as dbi
 import supybot.ircdb as ircdb
 import supybot.ircutils as ircutils
 import supybot.utils as utils
 import supybot.world as world
-import supybot.plugins as plugins
 import supybot.schedule as schedule
 import supybot.callbacks as callbacks
 import supybot.httpserver as httpserver
 from supybot.commands import *
 from supybot.i18n import PluginInternationalization, internationalizeDocstring
 _ = PluginInternationalization('IRCquotes')
+
+
+class QuoteRecord:
+    """A single quote. Unlike a dbi Record, this is a plain attribute bag
+    backed by a row in QuotesDB -- there's no automatic serialization
+    magic to it."""
+    __slots__ = ('id', 'at', 'by', 'text', 'likes', 'dislikes', 'voters',
+                 'deleted', 'deletedBy', 'deletedAt')
+
+    def __init__(self, id, at, by, text, likes=0, dislikes=0, voters='',
+                 deleted=False, deletedBy='', deletedAt=0):
+        self.id = id
+        self.at = at
+        self.by = by
+        self.text = text
+        self.likes = likes
+        self.dislikes = dislikes
+        self.voters = voters
+        self.deleted = bool(deleted)
+        self.deletedBy = deletedBy
+        self.deletedAt = deletedAt
+
+
+class QuotesDB:
+    """One global SQLite database for every network and channel, keyed by
+    (network, channel, id).
+
+    This is deliberately not Limnoria's usual per-channel dbi flat-file
+    plugin database: those key storage by channel name *alone*, so if the
+    bot is on multiple networks that each have (say) a #software channel,
+    they would all collide on the exact same file and share one quote
+    list. Keying by (network, channel) keeps them independent while still
+    living in a single file on disk."""
+
+    def __init__(self, filename):
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(filename, check_same_thread=False)
+        with self._lock:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS quotes (
+                    network TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    id INTEGER NOT NULL,
+                    at REAL NOT NULL,
+                    by TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    likes INTEGER NOT NULL DEFAULT 0,
+                    dislikes INTEGER NOT NULL DEFAULT 0,
+                    voters TEXT NOT NULL DEFAULT '',
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    deletedBy TEXT NOT NULL DEFAULT '',
+                    deletedAt REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (network, channel, id)
+                )
+            """)
+            self._conn.commit()
+
+    def close(self):
+        with self._lock:
+            self._conn.close()
+
+    @staticmethod
+    def _rowToRecord(row):
+        (_network, _channel, id, at, by, text, likes, dislikes, voters,
+         deleted, deletedBy, deletedAt) = row
+        return QuoteRecord(id, at, by, text, likes, dislikes, voters,
+                            deleted, deletedBy, deletedAt)
+
+    def add(self, network, channel, at, by, text):
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM quotes "
+                "WHERE network=? AND channel=?", (network, channel))
+            newId = cur.fetchone()[0]
+            self._conn.execute(
+                "INSERT INTO quotes (network, channel, id, at, by, text) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (network, channel, newId, at, by, text))
+            self._conn.commit()
+            return newId
+
+    def get(self, network, channel, id):
+        cur = self._conn.execute(
+            "SELECT * FROM quotes WHERE network=? AND channel=? AND id=?",
+            (network, channel, id))
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(id)
+        return self._rowToRecord(row)
+
+    def set(self, network, channel, id, record):
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE quotes SET at=?, by=?, text=?, likes=?, dislikes=?, "
+                "voters=?, deleted=?, deletedBy=?, deletedAt=? "
+                "WHERE network=? AND channel=? AND id=?",
+                (record.at, record.by, record.text, record.likes,
+                 record.dislikes, record.voters, int(record.deleted),
+                 record.deletedBy, record.deletedAt, network, channel, id))
+            self._conn.commit()
+            if cur.rowcount == 0:
+                raise KeyError(id)
+
+    def remove(self, network, channel, id):
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM quotes WHERE network=? AND channel=? AND id=?",
+                (network, channel, id))
+            self._conn.commit()
+            if cur.rowcount == 0:
+                raise KeyError(id)
+
+    def select(self, network, channel, predicate, reverse=False):
+        order = 'DESC' if reverse else 'ASC'
+        cur = self._conn.execute(
+            "SELECT * FROM quotes WHERE network=? AND channel=? "
+            "ORDER BY id %s" % order, (network, channel))
+        for row in cur.fetchall():
+            record = self._rowToRecord(row)
+            if predicate(record):
+                yield record
+
+    def random(self, network, channel):
+        cur = self._conn.execute(
+            "SELECT * FROM quotes WHERE network=? AND channel=? "
+            "AND deleted=0 ORDER BY RANDOM() LIMIT 1", (network, channel))
+        row = cur.fetchone()
+        return self._rowToRecord(row) if row else None
+
+    def size(self, network, channel):
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM quotes WHERE network=? AND channel=? "
+            "AND deleted=0", (network, channel))
+        return cur.fetchone()[0]
 
 
 ###
@@ -127,10 +263,12 @@ DEFAULT_TEMPLATES = {
                                       'database.') + """</div>
     </div>
 %(topquotes)s
+    %(pagenav)s
     <div class="panel" id="quotes">
 %(topquotes_titled)s
       %(rows)s
     </div>
+    %(pagenav)s
     <footer class="pagefooter">""" + _('IRCquotes, ported from Public '
                                         'Quotes System') + """</footer>""",
     },
@@ -331,6 +469,19 @@ h1 {
     font-size: 0.8em;
     padding-top: 10px;
 }
+.pagenav {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin: 10px 0;
+    font-size: 0.9em;
+}
+.pagenav .pagecurrent {
+    font-weight: 700;
+    color: var(--accent);
+    text-decoration: underline;
+}
 @media (max-width: 480px) {
     .infobar { flex-direction: column; gap: 2px; }
 }
@@ -393,7 +544,27 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
 </div>""" % (html_escape.escape(network), links))
         return '<div class="networks">\n%s\n</div>' % '\n'.join(cards)
 
+    def _renderPageNav(self, pageNum, totalPages):
+        if totalPages <= 1:
+            return ''
+        links = []
+        if pageNum > 1:
+            links.append('<a href="?page=%d">&laquo; %s</a>' %
+                          (pageNum - 1, html_escape.escape(_('Prev'))))
+        for p in range(1, totalPages + 1):
+            if p == pageNum:
+                links.append('<span class="pagecurrent">%d</span>' % p)
+            else:
+                links.append('<a href="?page=%d">%d</a>' % (p, p))
+        if pageNum < totalPages:
+            links.append('<a href="?page=%d">%s &raquo;</a>' %
+                          (pageNum + 1, html_escape.escape(_('Next'))))
+        return '<div class="pagenav">%s</div>' % ' '.join(links)
+
     def doGetOrHead(self, handler, path, write_content):
+        parsed = urllib.parse.urlsplit(path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
         parts = [p for p in path.split('/') if p]
         if not parts:
             self.send_response(200)
@@ -432,29 +603,65 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
                              'here.',
                 })
             return
-        records = list(self._plugin.db.select(channel, lambda r: not r.deleted,
-                                               reverse=True))
-        if records:
+
+        # Quotes are keyed by (network, channel), so we need to know which
+        # network this channel belongs to. If the same channel name is
+        # web-enabled on more than one network, this will only ever show
+        # whichever one the bot happens to find first.
+        irc = None
+        for candidate in world.ircs:
+            if channel in candidate.state.channels:
+                irc = candidate
+                break
+        irc = irc or (world.ircs[0] if world.ircs else None)
+        network = irc.network if irc else _('unknown')
+        botnick = irc.nick if irc else _('unknown')
+
+        records = list(self._plugin.db.select(
+            network, channel, lambda r: not r.deleted, reverse=True))
+
+        # Pagination, same idea as the original's html_quotes_per_page (0
+        # means unlimited, everything on a single page).
+        perPage = self._plugin.registryValue('web.quotesPerPage', channel)
+        if perPage:
+            totalPages = max(1, -(-len(records) // perPage)) # ceil div
+        else:
+            totalPages = 1
+        try:
+            pageNum = int(query.get('page', ['1'])[0])
+        except ValueError:
+            pageNum = 1
+        pageNum = min(max(pageNum, 1), totalPages)
+        if perPage:
+            start = (pageNum - 1) * perPage
+            pageRecords = records[start:start + perPage]
+        else:
+            pageRecords = records
+        pagenav = self._renderPageNav(pageNum, totalPages)
+
+        if pageRecords:
             rows = '\n'.join(
-                self._renderQuote(r, plugins.getUserName(r.by))
-                for r in records)
+                self._renderQuote(r, self._plugin._getUserName(r.by))
+                for r in pageRecords)
         else:
             rows = '<p>%s</p>' % _('No quotes yet.')
 
         # "Top quotes" panel: the best-rated quotes, ported from the
         # original's toggleable, count-configurable html_show_best_rated_
         # quotes/%TOPQUOTES% feature. Only shown once something has
-        # actually been rated (and if enabled for this channel).
+        # actually been rated (and if enabled for this channel), and only
+        # on the first page (same as the original).
         topQuotesEnabled = self._plugin.registryValue(
             'web.topQuotesEnabled', channel)
         topQuotesCount = self._plugin.registryValue(
             'web.topQuotesCount', channel)
         rated = [r for r in records if r.likes or r.dislikes]
         rated.sort(key=lambda r: (r.likes - r.dislikes), reverse=True)
-        top = rated[:topQuotesCount] if topQuotesEnabled else []
+        top = rated[:topQuotesCount] if (topQuotesEnabled and pageNum == 1) \
+            else []
         if top:
             top_rows = '\n'.join(
-                self._renderQuote(r, plugins.getUserName(r.by))
+                self._renderQuote(r, self._plugin._getUserName(r.by))
                 for r in top)
             topquotes = """\
     <div class="panel topquotes">
@@ -469,15 +676,6 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             topquotes = ''
             topquotes_titled = ''
 
-        irc = None
-        for candidate in world.ircs:
-            if channel in candidate.state.channels:
-                irc = candidate
-                break
-        irc = irc or (world.ircs[0] if world.ircs else None)
-        network = irc.network if irc else _('unknown')
-        botnick = irc.nick if irc else _('unknown')
-
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -490,6 +688,7 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
                 'topquotes': topquotes,
                 'topquotes_titled': topquotes_titled,
                 'rows': rows,
+                'pagenav': pagenav,
             })
 
     def doPost(self, handler, path, form):
@@ -505,48 +704,21 @@ class IRCquotesWebCallback(httpserver.SupyHTTPServerCallback):
             self.write("Missing field 'chan'.")
 
 
-class IRCquotes(plugins.ChannelIdDatabasePlugin):
-    """Per-channel quotes database with voting and an optional periodic
-    "random quote" announcer. Ported from the Eggdrop TCL script
+class IRCquotes(callbacks.Plugin):
+    """Per-network-and-channel quotes database with voting and an optional
+    periodic "random quote" announcer. Ported from the Eggdrop TCL script
     'public_quotes_system'.
 
-    Configuration variables in ``supybot.plugins.IRCquotes`` and
-    ``supybot.databases.plugins`` affect this plugin."""
-
-    class DB(plugins.ChannelIdDatabasePlugin.DB):
-        class DB(plugins.ChannelIdDatabasePlugin.DB.DB):
-            class Record(plugins.ChannelIdDatabasePlugin.DB.DB.Record):
-                __fields__ = [
-                    'at',
-                    'by',
-                    'text',
-                    ('likes', (int, 0)),
-                    ('dislikes', (int, 0)),
-                    ('voters', (utils.safeEval, '')),
-                    ('deleted', (utils.safeEval, False)),
-                    ('deletedBy', (utils.safeEval, '')),
-                    ('deletedAt', (float, 0)),
-                ]
-
-            def add(self, at, by, text, **kwargs):
-                kwargs.setdefault('likes', 0)
-                kwargs.setdefault('dislikes', 0)
-                kwargs.setdefault('voters', '')
-                kwargs.setdefault('deleted', False)
-                kwargs.setdefault('deletedBy', '')
-                kwargs.setdefault('deletedAt', 0)
-                record = self.Record(at=at, by=by, text=text, **kwargs)
-                # Call dbi.DB.add() directly (not via super(self.__class__,
-                # self), which the base ChannelIdDatabasePlugin.DB.DB.add()
-                # uses -- that pattern resolves relative to the *actual*
-                # runtime class, so when we subclass it further it skips
-                # straight past the base's own add() and lands here with
-                # the wrong signature).
-                return dbi.DB.add(self, record)
+    Configuration variables in ``supybot.plugins.IRCquotes`` affect this
+    plugin."""
 
     def __init__(self, irc):
         self.__parent = super(IRCquotes, self)
         self.__parent.__init__(irc)
+        dbDir = conf.supybot.directories.data.dirize('IRCquotes')
+        if not os.path.isdir(dbDir):
+            os.makedirs(dbDir)
+        self.db = QuotesDB(os.path.join(dbDir, 'ircquotes.db'))
         for channel in getattr(irc.state, 'channels', {}) or {}:
             self._scheduleFor(irc, channel)
         self._http_running = False
@@ -561,6 +733,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
                 schedule.removeEvent(name)
         if self._http_running:
             self._stopHttp()
+        self.db.close()
         self.__parent.die()
 
     ###
@@ -603,7 +776,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             return
 
         def sendRandomQuote():
-            quote = self.db.random(channel)
+            quote = self.db.random(irc.network, channel)
             if quote and channel in (getattr(irc.state, 'channels', {}) or {}):
                 irc.sendMsg(ircmsgs.privmsg(channel, self.showRecord(quote)))
             self._scheduleFor(irc, channel)
@@ -653,13 +826,62 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         if not ircdb.checkCapability(msg.prefix, cap):
             irc.errorNoCapability(cap, Raise=True)
 
+    def getUserId(self, irc, prefix, channel=None):
+        try:
+            return str(ircdb.users.getUser(prefix).id)
+        except KeyError:
+            if conf.get(conf.supybot.databases.plugins.requireRegistration,
+                        channel=channel, network=irc.network):
+                irc.errorNotRegistered(Raise=True)
+            return None
+
+    def _getUserName(self, by):
+        # 'by' is always a string: either a bot user id (as a string of
+        # digits) or a raw hostmask, depending on whether the poster was
+        # registered with the bot at add-time.
+        try:
+            userId = int(by)
+        except (TypeError, ValueError):
+            return by
+        try:
+            return ircdb.users.getUser(userId).name
+        except KeyError:
+            return _('a user that is no longer registered')
+
+    def checkChangeAllowed(self, irc, msg, channel, user, record):
+        if user == record.by:
+            return True
+        cap = ircdb.makeChannelCapability(channel, 'op')
+        if ircdb.checkCapability(msg.prefix, cap):
+            return True
+        irc.errorNoCapability(cap)
+
+    def noSuchRecord(self, irc, channel, id):
+        irc.error(_('There is no quote with id #%s in my database for '
+                    '%s.') % (id, channel))
+
+    def searchSerializeRecord(self, record):
+        text = utils.str.ellipsisify(record.text, 50)
+        return format(_('#%s: %q'), record.id, text)
+
     def showRecord(self, record):
         # Deleted quotes keep their id and slot in the database (so
         # numbering never shifts, same as the original script), but their
         # content is hidden from normal display.
         if record.deleted:
             return _('#%s: (This quote has been deleted)') % record.id
-        return plugins.ChannelIdDatabasePlugin.showRecord(self, record)
+        template = string.Template(conf.supybot.replies.databaseRecord())
+        username = self._getUserName(record.by)
+        nick = username.split('!')[0] # nick==username iff registered
+        return template.substitute(
+            id=record.id,
+            text=utils.str.quoted(record.text),
+            userid=record.by,
+            username=username,
+            nick=nick,
+            at=utils.str.timestamp(record.at),
+            Types=_('Quotes'), Type=_('Quote'),
+            types=_('quotes'), type=_('quote'))
 
     @internationalizeDocstring
     def addquote(self, irc, msg, args, channel, text):
@@ -679,11 +901,9 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         self._requireCapability(irc, msg, channel, cap)
         user = self.getUserId(irc, msg.prefix, channel) or msg.prefix
         at = time.time()
-        self.addValidator(irc, text)
-        if text is not None:
-            id = self.db.add(channel, at, user, text)
-            irc.replySuccess(_('Quote #%s added.') % id)
-    addquote = wrap(addquote, ['channeldb', 'text'])
+        id = self.db.add(irc.network, channel, at, user, text)
+        irc.replySuccess(_('Quote #%s added.') % id)
+    addquote = wrap(addquote, ['channel', 'text'])
 
     @internationalizeDocstring
     def quoteget(self, irc, msg, args, channel, id):
@@ -695,11 +915,11 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         """
         self._checkEnabled(irc, channel)
         try:
-            record = self.db.get(channel, id)
+            record = self.db.get(irc.network, channel, id)
             irc.reply(self.showRecord(record))
         except KeyError:
             self.noSuchRecord(irc, channel, id)
-    quoteget = wrap(quoteget, ['channeldb', 'id'])
+    quoteget = wrap(quoteget, ['channel', 'id'])
 
     @internationalizeDocstring
     def quoteinfo(self, irc, msg, args, channel, id):
@@ -710,19 +930,19 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         """
         self._checkEnabled(irc, channel)
         try:
-            record = self.db.get(channel, id)
+            record = self.db.get(irc.network, channel, id)
         except KeyError:
             self.noSuchRecord(irc, channel, id)
             return
         if record.deleted:
             irc.reply(self.showRecord(record))
             return
-        username = plugins.getUserName(record.by)
+        username = self._getUserName(record.by)
         irc.reply(_('Quote #%s added by %s on %s; %s like(s), '
                     '%s dislike(s).') %
                   (record.id, username, utils.str.timestamp(record.at),
                    record.likes, record.dislikes))
-    quoteinfo = wrap(quoteinfo, ['channeldb', 'id'])
+    quoteinfo = wrap(quoteinfo, ['channel', 'id'])
 
     @internationalizeDocstring
     def deletedquoteinfo(self, irc, msg, args, channel, id):
@@ -735,21 +955,21 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         self._checkEnabled(irc, channel)
         self._requireOp(irc, msg, channel)
         try:
-            record = self.db.get(channel, id)
+            record = self.db.get(irc.network, channel, id)
         except KeyError:
             self.noSuchRecord(irc, channel, id)
             return
         if not record.deleted:
             irc.error(_('Quote #%s has not been deleted.') % id)
             return
-        author = plugins.getUserName(record.by)
-        deleter = plugins.getUserName(record.deletedBy)
+        author = self._getUserName(record.by)
+        deleter = self._getUserName(record.deletedBy)
         irc.reply(_('Quote #%s (added by %s on %s, deleted by %s on %s): '
                     '%s') % (
             record.id, author, utils.str.timestamp(record.at),
             deleter, utils.str.timestamp(record.deletedAt),
             utils.str.quoted(record.text)))
-    deletedquoteinfo = wrap(deletedquoteinfo, ['channeldb', 'id'])
+    deletedquoteinfo = wrap(deletedquoteinfo, ['channel', 'id'])
 
     @internationalizeDocstring
     def delquote(self, irc, msg, args, channel, id):
@@ -767,7 +987,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         self._checkEnabled(irc, channel)
         user = self.getUserId(irc, msg.prefix, channel) or msg.prefix
         try:
-            record = self.db.get(channel, id)
+            record = self.db.get(irc.network, channel, id)
             self.checkChangeAllowed(irc, msg, channel, user, record)
             if record.deleted:
                 irc.error(_('Quote #%s is already deleted.') % id)
@@ -775,11 +995,11 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             record.deleted = True
             record.deletedBy = user
             record.deletedAt = time.time()
-            self.db.set(channel, id, record)
+            self.db.set(irc.network, channel, id, record)
             irc.replySuccess()
         except KeyError:
             self.noSuchRecord(irc, channel, id)
-    delquote = wrap(delquote, ['channeldb', 'id'])
+    delquote = wrap(delquote, ['channel', 'id'])
 
     @internationalizeDocstring
     def undelquote(self, irc, msg, args, channel, id):
@@ -794,18 +1014,18 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         self._checkEnabled(irc, channel)
         self._requireOp(irc, msg, channel)
         try:
-            record = self.db.get(channel, id)
+            record = self.db.get(irc.network, channel, id)
             if not record.deleted:
                 irc.error(_('Quote #%s is not deleted.') % id)
                 return
             record.deleted = False
             record.deletedBy = ''
             record.deletedAt = 0
-            self.db.set(channel, id, record)
+            self.db.set(irc.network, channel, id, record)
             irc.replySuccess()
         except KeyError:
             self.noSuchRecord(irc, channel, id)
-    undelquote = wrap(undelquote, ['channeldb', 'id'])
+    undelquote = wrap(undelquote, ['channel', 'id'])
 
     @internationalizeDocstring
     def forcedelquote(self, irc, msg, args, channel, id):
@@ -818,12 +1038,11 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         self._checkEnabled(irc, channel)
         self._requireOp(irc, msg, channel)
         try:
-            self.db.get(channel, id)
-            self.db.remove(channel, id)
+            self.db.remove(irc.network, channel, id)
             irc.replySuccess()
         except KeyError:
             self.noSuchRecord(irc, channel, id)
-    forcedelquote = wrap(forcedelquote, ['channeldb', 'id'])
+    forcedelquote = wrap(forcedelquote, ['channel', 'id'])
 
     @internationalizeDocstring
     def randquote(self, irc, msg, args, channel):
@@ -833,13 +1052,13 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         is only necessary if the message isn't sent in the channel itself.
         """
         self._checkEnabled(irc, channel)
-        candidates = list(self.db.select(channel, lambda r: not r.deleted))
-        if candidates:
-            irc.reply(self.showRecord(random.choice(candidates)))
+        quote = self.db.random(irc.network, channel)
+        if quote:
+            irc.reply(self.showRecord(quote))
         else:
             irc.error(_('I have no quotes in my database for %s.') %
                       channel)
-    randquote = wrap(randquote, ['channeldb'])
+    randquote = wrap(randquote, ['channel'])
 
     @internationalizeDocstring
     def lastquote(self, irc, msg, args, channel, index):
@@ -853,14 +1072,14 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         self._checkEnabled(irc, channel)
         if index < 1:
             irc.error(_('<index> must be at least 1.'), Raise=True)
-        records = list(self.db.select(channel, lambda r: not r.deleted,
-                                      reverse=True))
+        records = list(self.db.select(irc.network, channel,
+                                      lambda r: not r.deleted, reverse=True))
         if len(records) < index:
             irc.error(_('I have fewer than %s quotes in my database for '
                         '%s.') % (index, channel))
             return
         irc.reply(self.showRecord(records[index - 1]))
-    lastquote = wrap(lastquote, ['channeldb', additional('positiveInt', 1)])
+    lastquote = wrap(lastquote, ['channel', additional('positiveInt', 1)])
 
     @internationalizeDocstring
     def findquote(self, irc, msg, args, channel, optlist, glob):
@@ -874,21 +1093,21 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         predicates = [lambda r: not r.deleted]
         for (opt, arg) in optlist:
             if opt == 'by':
-                predicates.append(lambda r, arg=arg: r.by == arg.id)
+                predicates.append(lambda r, arg=arg: r.by == str(arg.id))
         if glob:
             def globP(r, glob=glob.lower()):
                 return fnmatch.fnmatch(r.text.lower(), glob)
             predicates.append(globP)
         def p(record):
             return all(predicate(record) for predicate in predicates)
-        candidates = list(self.db.select(channel, p))
+        candidates = list(self.db.select(irc.network, channel, p))
         if candidates:
             L = [self.searchSerializeRecord(r) for r in candidates]
             L.sort()
             irc.reply(format(_('%s found: %L'), len(L), L))
         else:
             irc.reply(_('No matching quotes were found.'))
-    findquote = wrap(findquote, ['channeldb',
+    findquote = wrap(findquote, ['channel',
                                  getopts({'by': 'otherUser'}),
                                  additional(rest('glob'))])
 
@@ -911,7 +1130,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             voterId = msg.prefix
 
         try:
-            record = self.db.get(channel, id)
+            record = self.db.get(irc.network, channel, id)
         except KeyError:
             self.noSuchRecord(irc, channel, id)
             return
@@ -928,7 +1147,7 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             if alreadyVoted:
                 voters.discard(voterId)
             record.voters = ','.join(voters)
-            self.db.set(channel, id, record)
+            self.db.set(irc.network, channel, id, record)
             irc.replySuccess(_('Your vote for quote #%s has been cleared.')
                               % id)
             return
@@ -943,11 +1162,11 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
             record.likes += 1
         voters.add(voterId)
         record.voters = ','.join(voters)
-        self.db.set(channel, id, record)
+        self.db.set(irc.network, channel, id, record)
         irc.replySuccess(_('Quote #%s now has %s like(s) and %s '
                            'dislike(s).') % (id, record.likes,
                                              record.dislikes))
-    votequote = wrap(votequote, ['channeldb', 'id',
+    votequote = wrap(votequote, ['channel', 'id',
                                  additional(("literal", ('+', '-', '0')),
                                             '+')])
 
@@ -960,10 +1179,10 @@ class IRCquotes(plugins.ChannelIdDatabasePlugin):
         itself.
         """
         self._checkEnabled(irc, channel)
-        n = len(list(self.db.select(channel, lambda r: not r.deleted)))
+        n = self.db.size(irc.network, channel)
         irc.reply(format(_('There %b %n in my database.'),
                           n, (n, 'quote')))
-    quotestats = wrap(quotestats, ['channeldb'])
+    quotestats = wrap(quotestats, ['channel'])
 
 
 Class = IRCquotes

@@ -1,6 +1,8 @@
 # IRCquotes has no third-party Python dependencies beyond Limnoria
 # itself (limnoria / supybot, which this plugin runs inside of) and the
-# Python standard library (time, random, fnmatch, html).
+# Python standard library (time, string, sqlite3, fnmatch, threading,
+# html, urllib.parse). Quotes are stored in a plain SQLite database file
+# via the stdlib sqlite3 module -- no separate database server needed.
 #
 # This file is intentionally near-empty; it exists so tooling that scans
 # for a requirements.txt per plugin finds one. If you install Limnoria
