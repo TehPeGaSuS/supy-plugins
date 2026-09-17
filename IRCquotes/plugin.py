@@ -1315,11 +1315,26 @@ class IRCquotes(callbacks.Plugin):
         self._checkEnabled(irc, channel)
         n = self.db.size(irc.network, channel)
         reply = format(_('There %b %n in my database.'), n, (n, 'quote'))
-        url = self.registryValue('web.publicUrl', channel)
+        url = self._quotePageUrl(irc, channel)
         if url:
             reply += _(' View %s quotes at %s') % (channel, url)
         irc.reply(reply)
     quotestats = wrap(quotestats, ['channel'])
+
+    def _quotePageUrl(self, irc, channel):
+        # web.publicUrl is just the base the reverse proxy (or the bot's
+        # own HTTP server) serves IRCquotes from, e.g.
+        # "https://quotes.example.com/ircquotes/" -- the network/channel
+        # segments of the actual page URL are appended here, so admins
+        # only have to set the base once instead of a full URL per
+        # channel.
+        base = self.registryValue('web.publicUrl', channel)
+        if not base:
+            return None
+        if not base.endswith('/'):
+            base += '/'
+        return '%s%s/%s/' % (base, utils.web.urlquote(irc.network),
+                              utils.web.urlquote(channel))
 
     @internationalizeDocstring
     def quotepage(self, irc, msg, args, channel):
@@ -1330,7 +1345,7 @@ class IRCquotes(callbacks.Plugin):
         it.
         """
         self._checkEnabled(irc, channel)
-        url = self.registryValue('web.publicUrl', channel)
+        url = self._quotePageUrl(irc, channel)
         if url:
             irc.reply(url)
         else:

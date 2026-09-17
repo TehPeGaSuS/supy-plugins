@@ -173,7 +173,12 @@ class IRCquotesTestCase(ChannelPluginTestCase):
         self.assertError('quotepage') # not configured by default
         with conf.supybot.plugins.IRCquotes.web.publicUrl.context(
                 'https://quotes.example.com/ircquotes/'):
-            self.assertRegexp('quotepage', 'quotes.example.com')
+            # The base is set once; network and channel get appended
+            # automatically to build the full page URL.
+            self.assertResponse('quotepage',
+                'https://quotes.example.com/ircquotes/%s/%s/' % (
+                    utils.web.urlquote(self.irc.network),
+                    utils.web.urlquote(self.channel)))
 
     def testQuoteStatsShowsUrlWhenConfigured(self):
         with conf.supybot.databases.plugins.requireRegistration.context(False):

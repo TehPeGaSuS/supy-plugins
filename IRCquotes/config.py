@@ -109,11 +109,14 @@ conf.registerChannelValue(IRCquotes.web, 'quotesPerPage',
     html_quotes_per_page. Set to 0 to show every quote on a single
     page.""")))
 conf.registerChannelValue(IRCquotes.web, 'publicUrl',
-    registry.String('', _("""If set, the externally-reachable URL where
-    this channel's quotes can be browsed (e.g. behind a reverse proxy in
-    front of the bot's own HTTP server) -- shown by the quotepage
-    command. Same idea as the original script's html_page_url. Empty
-    (the default) means quotepage has nothing to show.""")))
+    registry.String('', _("""If set, the externally-reachable base URL
+    IRCquotes is served from (e.g. behind a reverse proxy in front of
+    the bot's own HTTP server), such as
+    "https://quotes.example.com/ircquotes/". The network and channel are
+    appended automatically to build the full page URL shown by the
+    quotepage command and (if set) quotestats. Same idea as the original
+    script's html_page_url. Empty (the default) means nothing to show.
+    """)))
 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

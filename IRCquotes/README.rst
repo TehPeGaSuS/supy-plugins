@@ -58,8 +58,9 @@ Commands
   database. Also appends the ``web.publicUrl`` link, if one is set for
   the channel.
 - ``quotepage [<channel>]`` -- shows the URL where <channel>'s quotes can
-  be browsed on the web, if ``supybot.plugins.IRCquotes.web.publicUrl``
-  is set for it (same idea as the original script's ``html_page_url``).
+  be browsed on the web, built from ``supybot.plugins.IRCquotes.web.
+  publicUrl`` plus the network and channel, if that base is set (same
+  idea as the original script's ``html_page_url``).
 
 Permissions
 -----------
@@ -123,9 +124,11 @@ Configuration
 - ``supybot.plugins.IRCquotes.web.channel`` (channel) -- allow a specific
   channel's quotes to be browsed on the web.
 - ``supybot.plugins.IRCquotes.web.publicUrl`` (channel) -- the
-  externally-reachable URL where this channel's quotes can be browsed
-  (e.g. behind a reverse proxy), shown by the ``quotepage`` command.
-  Empty (the default) means nothing to show.
+  externally-reachable *base* URL IRCquotes is served from (e.g. behind
+  a reverse proxy), such as ``https://quotes.example.com/ircquotes/``.
+  The network and channel are appended automatically to build the full
+  page URL shown by ``quotepage`` (and ``quotestats``, if set). Empty
+  (the default) means nothing to show.
 - ``supybot.plugins.IRCquotes.web.topQuotesEnabled`` (channel) -- show a
   "top quotes" panel of the best-rated quotes above the full list, same
   as the original script's toggleable ``html_show_best_rated_quotes``.
