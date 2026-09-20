@@ -309,7 +309,15 @@ class Blacklist(callbacks.Plugin):
                 return re.search(needle, haystack) is not None
             except re.error:
                 return False
-        if any(c in needle for c in '*?'):
+        # NB: don't use builtin any() here -- supybot.commands defines its
+        # own `any` (a wrap-spec converter) that shadows it via our
+        # `from supybot.commands import *` (see _matchesAny's note above).
+        has_wildcard = False
+        for c in '*?':
+            if c in needle:
+                has_wildcard = True
+                break
+        if has_wildcard:
             return fnmatch.fnmatchcase(haystack, needle)
         return needle in haystack
 
@@ -415,6 +423,20 @@ class Blacklist(callbacks.Plugin):
         if at == -1:
             return True
         return ':' in mask[:at]
+
+    def _isKnownNick(self, irc, target):
+        """True if `target` currently resolves to a real, known nick.
+        NB: ircutils.isNick() is deliberately NOT used here -- Limnoria
+        monkeypatches it (see conf.py) to defer to the lenient
+        supybot.protocols.irc.strictRfc setting, under which almost any
+        space-free, '!'-free, non-channel string (including extban syntax
+        like "~account:foo") reports as a "valid nick". Actual
+        resolvability is the only reliable signal."""
+        try:
+            irc.state.nickToHostmask(target)
+            return True
+        except KeyError:
+            return False
 
     # -----------------------------------------------------------------
     # Expiry scheduling
@@ -568,7 +590,7 @@ class Blacklist(callbacks.Plugin):
         """[<channel>] <nick|mask> [<reason>]
         Adds a mask to the blacklist (Permanent in DB, temporary +b in IRC).
         """
-        if not ircutils.isNick(target) and self._looksLikeExtban(target):
+        if not self._isKnownNick(irc, target) and self._looksLikeExtban(target):
             irc.error("The banmask specified is incorrect. It must be in "
                       "the format of nick!user@host.")
             return
@@ -620,7 +642,7 @@ class Blacklist(callbacks.Plugin):
         """[<channel>] <nick|mask> [<minutes>] [<reason>]
         Applies a temporary ban. If minutes are not provided, uses banTimerExpiry.
         """
-        if not ircutils.isNick(target) and self._looksLikeExtban(target):
+        if not self._isKnownNick(irc, target) and self._looksLikeExtban(target):
             irc.error("The banmask specified is incorrect. It must be in "
                       "the format of nick!user@host.")
             return
@@ -863,6 +885,10 @@ class Blacklist(callbacks.Plugin):
             bans/kicks it in every channel currently enforcing it.
             """
             p = self.plugin
+            if not p._isKnownNick(irc, target) and p._looksLikeExtban(target):
+                irc.error("The banmask specified is incorrect. It must be in "
+                          "the format of nick!user@host.")
+                return
             mask = p._createNetMask(irc, target)
             if not mask:
                 irc.error("Could not create hostmask.")
@@ -902,6 +928,10 @@ class Blacklist(callbacks.Plugin):
             uses netTimerExpiry.
             """
             p = self.plugin
+            if not p._isKnownNick(irc, target) and p._looksLikeExtban(target):
+                irc.error("The banmask specified is incorrect. It must be in "
+                          "the format of nick!user@host.")
+                return
             mask = p._createNetMask(irc, target)
             if not mask:
                 irc.error("Could not create hostmask.")

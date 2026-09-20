@@ -223,5 +223,167 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertFalse(m is None, 'Expected an UNBAN to be queued for the past-due entry.')
         self.assertEqual(m.command, 'MODE')
 
+    # -------------------------------------------------------------
+    # Extban handling: add/timer/net add/net timer reject them with a
+    # clear error; doMode's manual-ban auto-sync silently ignores them.
+    # -------------------------------------------------------------
+
+    def testExtbanRejectedOnAdd(self):
+        self.assertRegexp('blacklist add ~account:baduser',
+                           r'nick!user@host')
+        self.assertRegexp('blacklist timer ~account:baduser',
+                           r'nick!user@host')
+        self.assertRegexp('blacklist net add ~account:baduser',
+                           r'nick!user@host')
+        self.assertRegexp('blacklist net timer ~account:baduser',
+                           r'nick!user@host')
+
+    def testExtbanBareNickStillWorks(self):
+        # A bare nick (no '@' at all) is legitimate input for add/timer --
+        # it's a nick to resolve, not an attempted mask -- so it must NOT
+        # be caught by the extban guard.
+        self.assertNotError('blacklist add foo stillworks')
+        self._drain()
+
+    def testExtbanIPv6HostNotRejected(self):
+        # A ':' AFTER the '@' (IPv6 literal host) must never be flagged --
+        # only a ':' before the '@' means "not a plain hostmask".
+        self.assertNotError('blacklist add *!*@2001:db8::1 ipv6reason')
+        self._drain()
+        self.assertRegexp('blacklist list', r'2001:db8::1')
+
+    def testDoModeIgnoresExtban(self):
+        # No prior +b -> the channel bucket is legitimately never created;
+        # the ignored-extban assertion IS that it stays that way.
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '~account:baduser'),
+                                       prefix='anop!op@op.host'))
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', 'account:baduser'),
+                                       prefix='anop!op@op.host'))
+        bucket = self._cb()._get_channel_bucket(self.channel)
+        self.assertTrue(bucket is None or (
+            '~account:baduser' not in bucket['entries'] and
+            'account:baduser' not in bucket['entries']),
+            'Extban-shaped +b (with or without a leading prefix char) must never be tracked.')
+
+    # -------------------------------------------------------------
+    # Word filter
+    # -------------------------------------------------------------
+
+    def setUpWordFilter(self):
+        conf.supybot.plugins.Blacklist.wordFilterEnabled.setValue(True)
+
+    def _say(self, text, prefix='foo!foouser@foo.host'):
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, text, prefix=prefix))
+
+    def testWordActionChainMustEscalate(self):
+        self.setUpWordFilter()
+        self.assertRegexp('blacklist word add --action kickban,kick *badword*',
+                           r'escalate')
+        self.assertNotError('blacklist word add --action kick,kickban *badword*')
+
+    def testWordActionChainRejectsUnknown(self):
+        self.setUpWordFilter()
+        self.assertError('blacklist word add --action kick,dance *badword*')
+
+    def testWordSimpleMatchEscalates(self):
+        self.setUpWordFilter()
+        self.assertNotError('blacklist word add --action warn,kick --cooldown 10 *badword*')
+        self._drain()
+
+        self._say('this has a badword in it')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a warn (PRIVMSG) for the 1st offense.')
+        self.assertEqual(m.command, 'PRIVMSG')
+        self.assertTrue('foo' in m.args[1])
+
+        self._say('another badword here')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a kick for the 2nd offense.')
+        self.assertEqual(m.command, 'KICK')
+
+    def testWordRegexMatch(self):
+        self.setUpWordFilter()
+        self.assertNotError(r'blacklist word add --type regex --action kick \bfuck\b')
+        self._drain()
+
+        # Substring that isn't a whole word must NOT match with regex +
+        # word boundaries (unlike --type simple, which would).
+        self._say('a firetruck passed by')
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'regex \\bfuck\\b must not match inside "firetruck".')
+
+        self._say('well fuck')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a kick for a real word-boundary match.')
+        self.assertEqual(m.command, 'KICK')
+
+    def testWordBanReachesBanListAndAutoExpires(self):
+        self.setUpWordFilter()
+        self.assertNotError('blacklist word add --action ban --expiry 5 *badword*')
+        self._drain()
+
+        self._say('badword')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a MODE +b for the ban action.')
+        self.assertEqual(m.command, 'MODE')
+
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertTrue(any(e.get('expire_mode') == 'full' and e.get('expire_at')
+                             for e in bucket['entries'].values()),
+                         'The auto-generated ban should be a normal, auto-expiring entry.')
+
+    def testWordCooldownResetsCounter(self):
+        self.setUpWordFilter()
+        cb = self._cb()
+        self.assertNotError('blacklist word add --action warn,kick --cooldown 1 *badword*')
+        self._drain()
+        bucket = cb.db['channels'][self.channel.lower()]
+        entry_id = bucket['words']['*badword*']['id']
+
+        count = cb._bumpWordOffense(self.irc.network, self.channel,
+                                     'foo!foouser@foo.host', 'channel', entry_id, 1)
+        self.assertEqual(count, 1)
+        # Simulate the cooldown window having already elapsed.
+        key = (self.irc.network, self.channel.lower(), 'foo!foouser@foo.host',
+               'channel', entry_id)
+        cb._word_offenses[key]['last'] -= 120
+        count = cb._bumpWordOffense(self.irc.network, self.channel,
+                                     'foo!foouser@foo.host', 'channel', entry_id, 1)
+        self.assertEqual(count, 1, 'Counter should reset to 1 once the cooldown elapses.')
+
+    def testWordExemptIsSkipped(self):
+        self.setUpWordFilter()
+        self.assertNotError('blacklist exempt add foo!*@*')
+        self.assertNotError('blacklist word add --action kick *badword*')
+        self._drain()
+        self._say('this has a badword in it')
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Exempt hostmask must be skipped by the word filter too.')
+
+    def testWordDisabledByDefault(self):
+        # wordFilterEnabled defaults to False; explicitly restore that here
+        # since it's a global registry value another test in this suite may
+        # have flipped on (setUpWordFilter()) and left set.
+        conf.supybot.plugins.Blacklist.wordFilterEnabled.setValue(False)
+        self.assertNotError('blacklist word add --action kick *badword*')
+        self._drain()
+        self._say('a badword right here')
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Word filter must not fire when wordFilterEnabled is off.')
+
+    def testNetWordAddEnforcedAcrossChannel(self):
+        self.setUpWordFilter()
+        self.assertNotError('blacklist net wordadd --action kick *netbadword*')
+        self._drain()
+        self.assertRegexp('blacklist net wordlist', r'netbadword')
+
+        self._say('a netbadword here')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a kick from the network-wide word entry.')
+        self.assertEqual(m.command, 'KICK')
+
+        self.assertNotError('blacklist net worddelete 1')
+        self.assertResponse('blacklist net wordlist', 'Network word list is empty.')
+
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
