@@ -344,12 +344,15 @@ class Blacklist(callbacks.Plugin):
         template = self.banmasks.get(num, self.banmasks[2])
         return template.replace("nick", nick).replace("ident", ident).replace("host", host)
 
-    def _doWordAction(self, irc, channel, nick, hostmask, action, reason):
+    def _doWordAction(self, irc, channel, nick, hostmask, action, reason, pattern):
         """`reason` is the entry's explicit --reason (already sliced to this
         escalation step), or None if it didn't set one -- in which case a
-        per-action default is used. "ban" (the bare, non-kicking step)
-        never gets a reason: it's a silent +b with nothing to show anyone,
-        unlike "kickban" or "kick" which have a visible kick message."""
+        per-action default is used. "ban" (the bare, non-kicking step) never
+        puts a reason anywhere user-visible (no wire mechanism exists for
+        one on a plain +b), but it still gets an internal-only DB reason
+        (the entry's --reason, or "blacklisted word: <pattern>") so it
+        shows up in `blacklist list`/`search` like every other ban instead
+        of looking unexplained."""
         try:
             n, ident, host = ircutils.splitHostmask(hostmask)
         except Exception:
@@ -371,18 +374,23 @@ class Blacklist(callbacks.Plugin):
         # auto-expiry) so it behaves and lists exactly like any other
         # channel ban.
         if action == 'kickban':
-            reason = reason or self.registryValue('wordKickbanMessage', channel)
+            wire_reason = reason or self.registryValue('wordKickbanMessage', channel)
+            db_reason = wire_reason
         else:
-            reason = None  # bare "ban": no kick, no message, nothing to show
+            # bare "ban": no kick, no wire-visible reason (there's no such
+            # thing for a plain +b in any ircd) -- but still worth a
+            # DB-only reason for list/search, so it doesn't look unexplained.
+            wire_reason = None
+            db_reason = reason or f"blacklisted word: {pattern}"
         mask = self._wordBanMask(channel, n, ident, host)
         minutes = self.registryValue('wordBanExpiry', channel)
         expire_at = time.time() + (minutes * 60)
-        entry_id = self._internal_add(channel, mask, irc.nick, reason, is_bot_cmd=True,
+        entry_id = self._internal_add(channel, mask, irc.nick, db_reason, is_bot_cmd=True,
                                        expire_at=expire_at, expire_mode='full')
         irc.queueMsg(ircmsgs.ban(channel, mask))
         self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
         if action == 'kickban' and nick in irc.state.channels[channel].users:
-            irc.queueMsg(ircmsgs.kick(channel, nick, reason))
+            irc.queueMsg(ircmsgs.kick(channel, nick, wire_reason))
 
     # -----------------------------------------------------------------
     # Exemption checks
@@ -1318,7 +1326,7 @@ class Blacklist(callbacks.Plugin):
                 # whenever they return.
                 self._resetWordOffense(irc.network, channel, msg.prefix, scope, entry['id'])
 
-            self._doWordAction(irc, channel, msg.nick, msg.prefix, action, reason)
+            self._doWordAction(irc, channel, msg.nick, msg.prefix, action, reason, pattern)
 
 
 Class = Blacklist

@@ -167,8 +167,12 @@ clamped the same way as the action chain once exhausted), e.g.
 Used as the kick/kickban reason, and substituted for `$reason` in the warn
 message. `warn` never touches IRC bans/kicks -- it just sends
 `wordWarnMessage` (`$nick`/`$reason` substituted) to the channel. The bare
-`ban` step (no kick) never has or shows a reason anywhere -- it's a silent
-`+b`, unlike `kickban` which visibly kicks with a reason.
+`ban` step (no kick) never puts a reason anywhere user-visible -- there's no
+wire mechanism for a `+b` to carry one on any ircd, unlike `kickban` which
+visibly kicks with one. It still gets an internal-only DB reason (its own
+`--reason`, or `blacklisted word: <pattern>` by default) purely so it shows
+up sensibly in `blacklist list`/`search` instead of looking unexplained --
+this is never sent over IRC, exactly like every other ban's reason.
 
 Since a word entry has no configured mask (only a matched text pattern), a
 `ban`/`kickban` step auto-generates one from the offender's own hostmask

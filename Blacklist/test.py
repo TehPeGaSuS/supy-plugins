@@ -333,14 +333,16 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self._drain()
 
         self._say('a banword here')
-        m = self.irc.takeMsg()  # MODE +b, no kick, no reason anywhere
+        m = self.irc.takeMsg()  # MODE +b -- no kick, no wire-visible reason
         self.assertEqual(m.command, 'MODE')
         self.assertTrue(self.irc.takeMsg() is None,
                          'A bare "ban" step must not kick or say anything.')
+        # It still gets an internal-only DB reason (for list/search), even
+        # though nothing user-visible (kick/notice/wire) ever shows one.
         bucket = self._cb().db['channels'][self.channel.lower()]
-        self.assertTrue(any(not e['reason'] for e in bucket['entries'].values()
-                             if e['adder'] == self.irc.nick),
-                         'A bare "ban" step should store no reason.')
+        self.assertTrue(any(e['reason'] == 'blacklisted word: *banword*'
+                             for e in bucket['entries'].values()),
+                         'A bare "ban" step should still store an internal reason for list/search.')
 
     def testWordRegexMatch(self):
         self.setUpWordFilter()
