@@ -119,7 +119,17 @@ conf.registerChannelValue(Blacklist, 'wordMaskNumber',
         reaches "ban"/"kickban" (the offender has no configured mask, only a matched text pattern)."""))
 
 conf.registerChannelValue(Blacklist, 'wordWarnMessage',
-        registry.String("$nick: please mind the channel rules.", """Sets the message used for a word entry's
-        "warn" step. $nick and $reason are substituted."""))
+        registry.String("$nick, mind your language in this channel.", """Sets the message used for a word
+        entry's "warn" step (sent to the channel). $nick and $reason are substituted."""))
+
+conf.registerChannelValue(Blacklist, 'wordKickMessage',
+        registry.String("You've been told to mind your language in this channel.",
+        """Sets the default kick reason for a word entry's "kick" step, used when the entry has no
+        explicit --reason."""))
+
+conf.registerChannelValue(Blacklist, 'wordKickbanMessage',
+        registry.String("Go get some air and return when you can mind your language.",
+        """Sets the default kick reason for a word entry's "kickban" step, used when the entry has no
+        explicit --reason."""))
 
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

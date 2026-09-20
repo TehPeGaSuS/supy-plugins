@@ -301,6 +301,47 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertFalse(m is None, 'Expected a kick for the 2nd offense.')
         self.assertEqual(m.command, 'KICK')
 
+    def testWordDefaultReasonsPerAction(self):
+        self.setUpWordFilter()
+        self.assertNotError('blacklist word add --action warn *warnword*')
+        self.assertNotError('blacklist word add --action kick *kickword*')
+        self.assertNotError('blacklist word add --action kickban *kickbanword*')
+        self.assertNotError('blacklist word add --action ban *banword*')
+        self._drain()
+
+        self._say('a warnword here')
+        m = self.irc.takeMsg()
+        self.assertEqual(m.command, 'PRIVMSG')
+        self.assertTrue('mind your language' in m.args[1])
+
+        self._say('a kickword here')
+        m = self.irc.takeMsg()
+        self.assertEqual(m.command, 'KICK')
+        self.assertEqual(m.args[2], "You've been told to mind your language in this channel.")
+        # A KICK actually removes them from the channel; rejoin so the next
+        # step (which itself kicks) has someone present to kick.
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
+        self._drain()
+
+        self._say('a kickbanword here')
+        m = self.irc.takeMsg()  # MODE +b
+        self.assertEqual(m.command, 'MODE')
+        m = self.irc.takeMsg()  # KICK
+        self.assertEqual(m.command, 'KICK')
+        self.assertEqual(m.args[2], "Go get some air and return when you can mind your language.")
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
+        self._drain()
+
+        self._say('a banword here')
+        m = self.irc.takeMsg()  # MODE +b, no kick, no reason anywhere
+        self.assertEqual(m.command, 'MODE')
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'A bare "ban" step must not kick or say anything.')
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertTrue(any(not e['reason'] for e in bucket['entries'].values()
+                             if e['adder'] == self.irc.nick),
+                         'A bare "ban" step should store no reason.')
+
     def testWordRegexMatch(self):
         self.setUpWordFilter()
         self.assertNotError(r'blacklist word add --type regex --action kick \bfuck\b')

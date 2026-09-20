@@ -345,6 +345,11 @@ class Blacklist(callbacks.Plugin):
         return template.replace("nick", nick).replace("ident", ident).replace("host", host)
 
     def _doWordAction(self, irc, channel, nick, hostmask, action, reason):
+        """`reason` is the entry's explicit --reason (already sliced to this
+        escalation step), or None if it didn't set one -- in which case a
+        per-action default is used. "ban" (the bare, non-kicking step)
+        never gets a reason: it's a silent +b with nothing to show anyone,
+        unlike "kickban" or "kick" which have a visible kick message."""
         try:
             n, ident, host = ircutils.splitHostmask(hostmask)
         except Exception:
@@ -357,6 +362,7 @@ class Blacklist(callbacks.Plugin):
             return
 
         if action == 'kick':
+            reason = reason or self.registryValue('wordKickMessage', channel)
             if nick in irc.state.channels[channel].users:
                 irc.queueMsg(ircmsgs.kick(channel, nick, reason))
             return
@@ -364,6 +370,10 @@ class Blacklist(callbacks.Plugin):
         # ban / kickban: reuse the normal ban-entry machinery (DB record +
         # auto-expiry) so it behaves and lists exactly like any other
         # channel ban.
+        if action == 'kickban':
+            reason = reason or self.registryValue('wordKickbanMessage', channel)
+        else:
+            reason = None  # bare "ban": no kick, no message, nothing to show
         mask = self._wordBanMask(channel, n, ident, host)
         minutes = self.registryValue('wordBanExpiry', channel)
         expire_at = time.time() + (minutes * 60)
@@ -1300,8 +1310,7 @@ class Blacklist(callbacks.Plugin):
             action = actions[idx]
 
             reason_chain = entry['reason'].split('|') if entry['reason'] else []
-            reason = (reason_chain[min(idx, len(reason_chain) - 1)] if reason_chain
-                      else "blacklisted word")
+            reason = reason_chain[min(idx, len(reason_chain) - 1)] if reason_chain else None
 
             if action in ('ban', 'kickban'):
                 # They can't offend again until unbanned; reset now instead

@@ -158,13 +158,17 @@ is recorded and auto-expired through the exact same restart-safe timer
 machinery as any other ban (see below), so it shows up in `blacklist list`
 like any other entry.
 
-**`--reason`** may be a single reason for every step, or a `|`-delimited
-chain aligned with `--action` (one reason per step, clamped the same way as
-the action chain once exhausted), e.g.
+**`--reason`** is optional: without it, each step falls back to its own
+configured default message (`wordWarnMessage`/`wordKickMessage`/
+`wordKickbanMessage` below). When given, it may be a single reason for every
+step, or a `|`-delimited chain aligned with `--action` (one reason per step,
+clamped the same way as the action chain once exhausted), e.g.
 `--reason "Mind your language.|Warned already.|Cool off and come back later."`
 Used as the kick/kickban reason, and substituted for `$reason` in the warn
 message. `warn` never touches IRC bans/kicks -- it just sends
-`wordWarnMessage` (`$nick`/`$reason` substituted) to the channel.
+`wordWarnMessage` (`$nick`/`$reason` substituted) to the channel. The bare
+`ban` step (no kick) never has or shows a reason anywhere -- it's a silent
+`+b`, unlike `kickban` which visibly kicks with a reason.
 
 Since a word entry has no configured mask (only a matched text pattern), a
 `ban`/`kickban` step auto-generates one from the offender's own hostmask
@@ -378,12 +382,32 @@ supybot.plugins.Blacklist.wordMaskNumber: 2
 
 ```
 ###
-# Sets the message used for a word entry's "warn" step. $nick and $reason
-# are substituted.
+# Sets the message used for a word entry's "warn" step (sent to the
+# channel). $nick and $reason are substituted.
 #
-# Default value: $nick: please mind the channel rules.
+# Default value: $nick, mind your language in this channel.
 ###
-supybot.plugins.Blacklist.wordWarnMessage: $nick: please mind the channel rules.
+supybot.plugins.Blacklist.wordWarnMessage: $nick, mind your language in this channel.
+```
+
+```
+###
+# Sets the default kick reason for a word entry's "kick" step, used when
+# the entry has no explicit --reason.
+#
+# Default value: You've been told to mind your language in this channel.
+###
+supybot.plugins.Blacklist.wordKickMessage: You've been told to mind your language in this channel.
+```
+
+```
+###
+# Sets the default kick reason for a word entry's "kickban" step, used
+# when the entry has no explicit --reason.
+#
+# Default value: Go get some air and return when you can mind your language.
+###
+supybot.plugins.Blacklist.wordKickbanMessage: Go get some air and return when you can mind your language.
 ```
 
 Note: the old "phost" masks (types 3, 4, 8, 9) used to get a stray `p` glued
