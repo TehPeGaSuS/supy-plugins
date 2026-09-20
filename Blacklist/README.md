@@ -2,7 +2,31 @@ A nifty channel kick and ban plugin.
 
 Written especially for me, by a username named Kaya on IRC. Extended with a
 network-wide blacklist, stable ban IDs, exemption lists, restart-safe timers,
-and a few management commands.
+a word/text filter with an escalating warn/kick/ban/kickban ladder, and a
+few management commands.
+
+### Extended bans (extbans)
+
+Modern ircds (UnrealIRCd, InspIRCd, Solanum/Libera, etc.) support "extended
+bans" -- `~account:name`, `$a:name`, `z:fingerprint` and dozens more,
+matching on account name, certificate fingerprint, GeoIP country, ASN, other
+channels, and more, depending on the ircd/module. Syntax is **not**
+standardized across ircds (different prefix characters, different letter
+codes for the same concept, InspIRCd doesn't even use a prefix character at
+all), and several selectors depend on server-side state (GeoIP, oper class,
+live channel membership) this plugin has no way to evaluate locally.
+
+This plugin makes **zero** attempt to parse or interpret extban syntax. Any
+mask that either has no `@`, or has a `:` anywhere before its first `@`, is
+treated as "not a plain hostmask" and left completely alone:
+- `add`/`timer`/`net add`/`net timer`: rejected with an explicit error
+  ("The banmask specified is incorrect. It must be in the format of
+  nick!user@host.") -- set it directly via `/mode` instead.
+- Manually-set `+b`/`-b` (the `addManualBans` auto-sync): silently ignored --
+  no DB entry, no expiry timer, no bot-issued unban, ever.
+
+A `:` *after* the `@` (e.g. an IPv6 host like `*!*@2001:db8::1`) is fine and
+never flagged -- only a `:` before the `@` triggers this.
 
 ## Channel blacklist
 
@@ -77,14 +101,92 @@ blacklist net exemptlist
 enforcing channel; `net timer` is the temporary version. Joins are checked
 against the network blacklist before the channel's own list.
 
+## Word/text filter
+
+Filters channel messages against configured word/phrase patterns, with an
+escalating ladder of actions per offending hostmask. Off by default per
+channel (`wordFilterEnabled`).
+
+```
+blacklist word add [<channel>] [--type simple|regex] --action <chain> [--cooldown <minutes>] [--expiry <minutes>] [--reason <text>] <pattern>
+blacklist word delete [<channel>] <pattern|ID>
+blacklist word list [<channel>]
+blacklist word search [<channel>] <pattern>
+```
+Network-wide equivalents (require `admin`, enforced in every channel with
+`wordFilterEnabled` on, checked together with the channel's own list):
+```
+blacklist net wordadd [--type simple|regex] --action <chain> [--cooldown <minutes>] [--expiry <minutes>] [--reason <text>] <pattern>
+blacklist net worddelete <pattern|ID>
+blacklist net wordlist
+blacklist net wordsearch <pattern>
+```
+
+**`--action`** is a comma-separated escalation chain. Each step must be one
+of `warn`, `kick`, `ban`, `kickban`, and the chain **must strictly escalate**
+through that order -- `kick,kickban` is valid, `kickban,kick` is rejected
+(a later offense can never be milder than an earlier one). A single action
+(e.g. `--action kick`) is also valid. Offense N (since the escalation
+counter last reset) picks the Nth step, clamped to the last step once the
+chain is exhausted -- e.g. with `warn,kick,kickban`, the 1st offense warns,
+the 2nd kicks, the 3rd (and every one after) kickbans.
+
+**`--type`** (default `simple`): `simple` is a glob (`*word*`) or plain
+substring match via `fnmatch` -- fast, but reintroduces the classic
+"Scunthorpe problem" (flags substrings inside innocent words, e.g.
+`*ass*` matching "assassin"); this plugin makes no attempt to avoid that for
+`--type simple`, the risk is accepted as a tradeoff for simplicity. `regex`
+uses `re.search` -- use word boundaries (e.g. `\bfuck\b`) to avoid the same
+problem.
+
+**Escalation counters** are per-channel, per-offending-hostmask (`*!user@host`
+from the message's own sender, not the nick -- so a nick change doesn't reset
+or dodge the ladder), kept in memory only (not persisted across a bot
+restart, same as any flood-style counter). **`--cooldown`** (default
+`wordCooldown`) is how many minutes of silence since that hostmask's last
+offense on *this entry* before its counter resets back to step 1 -- this is
+independent from the ban duration below. Once the chain reaches `ban` or
+`kickban`, the counter resets immediately instead of waiting on the
+cooldown (the offender can't send another message until unbanned anyway),
+so they start fresh at step 1 whenever they return.
+
+**`--expiry`** (default `wordBanExpiry`) is the number of minutes before a
+ban that a word entry's `ban`/`kickban` step applied is lifted -- a
+*different* setting from `banlistExpiry`/`banTimerExpiry`, which only
+govern manually-added mask bans. A `ban`/`kickban` firing from a word entry
+is recorded and auto-expired through the exact same restart-safe timer
+machinery as any other ban (see below), so it shows up in `blacklist list`
+like any other entry.
+
+**`--reason`** may be a single reason for every step, or a `|`-delimited
+chain aligned with `--action` (one reason per step, clamped the same way as
+the action chain once exhausted), e.g.
+`--reason "Mind your language.|Warned already.|Cool off and come back later."`
+Used as the kick/kickban reason, and substituted for `$reason` in the warn
+message. `warn` never touches IRC bans/kicks -- it just sends
+`wordWarnMessage` (`$nick`/`$reason` substituted) to the channel.
+
+Since a word entry has no configured mask (only a matched text pattern), a
+`ban`/`kickban` step auto-generates one from the offender's own hostmask
+(ident's leading `~` stripped to `*`), using the `wordMaskNumber` banmask
+template (see `Banmask types` below).
+
+Exemptions are shared with the mask blacklist: a hostmask on `exempt`/`net
+exemptadd` is skipped by the word filter too.
+
 ## Restart-safe timers
 
 Every timed ban (`timer`, `add`'s IRC-only lift, manual-ban auto-expiry, `net
-timer`) is recorded in the database with its firing time, and re-armed when
-the plugin loads. A bot restart no longer leaves a temporary ban stuck
-forever — anything that should already have expired by the time the bot comes
-back up is lifted immediately on load, everything else is rescheduled for its
-original expiry time.
+timer`, a word entry's `ban`/`kickban` step) is recorded in the database with
+its firing time, and re-armed when the plugin loads. A bot restart no longer
+leaves a temporary ban stuck forever — anything that should already have
+expired by the time the bot comes back up is lifted immediately on load,
+everything else is rescheduled for its original expiry time.
+
+Word-filter *escalation counters* (not bans -- the offense-count-per-hostmask
+state used to pick the next action) are the one exception: they're
+transient, in-memory only, and reset on a bot restart, same as any
+flood-style counter in eggdrop or similar bots.
 
 ## Configuration
 
@@ -222,6 +324,66 @@ supybot.plugins.Blacklist.pastebinUrl: https://filehost.0bin.xyz/
 # Default value: file
 ###
 supybot.plugins.Blacklist.pastebinField: file
+```
+
+Word filter configuration:
+```
+###
+# Sets whether the word/text blacklist (see "word") is enforced in this
+# channel.
+#
+# Default value: False
+###
+supybot.plugins.Blacklist.wordFilterEnabled: True
+```
+
+```
+###
+# Sets the default number of minutes of silence (no new offense) before a
+# user's escalation ladder for a word entry resets back to its first step.
+#
+# Default value: 2
+###
+supybot.plugins.Blacklist.wordCooldown: 2
+```
+
+```
+###
+# Sets the default number of minutes before a ban that was auto-applied by
+# a word entry's "ban"/"kickban" step is lifted.
+#
+# Default value: 120
+###
+supybot.plugins.Blacklist.wordBanExpiry: 120
+```
+
+```
+###
+# Sets whether word entries match case-sensitively.
+#
+# Default value: False
+###
+supybot.plugins.Blacklist.wordCaseSensitive: False
+```
+
+```
+###
+# Sets the banmask number used to build the ban mask when a word entry's
+# chain reaches "ban"/"kickban" (see Banmask types above).
+#
+# Default value: 2
+###
+supybot.plugins.Blacklist.wordMaskNumber: 2
+```
+
+```
+###
+# Sets the message used for a word entry's "warn" step. $nick and $reason
+# are substituted.
+#
+# Default value: $nick: please mind the channel rules.
+###
+supybot.plugins.Blacklist.wordWarnMessage: $nick: please mind the channel rules.
 ```
 
 Note: the old "phost" masks (types 3, 4, 8, 9) used to get a stray `p` glued

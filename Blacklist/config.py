@@ -96,4 +96,30 @@ conf.registerChannelValue(Blacklist, 'pastebinField',
         registry.String('file', """The form field name expected by the paste service.
         Use 'file' for single_php_filehost and 0x0-style services, 'content' for dpaste.com."""))
 
+# -----------------------------------------------------------------
+# Word filter
+# -----------------------------------------------------------------
+
+conf.registerChannelValue(Blacklist, 'wordFilterEnabled',
+        registry.Boolean(False, """Sets whether the word/text blacklist (see "word") is enforced in this channel."""))
+
+conf.registerChannelValue(Blacklist, 'wordCooldown',
+        registry.PositiveInteger(2, """Sets the default number of minutes of silence (no new offense) before a
+        user's escalation ladder for a word entry resets back to its first step."""))
+
+conf.registerChannelValue(Blacklist, 'wordBanExpiry',
+        registry.PositiveInteger(120, """Sets the default number of minutes before a ban that was auto-applied by
+        a word entry's "ban"/"kickban" step is lifted."""))
+
+conf.registerChannelValue(Blacklist, 'wordCaseSensitive',
+        registry.Boolean(False, """Sets whether word entries match case-sensitively."""))
+
+conf.registerChannelValue(Blacklist, 'wordMaskNumber',
+        BanmaskNumber(2, """Sets the banmask number used to build the ban mask when a word entry's chain
+        reaches "ban"/"kickban" (the offender has no configured mask, only a matched text pattern)."""))
+
+conf.registerChannelValue(Blacklist, 'wordWarnMessage',
+        registry.String("$nick: please mind the channel rules.", """Sets the message used for a word entry's
+        "warn" step. $nick and $reason are substituted."""))
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:
