@@ -57,6 +57,15 @@ class BlacklistTestCase(ChannelPluginTestCase):
         u.addCapability('admin')
         ircdb.users.setUser(u)
 
+    def tearDown(self):
+        # wordFilterEnabled/floodEnabled are global registry values, not
+        # reset between tests by the harness -- a test that turns one on
+        # and doesn't turn it back off would otherwise leak into every
+        # later test (e.g. flood tests bleeding into word-filter tests).
+        conf.supybot.plugins.Blacklist.wordFilterEnabled.setValue(False)
+        conf.supybot.plugins.Blacklist.floodEnabled.setValue(False)
+        super().tearDown()
+
     def _cb(self):
         return self.irc.getCallback('Blacklist')
 
@@ -383,15 +392,15 @@ class BlacklistTestCase(ChannelPluginTestCase):
         bucket = cb.db['channels'][self.channel.lower()]
         entry_id = bucket['words']['*badword*']['id']
 
-        count = cb._bumpWordOffense(self.irc.network, self.channel,
-                                     'foo!foouser@foo.host', 'channel', entry_id, 1)
+        count = cb._bumpOffense(self.irc.network, self.channel,
+                                 'foo!foouser@foo.host', 'word|channel', entry_id, 1)
         self.assertEqual(count, 1)
         # Simulate the cooldown window having already elapsed.
         key = (self.irc.network, self.channel.lower(), 'foo!foouser@foo.host',
-               'channel', entry_id)
-        cb._word_offenses[key]['last'] -= 120
-        count = cb._bumpWordOffense(self.irc.network, self.channel,
-                                     'foo!foouser@foo.host', 'channel', entry_id, 1)
+               'word|channel', entry_id)
+        cb._offenses[key]['last'] -= 120
+        count = cb._bumpOffense(self.irc.network, self.channel,
+                                 'foo!foouser@foo.host', 'word|channel', entry_id, 1)
         self.assertEqual(count, 1, 'Counter should reset to 1 once the cooldown elapses.')
 
     def testWordExemptIsSkipped(self):
@@ -427,6 +436,121 @@ class BlacklistTestCase(ChannelPluginTestCase):
 
         self.assertNotError('blacklist net worddelete 1')
         self.assertResponse('blacklist net wordlist', 'Network word list is empty.')
+
+    # -----------------------------------------------------------------
+    # Flood detector
+    # -----------------------------------------------------------------
+
+    def setUpFlood(self, lines=3, seconds=10, action='kick,kickban', cooldown=2):
+        conf.supybot.plugins.Blacklist.floodEnabled.setValue(True)
+        conf.supybot.plugins.Blacklist.floodLines.setValue(lines)
+        conf.supybot.plugins.Blacklist.floodSeconds.setValue(seconds)
+        conf.supybot.plugins.Blacklist.floodAction.setValue(action)
+        conf.supybot.plugins.Blacklist.floodCooldown.setValue(cooldown)
+
+    def testFloodDisabledByDefault(self):
+        conf.supybot.plugins.Blacklist.floodEnabled.setValue(False)
+        for i in range(10):
+            self._say('flood message %d' % i)
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Flood detector must not fire when floodEnabled is off.')
+
+    def testFloodTriggersEscalation(self):
+        self.setUpFlood(lines=3, action='kick,kickban')
+        self._drain()
+
+        # First 2 messages are under threshold: no action.
+        self._say('hello 1')
+        self._say('hello 2')
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Should not trigger before floodLines is reached.')
+
+        # 3rd message crosses the threshold -> 1st escalation step (kick).
+        self._say('hello 3')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a kick once floodLines is reached.')
+        self.assertEqual(m.command, 'KICK')
+
+        # foo was kicked; rejoin and flood again for the 2nd step (kickban).
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
+        self._drain()
+        self._say('hello 4')
+        self._say('hello 5')
+        self._say('hello 6')
+        msgs = []
+        while True:
+            m = self.irc.takeMsg()
+            if m is None:
+                break
+            msgs.append(m.command)
+        self.assertTrue('MODE' in msgs, 'Expected a ban (MODE +b) for the 2nd escalation step.')
+        self.assertTrue('KICK' in msgs, 'Expected a kick alongside the ban (kickban).')
+
+    def testFloodCooldownResetsLadder(self):
+        self.setUpFlood(lines=3, action='kick,kickban', cooldown=1)
+        self._drain()
+        cb = self._cb()
+
+        self._say('a')
+        self._say('b')
+        self._say('c')
+        m = self.irc.takeMsg()
+        self.assertEqual(m.command, 'KICK', 'First trigger should be a kick.')
+
+        # Simulate the cooldown having already elapsed.
+        key = (self.irc.network, self.channel.lower(), 'foo!foouser@foo.host', 'flood', 0)
+        cb._offenses[key]['last'] -= 120
+
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
+        self._drain()
+        self._say('d')
+        self._say('e')
+        self._say('f')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected another trigger after re-flooding.')
+        self.assertEqual(m.command, 'KICK',
+                          'Ladder should have reset to step 1 (kick) after the cooldown elapsed.')
+
+    def testFloodExemptIsSkipped(self):
+        self.setUpFlood(lines=3)
+        self.assertNotError('blacklist exempt add foo!*@*')
+        self._drain()
+        for i in range(10):
+            self._say('flood message %d' % i)
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Exempt hostmasks must never trigger the flood detector.')
+
+    def testFloodWindowSlides(self):
+        # floodSeconds=1: messages spaced further apart than the window
+        # should never accumulate toward the threshold.
+        self.setUpFlood(lines=3, seconds=1)
+        self._drain()
+        self._say('a')
+        time.sleep(1.1)
+        self._say('b')
+        time.sleep(1.1)
+        self._say('c')
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Messages outside the sliding window must not trigger flood.')
+
+    def testFloodBanReachesBanListAsAutoExpiringEntry(self):
+        self.setUpFlood(lines=3, action='ban', cooldown=10)
+        self._drain()
+        cb = self._cb()
+
+        self._say('a')
+        self._say('b')
+        self._say('c')
+        m = self.irc.takeMsg()
+        self.assertFalse(m is None, 'Expected a MODE +b for the ban action.')
+        self.assertEqual(m.command, 'MODE')
+
+        bucket = cb.db['channels'][self.channel.lower()]
+        entries = [e for e in bucket['entries'].values() if e['reason'] == 'flooding']
+        self.assertEqual(len(entries), 1,
+                          'The auto-generated ban should be stored with a "flooding" reason.')
+        self.assertTrue(entries[0].get('expire_mode') == 'full' and entries[0].get('expire_at'),
+                         'The auto-generated ban should be a normal, auto-expiring entry.')
 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

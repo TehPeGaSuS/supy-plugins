@@ -132,4 +132,46 @@ conf.registerChannelValue(Blacklist, 'wordKickbanMessage',
         """Sets the default kick reason for a word entry's "kickban" step, used when the entry has no
         explicit --reason."""))
 
+# -----------------------------------------------------------------
+# Flood detector
+# -----------------------------------------------------------------
+
+conf.registerChannelValue(Blacklist, 'floodEnabled',
+        registry.Boolean(False, """Sets whether the message-flood detector is enabled in this channel."""))
+
+conf.registerChannelValue(Blacklist, 'floodLines',
+        registry.PositiveInteger(6, """Sets the number of messages a single hostmask may send within
+        floodSeconds before it's considered flooding."""))
+
+conf.registerChannelValue(Blacklist, 'floodSeconds',
+        registry.PositiveInteger(10, """Sets the sliding time window (in seconds) used to detect message flooding."""))
+
+conf.registerChannelValue(Blacklist, 'floodAction',
+        registry.String("kick,kickban", """Sets the escalation ladder used when flooding is detected. Must be a
+        comma-separated, strictly-escalating subsequence of warn,kick,ban,kickban (e.g. "kick,kickban")."""))
+
+conf.registerChannelValue(Blacklist, 'floodCooldown',
+        registry.PositiveInteger(2, """Sets the number of minutes of silence (no new flood trigger) before a
+        user's flood escalation ladder resets back to its first step."""))
+
+conf.registerChannelValue(Blacklist, 'floodBanExpiry',
+        registry.PositiveInteger(60, """Sets the number of minutes before a ban that was auto-applied by the
+        flood detector's "ban"/"kickban" step is lifted."""))
+
+conf.registerChannelValue(Blacklist, 'floodMaskNumber',
+        BanmaskNumber(2, """Sets the banmask number used to build the ban mask when the flood detector's chain
+        reaches "ban"/"kickban"."""))
+
+conf.registerChannelValue(Blacklist, 'floodWarnMessage',
+        registry.String("$nick, please slow down.", """Sets the message used for the flood detector's "warn"
+        step (sent to the channel). $nick is substituted."""))
+
+conf.registerChannelValue(Blacklist, 'floodKickMessage',
+        registry.String("Please slow down.",
+        """Sets the kick reason for the flood detector's "kick" step."""))
+
+conf.registerChannelValue(Blacklist, 'floodKickbanMessage',
+        registry.String("Flooding.",
+        """Sets the kick reason for the flood detector's "kickban" step."""))
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

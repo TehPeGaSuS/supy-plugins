@@ -182,6 +182,28 @@ template (see `Banmask types` below).
 Exemptions are shared with the mask blacklist: a hostmask on `exempt`/`net
 exemptadd` is skipped by the word filter too.
 
+## Flood detector
+
+A message-rate flood detector: if a single hostmask sends `floodLines`
+messages within a `floodSeconds` sliding window, it escalates through
+`floodAction` -- the same kind of `warn,kick,ban,kickban` chain as the word
+filter (must strictly escalate, same rules), with its own independent
+`floodCooldown` and offense counter (a message tripping both the word
+filter and the flood detector escalates both ladders independently). Off by
+default per channel (`floodEnabled`).
+
+There is no command surface for this -- it's a single detector per channel,
+configured entirely through the registry values below. Once triggered, the
+message window is cleared (so a burst doesn't keep re-triggering on every
+message past the threshold until it naturally decays); the next burst starts
+counting from zero.
+
+`ban`/`kickban` from the flood ladder reuses the same auto-expiring ban
+machinery as the word filter (`floodBanExpiry`, `floodMaskNumber` -- see
+`Banmask types` above), and shows up in `blacklist list`/`search` with the
+reason `flooding`. Exemptions (`exempt`/`net exemptadd`) are honored here
+too.
+
 ## Restart-safe timers
 
 Every timed ban (`timer`, `add`'s IRC-only lift, manual-ban auto-expiry, `net
@@ -412,6 +434,104 @@ supybot.plugins.Blacklist.wordKickMessage: You've been told to mind your languag
 # Default value: Go get some air and return when you can mind your language.
 ###
 supybot.plugins.Blacklist.wordKickbanMessage: Go get some air and return when you can mind your language.
+```
+
+```
+###
+# Sets whether the message-flood detector is enabled in this channel.
+#
+# Default value: False
+###
+supybot.plugins.Blacklist.floodEnabled: False
+```
+
+```
+###
+# Sets the number of messages a single hostmask may send within
+# floodSeconds before it's considered flooding.
+#
+# Default value: 6
+###
+supybot.plugins.Blacklist.floodLines: 6
+```
+
+```
+###
+# Sets the sliding time window (in seconds) used to detect message
+# flooding.
+#
+# Default value: 10
+###
+supybot.plugins.Blacklist.floodSeconds: 10
+```
+
+```
+###
+# Sets the escalation ladder used when flooding is detected. Must be a
+# comma-separated, strictly-escalating subsequence of
+# warn,kick,ban,kickban (e.g. "kick,kickban").
+#
+# Default value: kick,kickban
+###
+supybot.plugins.Blacklist.floodAction: kick,kickban
+```
+
+```
+###
+# Sets the number of minutes of silence (no new flood trigger) before a
+# user's flood escalation ladder resets back to its first step.
+#
+# Default value: 2
+###
+supybot.plugins.Blacklist.floodCooldown: 2
+```
+
+```
+###
+# Sets the number of minutes before a ban that was auto-applied by the
+# flood detector's "ban"/"kickban" step is lifted.
+#
+# Default value: 60
+###
+supybot.plugins.Blacklist.floodBanExpiry: 60
+```
+
+```
+###
+# Sets the banmask number used to build the ban mask when the flood
+# detector's chain reaches "ban"/"kickban" (see Banmask types above).
+#
+# Default value: 2
+###
+supybot.plugins.Blacklist.floodMaskNumber: 2
+```
+
+```
+###
+# Sets the message used for the flood detector's "warn" step (sent to
+# the channel). $nick is substituted.
+#
+# Default value: $nick, please slow down.
+###
+supybot.plugins.Blacklist.floodWarnMessage: $nick, please slow down.
+```
+
+```
+###
+# Sets the kick reason for the flood detector's "kick" step.
+#
+# Default value: Please slow down.
+###
+supybot.plugins.Blacklist.floodKickMessage: Please slow down.
+```
+
+```
+###
+# Sets the kick reason for the flood detector's "kickban" step.
+#
+# Default value: Flooding.
+###
+supybot.plugins.Blacklist.floodKickbanMessage: Flooding.
 ```
 
 Note: the old "phost" masks (types 3, 4, 8, 9) used to get a stray `p` glued

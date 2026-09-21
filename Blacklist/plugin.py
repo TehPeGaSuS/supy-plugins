@@ -50,13 +50,19 @@ class Blacklist(callbacks.Plugin):
         self.exempt.plugin = self
         self.net.plugin = self
         self.word.plugin = self
-        # Word-filter offense counters: transient, in-memory only (not
+        # Escalation-ladder offense counters, shared by the word filter and
+        # the flood-style detectors: transient, in-memory only (not
         # persisted -- like eggdrop/weechat-blacklist's flood-style
         # counters, they're meant to reset on a bot restart).
-        # Keyed by (network, channel.lower(), hostmask, entry_id, scope)
+        # Keyed by (network, channel.lower(), hostmask, kind, entry_id)
         # -> {'count': int, 'last': float}
-        self._word_offenses = {}
-        self._word_offenses_lock = threading.RLock()
+        self._offenses = {}
+        self._offenses_lock = threading.RLock()
+        # Sliding-window message timestamps for rate-based detectors
+        # (flood, etc). Keyed by (network, channel.lower(), hostmask, kind)
+        # -> [timestamp, ...]. Also transient/in-memory only.
+        self._rate_windows = {}
+        self._rate_windows_lock = threading.RLock()
         self._reschedule_all(irc)
 
     # -----------------------------------------------------------------
@@ -239,6 +245,18 @@ class Blacklist(callbacks.Plugin):
                               f"'kick,kickban' -- not '{','.join(actions)}'.")
         return actions
 
+    def _parseActionChain(self, raw_actions):
+        """Lenient counterpart to _validateWordChain, for reading an
+        already-stored config value (e.g. floodAction) at message-handling
+        time: returns the parsed chain, or None if it's empty/misconfigured,
+        rather than raising -- there's no user to report a ValueError to
+        here."""
+        try:
+            return self._validateWordChain(raw_actions)
+        except ValueError:
+            logger.warning(f"Invalid action chain in config: {raw_actions!r}")
+            return None
+
     def _wordBucketFor(self, channel):
         """channel=None -> the network-wide word bucket."""
         if channel is None:
@@ -321,36 +339,38 @@ class Blacklist(callbacks.Plugin):
             return fnmatch.fnmatchcase(haystack, needle)
         return needle in haystack
 
-    def _bumpWordOffense(self, network, channel, hostmask, scope, entry_id, cooldown_minutes):
-        key = (network, channel.lower(), hostmask.lower(), scope, entry_id)
+    def _bumpOffense(self, network, channel, hostmask, kind, entry_id, cooldown_minutes):
+        key = (network, channel.lower(), hostmask.lower(), kind, entry_id)
         now = time.time()
-        with self._word_offenses_lock:
-            state = self._word_offenses.get(key)
+        with self._offenses_lock:
+            state = self._offenses.get(key)
             if state is None or (now - state['last']) > (cooldown_minutes * 60):
                 count = 1
             else:
                 count = state['count'] + 1
-            self._word_offenses[key] = {'count': count, 'last': now}
+            self._offenses[key] = {'count': count, 'last': now}
         return count
 
-    def _resetWordOffense(self, network, channel, hostmask, scope, entry_id):
-        key = (network, channel.lower(), hostmask.lower(), scope, entry_id)
-        with self._word_offenses_lock:
-            self._word_offenses.pop(key, None)
+    def _resetOffense(self, network, channel, hostmask, kind, entry_id):
+        key = (network, channel.lower(), hostmask.lower(), kind, entry_id)
+        with self._offenses_lock:
+            self._offenses.pop(key, None)
 
-    def _wordBanMask(self, channel, nick, ident, host):
-        num = self.registryValue('wordMaskNumber', channel)
+    def _banMaskFor(self, nick, ident, host, mask_number):
         ident = '*' if ident.startswith('~') else ident
-        template = self.banmasks.get(num, self.banmasks[2])
+        template = self.banmasks.get(mask_number, self.banmasks[2])
         return template.replace("nick", nick).replace("ident", ident).replace("host", host)
 
-    def _doWordAction(self, irc, channel, nick, hostmask, action, reason, pattern):
-        """`reason` is the entry's explicit --reason (already sliced to this
-        escalation step), or None if it didn't set one -- in which case a
-        per-action default is used. "ban" (the bare, non-kicking step) never
-        puts a reason anywhere user-visible (no wire mechanism exists for
-        one on a plain +b), but it still gets an internal-only DB reason
-        (the entry's --reason, or "blacklisted word: <pattern>") so it
+    def _applyAction(self, irc, channel, nick, hostmask, action, warn_text, kick_reason,
+                      kickban_reason, db_reason_fallback, mask_number, expiry_minutes):
+        """Low-level mechanics shared by every escalation-ladder feature
+        (word filter, flood, and future rate-based detectors). Callers
+        resolve their own per-action messages/reasons (including any
+        $nick/$reason-style substitution) before calling this.
+
+        "ban" (the bare, non-kicking step) never puts a reason anywhere
+        user-visible (no wire mechanism exists for one on a plain +b), but
+        it still gets an internal-only DB reason (db_reason_fallback) so it
         shows up in `blacklist list`/`search` like every other ban instead
         of looking unexplained."""
         try:
@@ -359,38 +379,55 @@ class Blacklist(callbacks.Plugin):
             n, ident, host = nick, '*', hostmask
 
         if action == 'warn':
-            tmpl = self.registryValue('wordWarnMessage', channel)
-            text = tmpl.replace('$nick', nick).replace('$reason', reason or '')
-            irc.queueMsg(ircmsgs.privmsg(channel, text))
+            irc.queueMsg(ircmsgs.privmsg(channel, warn_text))
             return
 
         if action == 'kick':
-            reason = reason or self.registryValue('wordKickMessage', channel)
             if nick in irc.state.channels[channel].users:
-                irc.queueMsg(ircmsgs.kick(channel, nick, reason))
+                irc.queueMsg(ircmsgs.kick(channel, nick, kick_reason))
             return
 
         # ban / kickban: reuse the normal ban-entry machinery (DB record +
         # auto-expiry) so it behaves and lists exactly like any other
         # channel ban.
         if action == 'kickban':
-            wire_reason = reason or self.registryValue('wordKickbanMessage', channel)
-            db_reason = wire_reason
+            wire_reason = kickban_reason
+            db_reason = kickban_reason
         else:
-            # bare "ban": no kick, no wire-visible reason (there's no such
-            # thing for a plain +b in any ircd) -- but still worth a
-            # DB-only reason for list/search, so it doesn't look unexplained.
             wire_reason = None
-            db_reason = reason or f"blacklisted word: {pattern}"
-        mask = self._wordBanMask(channel, n, ident, host)
-        minutes = self.registryValue('wordBanExpiry', channel)
-        expire_at = time.time() + (minutes * 60)
+            db_reason = db_reason_fallback
+        mask = self._banMaskFor(n, ident, host, mask_number)
+        expire_at = time.time() + (expiry_minutes * 60)
         entry_id = self._internal_add(channel, mask, irc.nick, db_reason, is_bot_cmd=True,
                                        expire_at=expire_at, expire_mode='full')
         irc.queueMsg(ircmsgs.ban(channel, mask))
         self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
         if action == 'kickban' and nick in irc.state.channels[channel].users:
             irc.queueMsg(ircmsgs.kick(channel, nick, wire_reason))
+
+    def _doWordAction(self, irc, channel, nick, hostmask, action, reason, pattern):
+        """`reason` is the entry's explicit --reason (already sliced to this
+        escalation step), or None if it didn't set one -- in which case a
+        per-action default is used."""
+        warn_text = self.registryValue('wordWarnMessage', channel) \
+            .replace('$nick', nick).replace('$reason', reason or '')
+        kick_reason = reason or self.registryValue('wordKickMessage', channel)
+        kickban_reason = reason or self.registryValue('wordKickbanMessage', channel)
+        db_reason_fallback = reason or f"blacklisted word: {pattern}"
+        mask_number = self.registryValue('wordMaskNumber', channel)
+        expiry_minutes = self.registryValue('wordBanExpiry', channel)
+        self._applyAction(irc, channel, nick, hostmask, action, warn_text, kick_reason,
+                           kickban_reason, db_reason_fallback, mask_number, expiry_minutes)
+
+    def _doFloodAction(self, irc, channel, nick, hostmask, action):
+        warn_text = self.registryValue('floodWarnMessage', channel).replace('$nick', nick)
+        kick_reason = self.registryValue('floodKickMessage', channel)
+        kickban_reason = self.registryValue('floodKickbanMessage', channel)
+        db_reason_fallback = "flooding"
+        mask_number = self.registryValue('floodMaskNumber', channel)
+        expiry_minutes = self.registryValue('floodBanExpiry', channel)
+        self._applyAction(irc, channel, nick, hostmask, action, warn_text, kick_reason,
+                           kickban_reason, db_reason_fallback, mask_number, expiry_minutes)
 
     # -----------------------------------------------------------------
     # Exemption checks
@@ -1291,15 +1328,51 @@ class Blacklist(callbacks.Plugin):
                     irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason']))
                     return
 
+    def _checkFlood(self, irc, msg, channel):
+        """Sliding-window message-rate flood detector. Independent of the
+        word filter's per-pattern offense counters: this has its own
+        trigger threshold/window (floodLines within floodSeconds) plus its
+        own escalation ladder/cooldown (floodAction/floodCooldown)."""
+        if not self.registryValue('floodEnabled', channel):
+            return
+        hostmask = msg.prefix
+        window_seconds = self.registryValue('floodSeconds', channel)
+        threshold = self.registryValue('floodLines', channel)
+        key = (irc.network, channel.lower(), hostmask.lower(), 'flood')
+        now = time.time()
+        with self._rate_windows_lock:
+            times = [t for t in self._rate_windows.get(key, []) if now - t <= window_seconds]
+            times.append(now)
+            if len(times) < threshold:
+                self._rate_windows[key] = times
+                return
+            # Triggered: clear the window so the next burst starts fresh
+            # instead of re-triggering on every message until it decays.
+            self._rate_windows[key] = []
+
+        actions = self._parseActionChain(self.registryValue('floodAction', channel))
+        if not actions:
+            return
+        cooldown = self.registryValue('floodCooldown', channel)
+        count = self._bumpOffense(irc.network, channel, hostmask, 'flood', 0, cooldown)
+        idx = min(count, len(actions)) - 1
+        action = actions[idx]
+        if action in ('ban', 'kickban'):
+            self._resetOffense(irc.network, channel, hostmask, 'flood', 0)
+        self._doFloodAction(irc, channel, msg.nick, hostmask, action)
+
     def doPrivmsg(self, irc, msg):
         if ircutils.strEqual(msg.nick, irc.nick):
             return
         channel = msg.args[0]
         if not ircutils.isChannel(channel):
             return
-        if not self.registryValue('wordFilterEnabled', channel):
-            return
         if self._isExempt(channel, msg.prefix) or self._isExemptNet(msg.prefix):
+            return
+
+        self._checkFlood(irc, msg, channel)
+
+        if not self.registryValue('wordFilterEnabled', channel):
             return
 
         text = msg.args[1] if len(msg.args) > 1 else ''
@@ -1311,8 +1384,8 @@ class Blacklist(callbacks.Plugin):
         for scope, pattern, entry in self._wordEntriesFor(channel):
             if not self._wordMatches(pattern, entry['match_type'], text, case_sensitive):
                 continue
-            count = self._bumpWordOffense(irc.network, channel, msg.prefix, scope,
-                                           entry['id'], entry['cooldown_minutes'])
+            count = self._bumpOffense(irc.network, channel, msg.prefix, 'word|' + scope,
+                                       entry['id'], entry['cooldown_minutes'])
             actions = entry['actions']
             idx = min(count, len(actions)) - 1
             action = actions[idx]
@@ -1324,7 +1397,7 @@ class Blacklist(callbacks.Plugin):
                 # They can't offend again until unbanned; reset now instead
                 # of waiting on the cooldown so they start fresh at step 1
                 # whenever they return.
-                self._resetWordOffense(irc.network, channel, msg.prefix, scope, entry['id'])
+                self._resetOffense(irc.network, channel, msg.prefix, 'word|' + scope, entry['id'])
 
             self._doWordAction(irc, channel, msg.nick, msg.prefix, action, reason, pattern)
 
