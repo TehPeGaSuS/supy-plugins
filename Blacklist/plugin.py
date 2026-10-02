@@ -1060,33 +1060,55 @@ class Blacklist(callbacks.Plugin):
                     logger.info(f"Manual unban: {mask} kept in DB (is bot blacklist entry)")
                 self._unschedule('channel', channel, entry['id'])
 
-    def doJoin(self, irc, msg):
-        if ircutils.strEqual(msg.nick, irc.nick):
-            return
-        channel = msg.args[0]
-        c_lower = channel.lower()
-
+    def _enforceMember(self, irc, channel, nick, prefix):
+        """Bans and kicks `nick` (whose current hostmask is `prefix`) if the
+        network or channel blacklist matches it. Exempts win. Returns True
+        if it was enforced."""
         if self.registryValue('enforceGlobal', channel) \
-                and not self._isExemptNet(msg.prefix):
+                and not self._isExemptNet(prefix):
             with self._db_lock:
                 net_items = list(self.db['net']['entries'].items())
             for mask, e in net_items:
-                if ircutils.hostmaskPatternEqual(mask, msg.prefix):
+                if ircutils.hostmaskPatternEqual(mask, prefix):
                     irc.queueMsg(ircmsgs.ban(channel, mask))
-                    irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason'] or "Network-wide ban."))
-                    return
+                    irc.queueMsg(ircmsgs.kick(channel, nick, e['reason'] or "Network-wide ban."))
+                    return True
 
         if self.registryValue('enabled', channel) \
-                and not self._isExempt(channel, msg.prefix):
+                and not self._isExempt(channel, prefix):
             with self._db_lock:
-                bucket = self.db['channels'].get(c_lower)
+                bucket = self.db['channels'].get(channel.lower())
                 items = list(bucket['entries'].items()) if bucket else []
             for mask, e in items:
-                if ircutils.hostmaskPatternEqual(mask, msg.prefix):
+                if ircutils.hostmaskPatternEqual(mask, prefix):
                     irc.queueMsg(ircmsgs.ban(channel, mask))
-                    irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason']))
+                    irc.queueMsg(ircmsgs.kick(channel, nick, e['reason']))
                     self._rearm_irc_lift(irc, channel, mask, e)
-                    return
+                    return True
+        return False
+
+    def doJoin(self, irc, msg):
+        if ircutils.strEqual(msg.nick, irc.nick):
+            return
+        self._enforceMember(irc, msg.args[0], msg.nick, msg.prefix)
+
+    def doNick(self, irc, msg):
+        """A nick change can make a member match a nick ban (e.g.
+        *cunt*!*@*), so re-check them in every channel they share with the
+        bot, like Eggdrop's gotnick -> check_this_member."""
+        if not msg.args or ircutils.strEqual(msg.nick, irc.nick):
+            return
+        newnick = msg.args[0]
+        if ircutils.strEqual(newnick, irc.nick):
+            return
+        try:
+            _, user, host = ircutils.splitHostmask(msg.prefix)
+        except Exception:
+            return
+        prefix = ircutils.joinHostmask(newnick, user, host)
+        for channel, state in list(irc.state.channels.items()):
+            if newnick in state.users:
+                self._enforceMember(irc, channel, newnick, prefix)
 
     def do368(self, irc, msg):
         """End of the channel ban list, requested by Limnoria on join. If the

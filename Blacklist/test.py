@@ -468,6 +468,33 @@ class BlacklistTestCase(ChannelPluginTestCase):
                 if m.command == 'MODE' and '+b' in m.args[1]]
         self.assertTrue(any('*!*@foo.host' in m.args for m in bans))
 
+    def testNickBanEnforcedOnNickChange(self):
+        # `add *cunt*` -> *cunt*!*@*; a member who changes into a matching
+        # nick after joining must be caught too (Eggdrop re-checks on NICK).
+        self.assertNotError('blacklist add *cunt* offensive')
+        self._drain()
+        self.assertTrue('*cunt*!*@*' in
+                         self._cb().db['channels'][self.channel.lower()]['entries'])
+        self.irc.feedMsg(ircmsgs.nick('cuntface', prefix='foo!foouser@foo.host'))
+        msgs = self._takeAll()
+        self.assertEqual(self._kicked(msgs), ['cuntface'])
+        self.assertTrue(any(m.command == 'MODE' and '*cunt*!*@*' in m.args
+                             for m in msgs))
+
+    def testNickChangeIntoCleanNickIsLeftAlone(self):
+        self.assertNotError('blacklist add *cunt* offensive')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.nick('fooey', prefix='foo!foouser@foo.host'))
+        self.assertEqual(self._takeAll(), [])
+
+    def testNickChangeHonoursExempt(self):
+        self.assertNotError('blacklist add *cunt* offensive')
+        self._drain()
+        self.assertNotError('blacklist exempt add *!*@foo.host')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.nick('cuntface', prefix='foo!foouser@foo.host'))
+        self.assertEqual(self._takeAll(), [])
+
     # -------------------------------------------------------------
     # Extban handling: add/timer/net add/net timer reject them with a
     # clear error; doMode's manual-ban auto-sync silently ignores them.
@@ -491,11 +518,9 @@ class BlacklistTestCase(ChannelPluginTestCase):
     def testUnknownNickCompletesLikeEggdrop(self):
         # Eggdrop's +ban: nick -> nick!*@*, user@host -> *!user@host,
         # nick!user -> nick!user@*  (the nick need not be around).
-        self.assertNotError('blacklist add bob why')
-        self.assertNotError('blacklist add ident@some.host why')
-        self.assertNotError('blacklist add carl!cident why')
-        self.assertNotError('blacklist add bo?* why')
-        self._drain()
+        for arg in ('bob', 'ident@some.host', 'carl!cident', 'bo?*'):
+            self.assertNotError('blacklist add %s why' % arg)
+            self._drain()
         bucket = self._cb().db['channels'][self.channel.lower()]
         self.assertEqual(
             sorted(bucket['entries']),
@@ -503,6 +528,7 @@ class BlacklistTestCase(ChannelPluginTestCase):
 
     def testUnknownNickCompletesForTimerAndNet(self):
         self.assertNotError('blacklist timer dave 5 why')
+        self._drain()
         self.assertNotError('blacklist net add erin why')
         self._drain()
         cb = self._cb()

@@ -119,6 +119,10 @@ against the network blacklist before the channel's own list.
 - **Exempts override bans on join.** A joiner on the channel's exempt list
   (or the network exempt list) is not banned or kicked even if a stored mask
   matches. Network bans honour only the network exempt list.
+- **Nick changes are re-checked.** A member who changes into a nick that
+  matches a stored mask is banned and kicked, the same as on join. That is
+  what makes nick bans like `blacklist add *cunt*` (stored as `*cunt*!*@*`)
+  useful. Exempts are honoured here too.
 - **Lost bans are re-applied when the bot is opped.** When the bot gains ops
   (or finishes joining already opped), any stored ban that is missing from the
   channel's ban list is set again and its matching members are kicked, like
