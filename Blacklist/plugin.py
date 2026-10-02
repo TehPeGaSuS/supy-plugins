@@ -242,6 +242,41 @@ class Blacklist(callbacks.Plugin):
             return True
         return ':' in mask[:at]
 
+    def _botHostmask(self, irc):
+        try:
+            return irc.state.nickToHostmask(irc.nick)
+        except KeyError:
+            return irc.prefix
+
+    def _isSelfBan(self, irc, mask):
+        """True if `mask` would match the bot itself."""
+        return not self._looksLikeExtban(mask) and \
+            ircutils.hostmaskPatternEqual(mask, self._botHostmask(irc))
+
+    def _kickSelfBanner(self, irc, msg, channel):
+        """Kicks whoever tried to ban the bot (msg.prefix), if kickOnSelfBan
+        is on, they're a real user still in `channel`, and we can kick."""
+        if not channel or not self.registryValue('kickOnSelfBan', channel):
+            return
+        if not ircutils.isUserHostmask(msg.prefix) \
+                or ircutils.strEqual(msg.nick, irc.nick):
+            return
+        try:
+            state = irc.state.channels[channel]
+        except KeyError:
+            return
+        if msg.nick in state.users and (state.isOp(irc.nick) or state.isHalfop(irc.nick)):
+            irc.queueMsg(ircmsgs.kick(channel, msg.nick, "Don't try to ban me."))
+
+    def _refuseSelfBan(self, irc, msg, channel=None):
+        """A command asked for a ban that matches the bot: refuse, and kick
+        the requester if kickOnSelfBan. Net commands pass no channel and use
+        the one the command was sent in, if any."""
+        irc.error("I'm not going to ban myself.")
+        if channel is None and msg.args and ircutils.isChannel(msg.args[0]):
+            channel = msg.args[0]
+        self._kickSelfBanner(irc, msg, channel)
+
     # Nick characters (RFC 1459 specials included) plus the * and ? wildcards.
     _NICKISH = re.compile(r'^[A-Za-z\[\]\\`_^{|}*?][A-Za-z0-9\[\]\\`_^{|}*?-]*$')
 
@@ -505,7 +540,8 @@ class Blacklist(callbacks.Plugin):
                 wanted.setdefault(mask.lower(), (
                     mask, e['reason'] or "Network-wide ban.", self._isExemptNet))
         todo = [w for k, w in wanted.items()
-                if k not in present and not self._looksLikeExtban(w[0])]
+                if k not in present and not self._looksLikeExtban(w[0])
+                and not self._isSelfBan(irc, w[0])]
         for n in range(0, len(todo), 4):
             irc.queueMsg(ircmsgs.bans(channel, [w[0] for w in todo[n:n + 4]]))
         for mask, reason, exempt in todo:
@@ -534,6 +570,9 @@ class Blacklist(callbacks.Plugin):
         mask = self._createMask(irc, target, self.registryValue('maskNumber', channel))
         if not mask:
             irc.error("Could not create hostmask.")
+            return
+        if self._isSelfBan(irc, mask):
+            self._refuseSelfBan(irc, msg, channel)
             return
         real_hostmask = self._resolveHostmask(irc, target)
         if self._isExempt(channel, real_hostmask or mask):
@@ -586,6 +625,9 @@ class Blacklist(callbacks.Plugin):
         mask = self._createMask(irc, target, self.registryValue('maskNumber', channel))
         if not mask:
             irc.error("Could not create hostmask.")
+            return
+        if self._isSelfBan(irc, mask):
+            self._refuseSelfBan(irc, msg, channel)
             return
         real_hostmask = self._resolveHostmask(irc, target)
         if self._isExempt(channel, real_hostmask or mask):
@@ -830,6 +872,9 @@ class Blacklist(callbacks.Plugin):
             if not mask:
                 irc.error("Could not create hostmask.")
                 return
+            if p._isSelfBan(irc, mask):
+                p._refuseSelfBan(irc, msg)
+                return
             real_hostmask = p._resolveHostmask(irc, target)
             if p._isExemptNet(real_hostmask or mask):
                 irc.error("That hostmask is exempt from the network blacklist.")
@@ -871,6 +916,9 @@ class Blacklist(callbacks.Plugin):
             mask = p._createNetMask(irc, target)
             if not mask:
                 irc.error("Could not create hostmask.")
+                return
+            if p._isSelfBan(irc, mask):
+                p._refuseSelfBan(irc, msg)
                 return
             real_hostmask = p._resolveHostmask(irc, target)
             if p._isExemptNet(real_hostmask or mask):
@@ -1004,6 +1052,18 @@ class Blacklist(callbacks.Plugin):
                 self._resyncBans(irc, channel)
                 break
 
+        # A +b matching the bot itself (Eggdrop's got_ban): undo it at once
+        # and, if kickOnSelfBan, kick whoever set it. Needs ops to act.
+        for mode, arg in ircutils.separateModes(msg.args[1:]):
+            if mode == '+b' and arg and self._isSelfBan(irc, arg):
+                try:
+                    state = irc.state.channels[channel]
+                except KeyError:
+                    continue
+                if state.isOp(irc.nick) or state.isHalfop(irc.nick):
+                    irc.queueMsg(ircmsgs.unban(channel, arg))
+                    self._kickSelfBanner(irc, msg, channel)
+
         if ircutils.strEqual(msg.nick, irc.nick):
             return
 
@@ -1014,6 +1074,9 @@ class Blacklist(callbacks.Plugin):
             # Extban syntax (ircd-specific, e.g. ~account:foo, $a:foo).
             # We never parse or track these -- leave them entirely alone.
             return
+
+        if mode_change == '+b' and self._isSelfBan(irc, mask):
+            return  # undone above; never recorded
 
         if mode_change == '+b':
             # An op re-setting a lifted entry's ban puts it back on the channel.

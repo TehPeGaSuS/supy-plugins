@@ -121,6 +121,12 @@ against the network blacklist before the channel's own list.
 - **Exempts override bans on join.** A joiner on the channel's exempt list
   (or the network exempt list) is not banned or kicked even if a stored mask
   matches. Network bans honour only the network exempt list.
+- **The bot never bans itself.** `add`, `timer`, `net add` and `net timer`
+  refuse any mask that matches the bot ("I'm not going to ban myself."). A
+  manual `+b` on the channel that matches the bot is removed again at once
+  (Eggdrop's `got_ban`) and never recorded; this needs ops. With
+  `kickOnSelfBan` on, whoever tried it is also kicked, whether they used a
+  command or set the ban by hand (server-set modes are only undone).
 - **Nick changes are re-checked.** A member who changes into a nick that
   matches a stored mask is banned and kicked, the same as on join. That is
   what makes nick bans like `blacklist add *cunt*` (stored as `*cunt*!*@*`)
@@ -166,6 +172,17 @@ enforcement) to do anything in that channel.
 # Default value: True
 ###
 supybot.plugins.Blacklist.addManualBans: True
+```
+
+```
+###
+# Sets whether to kick whoever tries to ban the bot itself. The ban is always
+# refused (commands) or removed again at once (a manual +b); this only
+# controls the kick.
+#
+# Default value: True
+###
+supybot.plugins.Blacklist.kickOnSelfBan: True
 ```
 
 ```

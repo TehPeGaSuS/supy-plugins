@@ -339,11 +339,15 @@ class BlacklistTestCase(ChannelPluginTestCase):
         msgs = self._takeAll(self.assertNotError('blacklist add foo somereason'))
         self.assertEqual(self._kicked(msgs), ['foo'])
 
-    def testAddKickNeverKicksTheBot(self):
-        msgs = self._takeAll(self.assertNotError('blacklist add *!*@* catchall'))
-        kicked = self._kicked(msgs)
+    def testKickMatchingNeverKicksTheBot(self):
+        # `add *!*@*` is now refused outright, but the kick loop keeps its
+        # own guard (stored entries, net enforcement, resync all use it).
+        self.irc.state.channels[self.channel].addUser(self.irc.nick)
+        kicked = self._cb()._kickMatching(self.irc, self.channel, '*!*@*',
+                                          'catchall', lambda hm: False)
         self.assertTrue('foo' in kicked)
         self.assertFalse(self.irc.nick in kicked, 'The bot must never kick itself.')
+        self._drain()
 
     def testNetAddKicksEveryMatchingMemberExceptNetExempt(self):
         self._joinBaz()
@@ -493,6 +497,101 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertNotError('blacklist exempt add *!*@foo.host')
         self._drain()
         self.irc.feedMsg(ircmsgs.nick('cuntface', prefix='foo!foouser@foo.host'))
+        self.assertEqual(self._takeAll(), [])
+
+    # -------------------------------------------------------------
+    # Self-ban protection (Eggdrop's "I'm not going to ban myself" and
+    # got_ban's immediate -b), plus kickOnSelfBan for whoever tried it.
+    # -------------------------------------------------------------
+
+    def _selfMask(self):
+        return self._cb()._botHostmask(self.irc)
+
+    def _joinAnop(self):
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='anop!op@op.host'))
+        self._drain()
+
+    def _botIsOpped(self):
+        # Straight into the state: a +o MODE would trigger the ban resync.
+        self.irc.state.channels[self.channel].ops.add(self.irc.nick)
+
+    def testCommandsRefuseToBanTheBot(self):
+        for cmd in ('add', 'timer', 'net add', 'net timer'):
+            for target in ('*!*@*', self._selfMask()):
+                self.assertRegexp('blacklist %s %s' % (cmd, target),
+                                   r'not going to ban myself')
+                self._drain()
+        cb = self._cb()
+        bucket = cb.db['channels'].get(self.channel.lower())
+        self.assertTrue(not bucket or not bucket['entries'])
+        self.assertEqual(cb.db['net']['entries'], {})
+
+    def testKickSelfBannerKicksTheRequester(self):
+        self._joinAnop()
+        self._botIsOpped()
+        msg = ircmsgs.privmsg(self.channel, 'x', prefix='anop!op@op.host')
+        self._cb()._kickSelfBanner(self.irc, msg, self.channel)
+        self.assertEqual(self._kicked(self._takeAll()), ['anop'])
+
+    def testKickSelfBannerRespectsTheOption(self):
+        self._joinAnop()
+        self._botIsOpped()
+        msg = ircmsgs.privmsg(self.channel, 'x', prefix='anop!op@op.host')
+        conf.supybot.plugins.Blacklist.kickOnSelfBan.setValue(False)
+        try:
+            self._cb()._kickSelfBanner(self.irc, msg, self.channel)
+            self.assertEqual(self._takeAll(), [])
+        finally:
+            conf.supybot.plugins.Blacklist.kickOnSelfBan.setValue(True)
+
+    def testManualBanOnTheBotIsUndoneAndSetterKicked(self):
+        self._joinAnop()
+        self._botIsOpped()
+        mask = self._selfMask()
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', mask),
+                                       prefix='anop!op@op.host'))
+        msgs = self._takeAll()
+        self.assertTrue(any(m.command == 'MODE' and '-b' in m.args[1]
+                             and mask in m.args for m in msgs),
+                         'Expected the ban on the bot to be removed at once.')
+        self.assertEqual(self._kicked(msgs), ['anop'])
+        bucket = self._cb().db['channels'].get(self.channel.lower())
+        self.assertTrue(not bucket or mask not in bucket['entries'],
+                         'A ban on the bot must never be recorded.')
+
+    def testManualBanOnTheBotWithoutKickOption(self):
+        self._joinAnop()
+        self._botIsOpped()
+        conf.supybot.plugins.Blacklist.kickOnSelfBan.setValue(False)
+        try:
+            self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '*!*@*'),
+                                           prefix='anop!op@op.host'))
+            msgs = self._takeAll()
+        finally:
+            conf.supybot.plugins.Blacklist.kickOnSelfBan.setValue(True)
+        self.assertTrue(any(m.command == 'MODE' and '-b' in m.args[1] for m in msgs))
+        self.assertEqual(self._kicked(msgs), [])
+
+    def testServerSetBanOnTheBotIsUndoneWithoutKick(self):
+        self._botIsOpped()
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '*!*@*'),
+                                       prefix='irc.server'))
+        msgs = self._takeAll()
+        self.assertTrue(any(m.command == 'MODE' and '-b' in m.args[1] for m in msgs))
+        self.assertEqual(self._kicked(msgs), [])
+
+    def testBanOnTheBotIgnoredWhenNotOpped(self):
+        self._joinAnop()
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '*!*@*'),
+                                       prefix='anop!op@op.host'))
+        self.assertEqual(self._takeAll(), [],
+                          "Without ops the bot can neither unban nor kick.")
+
+    def testResyncNeverReappliesAMaskMatchingTheBot(self):
+        self._cb()._internal_add(self.channel, '*!*@*', 'someop', 'old entry',
+                                  is_bot_cmd=True)
+        self._channelLostItsBans()
+        self._opBot()
         self.assertEqual(self._takeAll(), [])
 
     # -------------------------------------------------------------

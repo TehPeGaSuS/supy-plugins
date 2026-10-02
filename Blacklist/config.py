@@ -76,6 +76,10 @@ conf.registerChannelValue(Blacklist, 'banReason',
 conf.registerChannelValue(Blacklist, 'addManualBans',
         registry.Boolean(True, """Sets whether to watch for channel bans directly added by users (not using the bot) to the database."""))
 
+conf.registerChannelValue(Blacklist, 'kickOnSelfBan',
+        registry.Boolean(True, """Sets whether to kick whoever tries to ban the bot itself. The ban is always refused
+        (commands) or removed again at once (a manual +b); this only controls the kick."""))
+
 conf.registerChannelValue(Blacklist, 'enforceGlobal',
         registry.Boolean(True, """Sets whether this channel enforces the network-wide (net) blacklist:
         entries added with "net add"/"net timer" will be banned/kicked here, and joins are checked
