@@ -2,7 +2,7 @@ A nifty channel kick and ban plugin.
 
 Written especially for me, by a username named Kaya on IRC. Extended with a
 network-wide blacklist, stable ban IDs, exemption lists, restart-safe timers,
-and a few management commands.
+Eggdrop-style ban enforcement, and a few management commands.
 
 ### Extended bans (extbans)
 
@@ -15,14 +15,15 @@ codes for the same concept, InspIRCd doesn't even use a prefix character at
 all), and several selectors depend on server-side state (GeoIP, oper class,
 live channel membership) this plugin has no way to evaluate locally.
 
-This plugin makes **zero** attempt to parse or interpret extban syntax. Any
-mask that has a `:` anywhere before its first `@`, or that starts with `~` or
-`$`, is treated as "not a plain hostmask" and left completely alone:
-- `add`/`timer`/`net add`/`net timer`: rejected with an explicit error
+This plugin makes **zero** attempt to parse or interpret extban syntax. Anything
+that doesn't look like a plain hostmask is left completely alone:
+- `add`/`timer`/`net add`/`net timer`: a mask that starts with `~` or `$`, or
+  has a `:` anywhere before its first `@`, is rejected with an explicit error
   ("The banmask specified is incorrect. It must be in the format of
-  nick!user@host.") -- set it directly via `/mode` instead.
-- Manually-set `+b`/`-b` (the `addManualBans` auto-sync): silently ignored --
-  no DB entry, no expiry timer, no bot-issued unban, ever.
+  nick!user@host (ASCII only).") -- set it directly via `/mode` instead.
+- Manually-set `+b`/`-b` (the `addManualBans` auto-sync): a mask with no `@`,
+  or a `:` before its first `@`, is silently ignored -- no DB entry, no expiry
+  timer, no bot-issued unban, ever.
 
 A `:` *after* the `@` (e.g. an IPv6 host like `*!*@2001:db8::1`) is fine and
 never flagged -- only a `:` before the `@` triggers this.
@@ -75,8 +76,12 @@ wipes every entry for a channel and lifts every ban it applied — you must
 literally pass the word `confirm` to run it.
 
 Manual bans set directly on IRC (not via the bot) are picked up automatically
-if `addManualBans` is on, and manual unbans are synced back the same way — see
-`addManualBans` below for the exact semantics.
+if `addManualBans` is on: they become entries tagged "manual" and expire after
+`banlistExpiry` minutes. Manual unbans are synced back too: a manual entry is
+dropped when someone removes its `+b`, while an entry added with `add` or
+`timer` is kept (marked lifted) and comes back when a matching mask joins.
+Anyone with ops on IRC can do this; only users with `#channel,op` on the bot
+can use the commands.
 
 ### Per-channel exemptions
 
@@ -103,7 +108,9 @@ Hostmasks on this list can never be added to the channel's blacklist, whether
 via `add`/`timer` or auto-detected manual bans. Checked against the *real*
 hostmask being banned, not the ban mask pattern, so `exempt add nick!*@*`
 protects that user regardless of which `maskNumber` template generated the
-ban.
+ban. The list is the bot's own: it doesn't set `+e` on the channel, so it
+stops the *bot* from banning or kicking these users, not the ircd from
+enforcing a ban someone else set.
 
 ## Network-wide blacklist
 
@@ -165,10 +172,10 @@ against the network blacklist before the channel's own list.
 
 Every timed ban (`timer`, `add`'s IRC-only lift, manual-ban auto-expiry, `net
 timer`) is recorded in the database with its firing time, and re-armed when
-the plugin loads. A bot restart no longer
-leaves a temporary ban stuck forever — anything that should already have
-expired by the time the bot comes back up is lifted immediately on load,
-everything else is rescheduled for its original expiry time.
+the plugin loads. A bot restart no longer leaves a temporary ban stuck
+forever — anything that should already have expired by the time the bot comes
+back up is lifted immediately on load, everything else is rescheduled for its
+original expiry time.
 
 ## Configuration
 
@@ -300,11 +307,12 @@ plugin adds):
 supybot.plugins.Blacklist.banReason: User has been banned from the channel.
 ```
 
-Pastebin configuration (used by `list`/`net list` when the ban list is too
-long to fit inline):
+Pastebin configuration (used by `list`/`net list` and `exempt list`/`net
+exemptlist` when the list is too long to fit inline):
 ```
 ###
-# Maximum number of ban entries to display inline before using pastebin.
+# Maximum number of ban entries (or exempt masks) to display inline before
+# using pastebin.
 #
 # Default value: 5
 ###
