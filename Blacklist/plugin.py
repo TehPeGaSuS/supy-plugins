@@ -242,6 +242,28 @@ class Blacklist(callbacks.Plugin):
             return True
         return ':' in mask[:at]
 
+    # Nick characters (RFC 1459 specials included) plus the * and ? wildcards.
+    _NICKISH = re.compile(r'^[A-Za-z\[\]\\`_^{|}*?][A-Za-z0-9\[\]\\`_^{|}*?-]*$')
+
+    def _completeMask(self, target):
+        """Eggdrop's +ban completion for a token that isn't a full
+        nick!user@host: `nick` -> nick!*@*, `user@host` -> *!user@host,
+        `nick!user` -> nick!user@*. Returns None for extban-looking input (a
+        leading ~ or $, or a ':' before the '@') and for anything that still
+        isn't a plain hostmask after completion."""
+        if not target or target[0] in '~$' or ':' in target.split('@', 1)[0]:
+            return None
+        if '!' not in target:
+            if '@' not in target:
+                mask = target + '!*@*' if self._NICKISH.match(target) else None
+            else:
+                mask = '*!' + target
+        elif '@' not in target:
+            mask = target + '@*'
+        else:
+            mask = target
+        return mask if mask and ircutils.isUserHostmask(mask) else None
+
     def _isKnownNick(self, irc, target):
         """True if `target` currently resolves to a real, known nick.
         NB: ircutils.isNick() is deliberately NOT used here -- Limnoria
@@ -378,13 +400,22 @@ class Blacklist(callbacks.Plugin):
     # -----------------------------------------------------------------
 
     def _createMask(self, irc, target, num):
-        if ircutils.isUserHostmask(target): return target
+        """A full nick!user@host is used as given. A nick the bot can see is
+        resolved to its real hostmask through the banmask template `num`.
+        Anything else is completed the way Eggdrop's +ban does
+        (see _completeMask), or None if it can't be."""
+        if ircutils.isUserHostmask(target):
+            return target
         try:
             hostmask = irc.state.nickToHostmask(target)
+        except KeyError:
+            return self._completeMask(target)
+        try:
             nick, ident, host = ircutils.splitHostmask(hostmask)
             template = self.banmasks.get(num, self.banmasks[2])
             return template.replace("nick", nick).replace("ident", ident).replace("host", host)
-        except: return None
+        except Exception:
+            return None
 
     def _createNetMask(self, irc, target):
         return self._createMask(irc, target, self.registryValue('netMaskNumber'))
@@ -493,7 +524,7 @@ class Blacklist(callbacks.Plugin):
         """[<channel>] <nick|mask> [<reason>]
         Adds a mask to the blacklist (Permanent in DB, temporary +b in IRC).
         """
-        if not self._isKnownNick(irc, target) and self._looksLikeExtban(target):
+        if not self._isKnownNick(irc, target) and self._completeMask(target) is None:
             irc.error("The banmask specified is incorrect. It must be in "
                       "the format of nick!user@host.")
             return
@@ -545,7 +576,7 @@ class Blacklist(callbacks.Plugin):
         """[<channel>] <nick|mask> [<minutes>] [<reason>]
         Applies a temporary ban. If minutes are not provided, uses banTimerExpiry.
         """
-        if not self._isKnownNick(irc, target) and self._looksLikeExtban(target):
+        if not self._isKnownNick(irc, target) and self._completeMask(target) is None:
             irc.error("The banmask specified is incorrect. It must be in "
                       "the format of nick!user@host.")
             return
@@ -788,7 +819,7 @@ class Blacklist(callbacks.Plugin):
             bans/kicks it in every channel currently enforcing it.
             """
             p = self.plugin
-            if not p._isKnownNick(irc, target) and p._looksLikeExtban(target):
+            if not p._isKnownNick(irc, target) and p._completeMask(target) is None:
                 irc.error("The banmask specified is incorrect. It must be in "
                           "the format of nick!user@host.")
                 return
@@ -830,7 +861,7 @@ class Blacklist(callbacks.Plugin):
             uses netTimerExpiry.
             """
             p = self.plugin
-            if not p._isKnownNick(irc, target) and p._looksLikeExtban(target):
+            if not p._isKnownNick(irc, target) and p._completeMask(target) is None:
                 irc.error("The banmask specified is incorrect. It must be in "
                           "the format of nick!user@host.")
                 return

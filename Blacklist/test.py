@@ -483,6 +483,42 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertRegexp('blacklist net timer ~account:baduser',
                            r'nick!user@host')
 
+    def testExtbanLookalikesStillRejected(self):
+        for bad in ('~account:baduser', '$a:baduser', 'account:baduser',
+                    '~baduser', 'z:fingerprint'):
+            self.assertRegexp('blacklist add %s' % bad, r'nick!user@host')
+
+    def testUnknownNickCompletesLikeEggdrop(self):
+        # Eggdrop's +ban: nick -> nick!*@*, user@host -> *!user@host,
+        # nick!user -> nick!user@*  (the nick need not be around).
+        self.assertNotError('blacklist add bob why')
+        self.assertNotError('blacklist add ident@some.host why')
+        self.assertNotError('blacklist add carl!cident why')
+        self.assertNotError('blacklist add bo?* why')
+        self._drain()
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertEqual(
+            sorted(bucket['entries']),
+            sorted(['bob!*@*', '*!ident@some.host', 'carl!cident@*', 'bo?*!*@*']))
+
+    def testUnknownNickCompletesForTimerAndNet(self):
+        self.assertNotError('blacklist timer dave 5 why')
+        self.assertNotError('blacklist net add erin why')
+        self._drain()
+        cb = self._cb()
+        self.assertTrue('dave!*@*' in
+                         cb.db['channels'][self.channel.lower()]['entries'])
+        self.assertTrue('erin!*@*' in cb.db['net']['entries'])
+
+    def testKnownNickStillResolvesToItsHostmask(self):
+        # foo is on the channel: the maskNumber template (default 2) is used,
+        # not the lame nick ban.
+        self.assertNotError('blacklist add foo why')
+        self._drain()
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertTrue('*!*@foo.host' in bucket['entries'])
+        self.assertFalse('foo!*@*' in bucket['entries'])
+
     def testExtbanBareNickStillWorks(self):
         # A bare nick (no '@' at all) is legitimate input for add/timer --
         # it's a nick to resolve, not an attempted mask -- so it must NOT

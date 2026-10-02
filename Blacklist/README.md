@@ -16,8 +16,8 @@ all), and several selectors depend on server-side state (GeoIP, oper class,
 live channel membership) this plugin has no way to evaluate locally.
 
 This plugin makes **zero** attempt to parse or interpret extban syntax. Any
-mask that either has no `@`, or has a `:` anywhere before its first `@`, is
-treated as "not a plain hostmask" and left completely alone:
+mask that has a `:` anywhere before its first `@`, or that starts with `~` or
+`$`, is treated as "not a plain hostmask" and left completely alone:
 - `add`/`timer`/`net add`/`net timer`: rejected with an explicit error
   ("The banmask specified is incorrect. It must be in the format of
   nick!user@host.") -- set it directly via `/mode` instead.
@@ -26,6 +26,16 @@ treated as "not a plain hostmask" and left completely alone:
 
 A `:` *after* the `@` (e.g. an IPv6 host like `*!*@2001:db8::1`) is fine and
 never flagged -- only a `:` before the `@` triggers this.
+
+### Mask arguments
+
+`add`/`timer`/`net add`/`net timer` take `<nick|mask>`:
+- A nick the bot can see is resolved to its real hostmask using the banmask
+  template (`maskNumber`/`netMaskNumber`, default 2 = `*!*@host`).
+- Anything else is completed the way Eggdrop's `+ban` does: `bob` becomes
+  `bob!*@*`, `user@host` becomes `*!user@host`, and `bob!user` becomes
+  `bob!user@*`. Each part may contain `*`/`?` wildcards (`bo?*` is fine).
+- A full `nick!user@host` is used as given.
 
 ## Channel blacklist
 
