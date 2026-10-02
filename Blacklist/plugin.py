@@ -17,17 +17,9 @@ except ImportError:
 
 logger = logging.getLogger('supybot.plugins.Blacklist')
 
-# Word-filter escalation ladder. A word entry's -action chain must list a
-# strictly increasing subsequence of this tuple (by index) -- e.g.
-# "kick,kickban" is valid, "kickban,kick" is rejected, since a later
-# offense can never be milder than an earlier one.
-WORD_ACTIONS = ('warn', 'kick', 'ban', 'kickban')
-
-
 class Blacklist(callbacks.Plugin):
     """Manages channel security with a numbered blacklist and ID-based deletion,
-    an optional network-wide blacklist enforced across every channel, and an
-    optional word/text filter with an escalating warn/kick/ban/kickban ladder."""
+    plus an optional network-wide blacklist enforced across every channel."""
 
     banmasks = {
         0: '*!ident@host', 1: '*!*ident@host', 2: '*!*@host',
@@ -44,25 +36,11 @@ class Blacklist(callbacks.Plugin):
         self._db_lock = threading.RLock()
         self.db = {}
         self._initdb()
-        # Nested command groups (self.exempt / self.net / self.word) are
+        # Nested command groups (self.exempt / self.net) are
         # instantiated by BasePlugin.__init__ above but have no reference to
         # this instance's DB, so we hand them one explicitly.
         self.exempt.plugin = self
         self.net.plugin = self
-        self.word.plugin = self
-        # Escalation-ladder offense counters, shared by the word filter and
-        # the flood-style detectors: transient, in-memory only (not
-        # persisted -- like eggdrop/weechat-blacklist's flood-style
-        # counters, they're meant to reset on a bot restart).
-        # Keyed by (network, channel.lower(), hostmask, kind, entry_id)
-        # -> {'count': int, 'last': float}
-        self._offenses = {}
-        self._offenses_lock = threading.RLock()
-        # Sliding-window message timestamps for rate-based detectors
-        # (flood, etc). Keyed by (network, channel.lower(), hostmask, kind)
-        # -> [timestamp, ...]. Also transient/in-memory only.
-        self._rate_windows = {}
-        self._rate_windows_lock = threading.RLock()
         self._reschedule_all(irc)
 
     # -----------------------------------------------------------------
@@ -84,17 +62,12 @@ class Blacklist(callbacks.Plugin):
             self.db['net'].setdefault('entries', {})
             self.db['net'].setdefault('exempt', [])
             self.db['net'].setdefault('next_id', 1)
-            self.db['net'].setdefault('words', {})
-            self.db['net'].setdefault('word_next_id', 1)
             for bucket in self.db['channels'].values():
                 bucket.setdefault('exempt', [])
-                bucket.setdefault('words', {})
-                bucket.setdefault('word_next_id', 1)
             self._dbWrite()
         except Exception as e:
             logger.error(f"Error loading DB: {e}")
-            self.db = {'channels': {}, 'net': {'next_id': 1, 'entries': {}, 'exempt': [],
-                                                'words': {}, 'word_next_id': 1}}
+            self.db = {'channels': {}, 'net': {'next_id': 1, 'entries': {}, 'exempt': []}}
 
     def _migrate_legacy(self):
         """Converts the old {channel: {mask: [adder, created_at, reason,
@@ -147,8 +120,7 @@ class Blacklist(callbacks.Plugin):
         c_lower = channel.lower()
         with self._db_lock:
             bucket = self.db['channels'].setdefault(
-                c_lower, {'next_id': 1, 'entries': {}, 'exempt': [],
-                          'words': {}, 'word_next_id': 1})
+                c_lower, {'next_id': 1, 'entries': {}, 'exempt': []})
         return bucket
 
     def _resolve(self, bucket, token):
@@ -181,8 +153,7 @@ class Blacklist(callbacks.Plugin):
         c_lower = channel.lower()
         with self._db_lock:
             bucket = self.db['channels'].setdefault(
-                c_lower, {'next_id': 1, 'entries': {}, 'exempt': [],
-                          'words': {}, 'word_next_id': 1})
+                c_lower, {'next_id': 1, 'entries': {}, 'exempt': []})
             existing = bucket['entries'].get(mask)
             entry_id = existing['id'] if existing else bucket['next_id']
             if not existing:
@@ -219,215 +190,6 @@ class Blacklist(callbacks.Plugin):
             }
             self._dbWrite()
         return entry_id
-
-    # -----------------------------------------------------------------
-    # Word filter: entry storage
-    # -----------------------------------------------------------------
-
-    def _validateWordChain(self, raw_actions):
-        """Parses a comma-separated -action chain and enforces that it
-        strictly escalates through WORD_ACTIONS (warn < kick < ban <
-        kickban) -- e.g. "kick,kickban" is fine, "kickban,kick" is not,
-        since a later offense can never be milder than an earlier one.
-        Returns the parsed list, or raises ValueError with a user-facing
-        message."""
-        actions = [a.strip().lower() for a in raw_actions.split(',') if a.strip()]
-        if not actions:
-            raise ValueError("You must specify at least one action.")
-        bad = [a for a in actions if a not in WORD_ACTIONS]
-        if bad:
-            raise ValueError(f"Unknown action(s): {', '.join(bad)}. "
-                              f"Must be from: {', '.join(WORD_ACTIONS)}.")
-        ranks = [WORD_ACTIONS.index(a) for a in actions]
-        if ranks != sorted(ranks) or len(set(ranks)) != len(ranks):
-            raise ValueError(f"The action chain must strictly escalate "
-                              f"({', '.join(WORD_ACTIONS)}), e.g. "
-                              f"'kick,kickban' -- not '{','.join(actions)}'.")
-        return actions
-
-    def _parseActionChain(self, raw_actions):
-        """Lenient counterpart to _validateWordChain, for reading an
-        already-stored config value (e.g. floodAction) at message-handling
-        time: returns the parsed chain, or None if it's empty/misconfigured,
-        rather than raising -- there's no user to report a ValueError to
-        here."""
-        try:
-            return self._validateWordChain(raw_actions)
-        except ValueError:
-            logger.warning(f"Invalid action chain in config: {raw_actions!r}")
-            return None
-
-    def _wordBucketFor(self, channel):
-        """channel=None -> the network-wide word bucket."""
-        if channel is None:
-            return self.db['net']
-        return self._get_channel_bucket(channel)
-
-    def _wordEntriesFor(self, channel):
-        """All word entries that apply in `channel`: the channel's own plus
-        the network-wide ones, as a flat list of (scope, mask, entry)."""
-        out = []
-        with self._db_lock:
-            bucket = self._get_channel_bucket(channel)
-            if bucket:
-                out += [('channel', p, e) for p, e in bucket.get('words', {}).items()]
-            out += [('net', p, e) for p, e in self.db['net'].get('words', {}).items()]
-        return out
-
-    def _word_add(self, channel, pattern, match_type, actions, cooldown_minutes,
-                   ban_minutes, reason, adder):
-        """channel=None adds to the network-wide word list."""
-        with self._db_lock:
-            bucket = self._ensure_channel_bucket(channel) if channel else self.db['net']
-            bucket.setdefault('words', {})
-            bucket.setdefault('word_next_id', 1)
-            existing = bucket['words'].get(pattern)
-            entry_id = existing['id'] if existing else bucket['word_next_id']
-            if not existing:
-                bucket['word_next_id'] += 1
-            bucket['words'][pattern] = {
-                'id': entry_id, 'adder': adder, 'created_at': time.time(),
-                'match_type': match_type, 'actions': actions,
-                'cooldown_minutes': cooldown_minutes, 'ban_minutes': ban_minutes,
-                'reason': reason,
-            }
-            self._dbWrite()
-        return entry_id
-
-    def _word_resolve(self, bucket, token):
-        if not bucket:
-            return None
-        words = bucket.get('words', {})
-        if token.isdigit():
-            idx = int(token)
-            for p, e in words.items():
-                if e['id'] == idx:
-                    return p
-            return None
-        return token if token in words else None
-
-    def _word_delete(self, channel, pattern):
-        bucket = self._wordBucketFor(channel)
-        with self._db_lock:
-            if bucket and pattern in bucket.get('words', {}):
-                del bucket['words'][pattern]
-                self._dbWrite()
-                return True
-        return False
-
-    # -----------------------------------------------------------------
-    # Word filter: matching & escalation
-    # -----------------------------------------------------------------
-
-    def _wordMatches(self, pattern, match_type, text, case_sensitive):
-        haystack = text if case_sensitive else text.lower()
-        needle = pattern if case_sensitive else pattern.lower()
-        if match_type == 'regex':
-            try:
-                return re.search(needle, haystack) is not None
-            except re.error:
-                return False
-        # NB: don't use builtin any() here -- supybot.commands defines its
-        # own `any` (a wrap-spec converter) that shadows it via our
-        # `from supybot.commands import *` (see _matchesAny's note above).
-        has_wildcard = False
-        for c in '*?':
-            if c in needle:
-                has_wildcard = True
-                break
-        if has_wildcard:
-            return fnmatch.fnmatchcase(haystack, needle)
-        return needle in haystack
-
-    def _bumpOffense(self, network, channel, hostmask, kind, entry_id, cooldown_minutes):
-        key = (network, channel.lower(), hostmask.lower(), kind, entry_id)
-        now = time.time()
-        with self._offenses_lock:
-            state = self._offenses.get(key)
-            if state is None or (now - state['last']) > (cooldown_minutes * 60):
-                count = 1
-            else:
-                count = state['count'] + 1
-            self._offenses[key] = {'count': count, 'last': now}
-        return count
-
-    def _resetOffense(self, network, channel, hostmask, kind, entry_id):
-        key = (network, channel.lower(), hostmask.lower(), kind, entry_id)
-        with self._offenses_lock:
-            self._offenses.pop(key, None)
-
-    def _banMaskFor(self, nick, ident, host, mask_number):
-        ident = '*' if ident.startswith('~') else ident
-        template = self.banmasks.get(mask_number, self.banmasks[2])
-        return template.replace("nick", nick).replace("ident", ident).replace("host", host)
-
-    def _applyAction(self, irc, channel, nick, hostmask, action, warn_text, kick_reason,
-                      kickban_reason, db_reason_fallback, mask_number, expiry_minutes):
-        """Low-level mechanics shared by every escalation-ladder feature
-        (word filter, flood, and future rate-based detectors). Callers
-        resolve their own per-action messages/reasons (including any
-        $nick/$reason-style substitution) before calling this.
-
-        "ban" (the bare, non-kicking step) never puts a reason anywhere
-        user-visible (no wire mechanism exists for one on a plain +b), but
-        it still gets an internal-only DB reason (db_reason_fallback) so it
-        shows up in `blacklist list`/`search` like every other ban instead
-        of looking unexplained."""
-        try:
-            n, ident, host = ircutils.splitHostmask(hostmask)
-        except Exception:
-            n, ident, host = nick, '*', hostmask
-
-        if action == 'warn':
-            irc.queueMsg(ircmsgs.privmsg(channel, warn_text))
-            return
-
-        if action == 'kick':
-            if nick in irc.state.channels[channel].users:
-                irc.queueMsg(ircmsgs.kick(channel, nick, kick_reason))
-            return
-
-        # ban / kickban: reuse the normal ban-entry machinery (DB record +
-        # auto-expiry) so it behaves and lists exactly like any other
-        # channel ban.
-        if action == 'kickban':
-            wire_reason = kickban_reason
-            db_reason = kickban_reason
-        else:
-            wire_reason = None
-            db_reason = db_reason_fallback
-        mask = self._banMaskFor(n, ident, host, mask_number)
-        expire_at = time.time() + (expiry_minutes * 60)
-        entry_id = self._internal_add(channel, mask, irc.nick, db_reason, is_bot_cmd=True,
-                                       expire_at=expire_at, expire_mode='full')
-        irc.queueMsg(ircmsgs.ban(channel, mask))
-        self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
-        if action == 'kickban' and nick in irc.state.channels[channel].users:
-            irc.queueMsg(ircmsgs.kick(channel, nick, wire_reason))
-
-    def _doWordAction(self, irc, channel, nick, hostmask, action, reason, pattern):
-        """`reason` is the entry's explicit --reason (already sliced to this
-        escalation step), or None if it didn't set one -- in which case a
-        per-action default is used."""
-        warn_text = self.registryValue('wordWarnMessage', channel) \
-            .replace('$nick', nick).replace('$reason', reason or '')
-        kick_reason = reason or self.registryValue('wordKickMessage', channel)
-        kickban_reason = reason or self.registryValue('wordKickbanMessage', channel)
-        db_reason_fallback = reason or f"blacklisted word: {pattern}"
-        mask_number = self.registryValue('wordMaskNumber', channel)
-        expiry_minutes = self.registryValue('wordBanExpiry', channel)
-        self._applyAction(irc, channel, nick, hostmask, action, warn_text, kick_reason,
-                           kickban_reason, db_reason_fallback, mask_number, expiry_minutes)
-
-    def _doFloodAction(self, irc, channel, nick, hostmask, action):
-        warn_text = self.registryValue('floodWarnMessage', channel).replace('$nick', nick)
-        kick_reason = self.registryValue('floodKickMessage', channel)
-        kickban_reason = self.registryValue('floodKickbanMessage', channel)
-        db_reason_fallback = "flooding"
-        mask_number = self.registryValue('floodMaskNumber', channel)
-        expiry_minutes = self.registryValue('floodBanExpiry', channel)
-        self._applyAction(irc, channel, nick, hostmask, action, warn_text, kick_reason,
-                           kickban_reason, db_reason_fallback, mask_number, expiry_minutes)
 
     # -----------------------------------------------------------------
     # Exemption checks
@@ -1139,148 +901,6 @@ class Blacklist(callbacks.Plugin):
             irc.reply(", ".join(masks) if masks else "No exempt masks on the network blacklist.")
         exemptlist = wrap(exemptlist, ['admin'])
 
-        # ---------------------------------------------------------
-        # Network-wide word filter
-        # ---------------------------------------------------------
-
-        def wordadd(self, irc, msg, args, optlist, pattern):
-            """[--type simple|regex] --action <chain> [--cooldown <minutes>] [--expiry <minutes>] [--reason <text>] <pattern>
-            Adds <pattern> to the network-wide word filter, enforced in
-            every channel with wordFilterEnabled on. --action is a
-            comma-separated escalation chain that must strictly increase
-            through warn < kick < ban < kickban, e.g. "kick,kickban".
-            --type simple (default) is a glob/substring match (accepts the
-            risk of false positives on substrings); "regex" uses re.search.
-            """
-            p = self.plugin
-            opts = dict(optlist)
-            match_type = opts.get('type', 'simple')
-            if match_type not in ('simple', 'regex'):
-                irc.error("--type must be 'simple' or 'regex'.")
-                return
-            try:
-                actions = p._validateWordChain(opts.get('action', ''))
-            except ValueError as e:
-                irc.error(str(e))
-                return
-            cooldown = opts.get('cooldown') or p.registryValue('wordCooldown', None)
-            ban_minutes = opts.get('expiry') or p.registryValue('wordBanExpiry', None)
-            reason = opts.get('reason')
-            entry_id = p._word_add(None, pattern, match_type, actions, cooldown,
-                                    ban_minutes, reason, msg.nick)
-            irc.reply(f"Network word entry #{entry_id} added: '{pattern}' -> {'>'.join(actions)}.")
-        wordadd = wrap(wordadd, ['admin', getopts({'type': 'something', 'action': 'something',
-                                                    'cooldown': 'positiveInt', 'expiry': 'positiveInt',
-                                                    'reason': 'something'}), 'text'])
-
-        def worddelete(self, irc, msg, args, target):
-            """<pattern|ID>"""
-            p = self.plugin
-            bucket = p.db['net']
-            pattern = p._word_resolve(bucket, target)
-            if not pattern:
-                irc.error(f"Not found in the network word list: {target}")
-                return
-            p._word_delete(None, pattern)
-            irc.replySuccess()
-        worddelete = wrap(worddelete, ['admin', 'somethingWithoutSpaces'])
-
-        def wordlist(self, irc, msg, args):
-            """takes no arguments"""
-            p = self.plugin
-            items = list(p.db['net'].get('words', {}).items())
-            if not items:
-                irc.reply("Network word list is empty.")
-                return
-            out = [f"[{e['id']}] '{m}' ({e['match_type']}) -> {'>'.join(e['actions'])}" for m, e in items]
-            irc.reply(" | ".join(out))
-        wordlist = wrap(wordlist, ['admin'])
-
-        def wordsearch(self, irc, msg, args, pattern):
-            """<pattern>"""
-            p = self.plugin
-            needle = pattern.lower()
-            out = [f"[{e['id']}] '{m}'" for m, e in p.db['net'].get('words', {}).items()
-                   if needle in m.lower()]
-            irc.reply(" | ".join(out) if out else "No matching entries found.")
-        wordsearch = wrap(wordsearch, ['admin', 'text'])
-
-    # -----------------------------------------------------------------
-    # Per-channel word filter
-    # -----------------------------------------------------------------
-
-    class word(callbacks.Commands):
-        """Manages the channel's word/text filter with an escalating
-        warn/kick/ban/kickban ladder per offending hostmask."""
-
-        plugin = None
-
-        def add(self, irc, msg, args, channel, optlist, pattern):
-            """[<channel>] [--type simple|regex] --action <chain> [--cooldown <minutes>] [--expiry <minutes>] [--reason <text>] <pattern>
-            Adds <pattern> to this channel's word filter. --action is a
-            comma-separated escalation chain that must strictly increase
-            through warn < kick < ban < kickban, e.g. "kick,kickban" (valid)
-            vs "kickban,kick" (rejected). --type simple (default) is a
-            glob/substring match -- this accepts the risk of false positives
-            on substrings (e.g. "assassin" containing "ass"); use --type
-            regex with word boundaries (e.g. "\\bfuck\\b") to avoid that.
-            """
-            p = self.plugin
-            opts = dict(optlist)
-            match_type = opts.get('type', 'simple')
-            if match_type not in ('simple', 'regex'):
-                irc.error("--type must be 'simple' or 'regex'.")
-                return
-            try:
-                actions = p._validateWordChain(opts.get('action', ''))
-            except ValueError as e:
-                irc.error(str(e))
-                return
-            cooldown = opts.get('cooldown') or p.registryValue('wordCooldown', channel)
-            ban_minutes = opts.get('expiry') or p.registryValue('wordBanExpiry', channel)
-            reason = opts.get('reason')
-            entry_id = p._word_add(channel, pattern, match_type, actions, cooldown,
-                                    ban_minutes, reason, msg.nick)
-            irc.reply(f"Word entry #{entry_id} added: '{pattern}' -> {'>'.join(actions)}.")
-        add = wrap(add, [('checkChannelCapability', 'op'), 'channel',
-                          getopts({'type': 'something', 'action': 'something',
-                                   'cooldown': 'positiveInt', 'expiry': 'positiveInt',
-                                   'reason': 'something'}), 'text'])
-
-        def delete(self, irc, msg, args, channel, target):
-            """[<channel>] <pattern|ID>"""
-            p = self.plugin
-            bucket = p._get_channel_bucket(channel)
-            pattern = p._word_resolve(bucket, target)
-            if not pattern:
-                irc.error(f"Word entry not found for: {target}")
-                return
-            p._word_delete(channel, pattern)
-            irc.replySuccess()
-        delete = wrap(delete, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
-
-        def list(self, irc, msg, args, channel):
-            """[<channel>]"""
-            p = self.plugin
-            bucket = p._get_channel_bucket(channel)
-            items = list(bucket.get('words', {}).items()) if bucket else []
-            if not items:
-                irc.reply("Word list is empty.")
-                return
-            out = [f"[{e['id']}] '{m}' ({e['match_type']}) -> {'>'.join(e['actions'])}" for m, e in items]
-            irc.reply(" | ".join(out))
-        list = wrap(list, [('checkChannelCapability', 'op'), 'channel'])
-
-        def search(self, irc, msg, args, channel, pattern):
-            """[<channel>] <pattern>"""
-            p = self.plugin
-            bucket = p._get_channel_bucket(channel)
-            needle = pattern.lower()
-            items = bucket.get('words', {}).items() if bucket else []
-            out = [f"[{e['id']}] '{m}'" for m, e in items if needle in m.lower()]
-            irc.reply(" | ".join(out) if out else "No matching entries found.")
-        search = wrap(search, [('checkChannelCapability', 'op'), 'channel', 'text'])
-
     # -----------------------------------------------------------------
     # IRC event handlers
     # -----------------------------------------------------------------
@@ -1360,79 +980,6 @@ class Blacklist(callbacks.Plugin):
                     irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason']))
                     self._rearm_irc_lift(irc, channel, mask, e)
                     return
-
-    def _checkFlood(self, irc, msg, channel):
-        """Sliding-window message-rate flood detector. Independent of the
-        word filter's per-pattern offense counters: this has its own
-        trigger threshold/window (floodLines within floodSeconds) plus its
-        own escalation ladder/cooldown (floodAction/floodCooldown)."""
-        if not self.registryValue('floodEnabled', channel):
-            return
-        hostmask = msg.prefix
-        window_seconds = self.registryValue('floodSeconds', channel)
-        threshold = self.registryValue('floodLines', channel)
-        key = (irc.network, channel.lower(), hostmask.lower(), 'flood')
-        now = time.time()
-        with self._rate_windows_lock:
-            times = [t for t in self._rate_windows.get(key, []) if now - t <= window_seconds]
-            times.append(now)
-            if len(times) < threshold:
-                self._rate_windows[key] = times
-                return
-            # Triggered: clear the window so the next burst starts fresh
-            # instead of re-triggering on every message until it decays.
-            self._rate_windows[key] = []
-
-        actions = self._parseActionChain(self.registryValue('floodAction', channel))
-        if not actions:
-            return
-        cooldown = self.registryValue('floodCooldown', channel)
-        count = self._bumpOffense(irc.network, channel, hostmask, 'flood', 0, cooldown)
-        idx = min(count, len(actions)) - 1
-        action = actions[idx]
-        if action in ('ban', 'kickban'):
-            self._resetOffense(irc.network, channel, hostmask, 'flood', 0)
-        self._doFloodAction(irc, channel, msg.nick, hostmask, action)
-
-    def doPrivmsg(self, irc, msg):
-        if ircutils.strEqual(msg.nick, irc.nick):
-            return
-        channel = msg.args[0]
-        if not ircutils.isChannel(channel):
-            return
-        if self._isExempt(channel, msg.prefix) or self._isExemptNet(msg.prefix):
-            return
-
-        self._checkFlood(irc, msg, channel)
-
-        if not self.registryValue('wordFilterEnabled', channel):
-            return
-
-        text = msg.args[1] if len(msg.args) > 1 else ''
-        case_sensitive = self.registryValue('wordCaseSensitive', channel)
-
-        # Every matching entry (channel + net) fires independently, same as
-        # the weechat-blacklist reference this is modeled on -- a message
-        # tripping two different word entries escalates both ladders.
-        for scope, pattern, entry in self._wordEntriesFor(channel):
-            if not self._wordMatches(pattern, entry['match_type'], text, case_sensitive):
-                continue
-            count = self._bumpOffense(irc.network, channel, msg.prefix, 'word|' + scope,
-                                       entry['id'], entry['cooldown_minutes'])
-            actions = entry['actions']
-            idx = min(count, len(actions)) - 1
-            action = actions[idx]
-
-            reason_chain = entry['reason'].split('|') if entry['reason'] else []
-            reason = reason_chain[min(idx, len(reason_chain) - 1)] if reason_chain else None
-
-            if action in ('ban', 'kickban'):
-                # They can't offend again until unbanned; reset now instead
-                # of waiting on the cooldown so they start fresh at step 1
-                # whenever they return.
-                self._resetOffense(irc.network, channel, msg.prefix, 'word|' + scope, entry['id'])
-
-            self._doWordAction(irc, channel, msg.nick, msg.prefix, action, reason, pattern)
 
 
 Class = Blacklist
