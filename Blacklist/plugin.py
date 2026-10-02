@@ -162,6 +162,7 @@ class Blacklist(callbacks.Plugin):
                 'id': entry_id, 'adder': adder, 'created_at': time.time(),
                 'reason': reason, 'is_bot_cmd': is_bot_cmd,
                 'expire_at': expire_at, 'expire_mode': expire_mode,
+                'lifted': False,
             }
             self._dbWrite()
         return entry_id
@@ -334,6 +335,7 @@ class Blacklist(callbacks.Plugin):
                     entry = bucket['entries'][mask]
                     entry['expire_at'] = None
                     entry['expire_mode'] = None
+                    entry['lifted'] = True
                     self._dbWrite()
 
         if not mask or irc is None:
@@ -345,23 +347,27 @@ class Blacklist(callbacks.Plugin):
                 irc.queueMsg(ircmsgs.unban(chan, mask))
 
     def _rearm_irc_lift(self, irc, channel, mask, entry):
-        """A bot-added entry's +b was just re-applied on join: arm a fresh
-        banlistExpiry lift, the same way `add` does, so the ban doesn't
-        outlive banlistExpiry. Timed ('full') entries keep their own timer,
-        and manual-ban entries are never lifted by this path."""
-        if not entry.get('is_bot_cmd') or entry.get('expire_mode') == 'full':
-            return
+        """An entry's +b was just re-applied on join, so it is no longer
+        'lifted'. For bot-added entries also arm a fresh banlistExpiry lift,
+        the same way `add` does, so the ban doesn't outlive banlistExpiry.
+        Timed ('full') entries keep their own timer, and manual-ban entries
+        are never lifted by this path."""
         expiry = self.registryValue('banlistExpiry', channel)
-        expire_at = time.time() + (expiry * 60) if expiry > 0 else None
+        rearm = entry.get('is_bot_cmd') and entry.get('expire_mode') != 'full'
+        expire_at = time.time() + (expiry * 60) if rearm and expiry > 0 else None
         mode = 'irc_only' if expire_at else None
         with self._db_lock:
             live = (self.db['channels'].get(channel.lower()) or {}) \
                 .get('entries', {}).get(mask)
             if live is None:
                 return
-            live['expire_at'] = expire_at
-            live['expire_mode'] = mode
+            live['lifted'] = False
+            if rearm:
+                live['expire_at'] = expire_at
+                live['expire_mode'] = mode
             self._dbWrite()
+        if not rearm:
+            return
         self._unschedule('channel', channel, entry['id'])
         if expire_at:
             self._schedule_expiry(irc.network, 'channel', channel, entry['id'],
@@ -404,24 +410,72 @@ class Blacklist(callbacks.Plugin):
             logger.error(f"Pastebin upload failed: {e}")
             return "Error: Pastebin service unavailable."
 
-    def _enforceNet(self, irc, mask, reason, nick_hint=None):
+    def _kickMatching(self, irc, channel, mask, reason, exempt):
+        """Kicks every member of `channel` whose hostmask matches `mask` (the
+        enforce-bans behavior), except the bot itself and anything the
+        `exempt(hostmask)` callable protects. Returns the nicks kicked."""
+        try:
+            members = list(irc.state.channels[channel].users)
+        except KeyError:
+            return []
+        kicked = []
+        for nick in members:
+            if ircutils.strEqual(nick, irc.nick):
+                continue
+            try:
+                hm = irc.state.nickToHostmask(nick)
+            except KeyError:
+                continue
+            if exempt(hm) or not ircutils.hostmaskPatternEqual(mask, hm):
+                continue
+            irc.queueMsg(ircmsgs.kick(channel, nick, reason))
+            kicked.append(nick)
+        return kicked
+
+    def _enforceNet(self, irc, mask, reason):
         """Applies a network-blacklist mask across every channel that has
-        enforceGlobal on, banning it and kicking any matching nick found."""
+        enforceGlobal on, banning it and kicking every matching member."""
         for chan in list(irc.state.channels.keys()):
             if not self.registryValue('enforceGlobal', chan):
                 continue
             irc.queueMsg(ircmsgs.ban(chan, mask))
-            chan_state = irc.state.channels[chan]
-            if nick_hint and nick_hint in chan_state.users:
-                irc.queueMsg(ircmsgs.kick(chan, nick_hint, reason))
-                continue
-            for nick in list(chan_state.users):
-                try:
-                    hm = irc.state.nickToHostmask(nick)
-                except KeyError:
-                    continue
-                if ircutils.hostmaskPatternEqual(mask, hm):
-                    irc.queueMsg(ircmsgs.kick(chan, nick, reason))
+            self._kickMatching(irc, chan, mask, reason, self._isExemptNet)
+
+    def _resyncBans(self, irc, channel):
+        """Re-applies stored bans that are missing from the channel's ban
+        list and kicks the members they match (Eggdrop's recheck_bans). Runs
+        when the bot gains ops, or finishes joining already opped. Entries
+        that were lifted on purpose (banlistExpiry, or an op's manual -b)
+        are left alone: they come back on the next matching join."""
+        try:
+            state = irc.state.channels[channel]
+        except KeyError:
+            return
+        if not (state.isOp(irc.nick) or state.isHalfop(irc.nick)):
+            return
+        present = {b.lower() for b in state.bans}
+        wanted = {}  # mask.lower() -> (mask, kick reason, exempt check)
+        if self.registryValue('enabled', channel):
+            with self._db_lock:
+                bucket = self.db['channels'].get(channel.lower())
+                items = list(bucket['entries'].items()) if bucket else []
+            for mask, e in items:
+                if not e.get('lifted'):
+                    wanted[mask.lower()] = (
+                        mask, e['reason'],
+                        lambda hm: self._isExempt(channel, hm))
+        if self.registryValue('enforceGlobal', channel):
+            with self._db_lock:
+                net_items = list(self.db['net']['entries'].items())
+            for mask, e in net_items:
+                wanted.setdefault(mask.lower(), (
+                    mask, e['reason'] or "Network-wide ban.", self._isExemptNet))
+        todo = [w for k, w in wanted.items()
+                if k not in present and not self._looksLikeExtban(w[0])]
+        for n in range(0, len(todo), 4):
+            irc.queueMsg(ircmsgs.bans(channel, [w[0] for w in todo[n:n + 4]]))
+        for mask, reason, exempt in todo:
+            self._kickMatching(irc, channel, mask, reason, exempt)
 
     # -----------------------------------------------------------------
     # Commands
@@ -461,8 +515,8 @@ class Blacklist(callbacks.Plugin):
                                        expire_at=expire_at, expire_mode=mode)
         irc.queueMsg(ircmsgs.ban(channel, mask))
 
-        if not ircutils.isUserHostmask(target) and target in irc.state.channels[channel].users:
-            irc.queueMsg(ircmsgs.kick(channel, target, reason))
+        self._kickMatching(irc, channel, mask, reason,
+                           lambda hm: self._isExempt(channel, hm))
 
         if expire_at:
             self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, mode)
@@ -518,8 +572,8 @@ class Blacklist(callbacks.Plugin):
                                        expire_at=expire_at, expire_mode='full')
         irc.queueMsg(ircmsgs.ban(channel, mask))
 
-        if not ircutils.isUserHostmask(target) and target in irc.state.channels[channel].users:
-            irc.queueMsg(ircmsgs.kick(channel, target, kick_reason))
+        self._kickMatching(irc, channel, mask, kick_reason,
+                           lambda hm: self._isExempt(channel, hm))
 
         self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
         irc.replySuccess()
@@ -748,8 +802,7 @@ class Blacklist(callbacks.Plugin):
                 return
             reason = reason or "Network-wide ban."
             p._net_add(mask, msg.nick, reason)
-            nick_hint = target if not ircutils.isUserHostmask(target) else None
-            p._enforceNet(irc, mask, reason, nick_hint)
+            p._enforceNet(irc, mask, reason)
             irc.replySuccess()
         add = wrap(add, ['admin', 'somethingWithoutSpaces', optional('text')])
 
@@ -799,8 +852,7 @@ class Blacklist(callbacks.Plugin):
             reason = reason or "Temporary network-wide ban."
             expire_at = time.time() + (minutes * 60)
             entry_id = p._net_add(mask, msg.nick, reason, expire_at=expire_at, expire_mode='full')
-            nick_hint = target if not ircutils.isUserHostmask(target) else None
-            p._enforceNet(irc, mask, reason, nick_hint)
+            p._enforceNet(irc, mask, reason)
             p._schedule_expiry(irc.network, 'net', None, entry_id, expire_at, 'full')
             irc.replySuccess()
         timer = wrap(timer, ['admin', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
@@ -908,7 +960,17 @@ class Blacklist(callbacks.Plugin):
     def doMode(self, irc, msg):
         """Syncs the DB with manual bans/unbans made directly on IRC."""
         channel = msg.args[0]
-        if len(msg.args) < 3 or ircutils.strEqual(msg.nick, irc.nick):
+        if len(msg.args) < 3 or not ircutils.isChannel(channel):
+            return
+
+        # The bot itself being opped (by anyone): re-apply the bans the
+        # channel is missing, like Eggdrop's recheck_bans.
+        for mode, arg in ircutils.separateModes(msg.args[1:]):
+            if mode in ('+o', '+h') and arg and ircutils.strEqual(arg, irc.nick):
+                self._resyncBans(irc, channel)
+                break
+
+        if ircutils.strEqual(msg.nick, irc.nick):
             return
 
         mode_change, mask = msg.args[1], msg.args[2]
@@ -920,6 +982,13 @@ class Blacklist(callbacks.Plugin):
             return
 
         if mode_change == '+b':
+            # An op re-setting a lifted entry's ban puts it back on the channel.
+            with self._db_lock:
+                bucket = self.db['channels'].get(c_lower)
+                back = bucket['entries'].get(mask) if bucket else None
+                if back is not None and back.get('lifted'):
+                    back['lifted'] = False
+                    self._dbWrite()
             if not self.registryValue('addManualBans', channel):
                 return
             if self._isExempt(channel, mask):
@@ -952,6 +1021,11 @@ class Blacklist(callbacks.Plugin):
                     self._internal_del(channel, mask)
                     logger.info(f"Manual unban: {mask} removed from DB (was manual ban)")
                 else:
+                    # Mark it lifted so a later resync doesn't undo this
+                    # deliberate unban; it returns on the next matching join.
+                    with self._db_lock:
+                        entry['lifted'] = True
+                        self._dbWrite()
                     logger.info(f"Manual unban: {mask} kept in DB (is bot blacklist entry)")
                 self._unschedule('channel', channel, entry['id'])
 
@@ -961,7 +1035,8 @@ class Blacklist(callbacks.Plugin):
         channel = msg.args[0]
         c_lower = channel.lower()
 
-        if self.registryValue('enforceGlobal', channel):
+        if self.registryValue('enforceGlobal', channel) \
+                and not self._isExemptNet(msg.prefix):
             with self._db_lock:
                 net_items = list(self.db['net']['entries'].items())
             for mask, e in net_items:
@@ -970,7 +1045,8 @@ class Blacklist(callbacks.Plugin):
                     irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason'] or "Network-wide ban."))
                     return
 
-        if self.registryValue('enabled', channel):
+        if self.registryValue('enabled', channel) \
+                and not self._isExempt(channel, msg.prefix):
             with self._db_lock:
                 bucket = self.db['channels'].get(c_lower)
                 items = list(bucket['entries'].items()) if bucket else []
@@ -980,6 +1056,12 @@ class Blacklist(callbacks.Plugin):
                     irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason']))
                     self._rearm_irc_lift(irc, channel, mask, e)
                     return
+
+    def do368(self, irc, msg):
+        """End of the channel ban list, requested by Limnoria on join. If the
+        bot already has ops by now, sync the stored bans to the channel."""
+        if len(msg.args) >= 2 and ircutils.isChannel(msg.args[1]):
+            self._resyncBans(irc, msg.args[1])
 
 
 Class = Blacklist

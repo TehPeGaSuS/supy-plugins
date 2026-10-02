@@ -100,6 +100,26 @@ blacklist net exemptlist
 enforcing channel; `net timer` is the temporary version. Joins are checked
 against the network blacklist before the channel's own list.
 
+## Enforcement (Eggdrop-style)
+
+- **A ban kicks everyone it matches.** `add`, `timer`, `net add` and `net
+  timer` kick every member whose hostmask matches the mask (Eggdrop's
+  `enforce-bans`), not just the nick you named. The bot itself and exempt
+  hostmasks are never kicked.
+- **Exempts override bans on join.** A joiner on the channel's exempt list
+  (or the network exempt list) is not banned or kicked even if a stored mask
+  matches. Network bans honour only the network exempt list.
+- **Lost bans are re-applied when the bot is opped.** When the bot gains ops
+  (or finishes joining already opped), any stored ban that is missing from the
+  channel's ban list is set again and its matching members are kicked, like
+  Eggdrop's `recheck_bans`. This covers a channel that emptied and was
+  recreated, or a ban added while the bot wasn't opped. The network blacklist
+  is synced the same way in channels with `enforceGlobal` on.
+- **Lifted bans stay lifted until the next join.** An entry whose `+b` was
+  lifted by `banlistExpiry`, or removed by an op with `-b`, is marked lifted
+  and is *not* re-applied by that resync; it comes back when a matching mask
+  joins, as before.
+
 ## Restart-safe timers
 
 Every timed ban (`timer`, `add`'s IRC-only lift, manual-ban auto-expiry, `net

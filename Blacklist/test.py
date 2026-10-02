@@ -301,6 +301,174 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertEqual(entry['expire_mode'], 'full')
 
     # -------------------------------------------------------------
+    # Eggdrop-style enforcement: a ban kicks *every* member it matches
+    # (enforce-bans), exempts override bans on join, and the bot re-applies
+    # bans the channel lost once it is opped (recheck_bans).
+    # -------------------------------------------------------------
+
+    def _takeAll(self, first=None):
+        out = [first] if first is not None else []
+        while True:
+            m = self.irc.takeMsg()
+            if m is None:
+                return out
+            out.append(m)
+
+    def _kicked(self, msgs):
+        return sorted(m.args[1] for m in msgs if m.command == 'KICK')
+
+    def _joinBaz(self):
+        # baz shares foo's host, so a *!*@foo.host mask matches both.
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='baz!bazuser@foo.host'))
+        self._drain()
+
+    def testAddKicksEveryMemberMatchingTheMask(self):
+        self._joinBaz()
+        msgs = self._takeAll(self.assertNotError('blacklist add foo somereason'))
+        self.assertEqual(self._kicked(msgs), ['baz', 'foo'])
+
+    def testTimerKicksEveryMemberMatchingTheMask(self):
+        self._joinBaz()
+        msgs = self._takeAll(self.assertNotError('blacklist timer foo 30 spamming'))
+        self.assertEqual(self._kicked(msgs), ['baz', 'foo'])
+
+    def testAddKickSkipsExemptMember(self):
+        self._joinBaz()
+        self.assertNotError('blacklist exempt add baz!*@*')
+        self._drain()
+        msgs = self._takeAll(self.assertNotError('blacklist add foo somereason'))
+        self.assertEqual(self._kicked(msgs), ['foo'])
+
+    def testAddKickNeverKicksTheBot(self):
+        msgs = self._takeAll(self.assertNotError('blacklist add *!*@* catchall'))
+        kicked = self._kicked(msgs)
+        self.assertTrue('foo' in kicked)
+        self.assertFalse(self.irc.nick in kicked, 'The bot must never kick itself.')
+
+    def testNetAddKicksEveryMatchingMemberExceptNetExempt(self):
+        self._joinBaz()
+        msgs = self._takeAll(self.assertNotError('blacklist net add foo netreason'))
+        self.assertEqual(self._kicked(msgs), ['baz', 'foo'])
+        self.assertNotError('blacklist net delete 1')
+        self._drain()
+        self.assertNotError('blacklist net exemptadd baz!*@*')
+        self._drain()
+        # The harness applies our own KICKs to its state, so bring them back.
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
+        self._joinBaz()
+        msgs = self._takeAll(self.assertNotError('blacklist net add foo netreason'))
+        self.assertEqual(self._kicked(msgs), ['foo'])
+
+    def testDoJoinHonoursChannelExempt(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        self.assertNotError('blacklist exempt add baz!*@*')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='baz!bazuser@foo.host'))
+        self.assertEqual(self._takeAll(), [],
+                          'An exempt hostmask must not be banned/kicked on join.')
+        # A non-exempt joiner on the same mask is still enforced.
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='qux!quxuser@foo.host'))
+        self.assertEqual(self._kicked(self._takeAll()), ['qux'])
+
+    def testDoJoinHonoursNetExempt(self):
+        self.assertNotError('blacklist net add foo netreason')
+        self._drain()
+        self.assertNotError('blacklist net exemptadd baz!*@*')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='baz!bazuser@foo.host'))
+        self.assertEqual(self._takeAll(), [],
+                          'A net-exempt hostmask must not be banned/kicked on join.')
+
+    def _channelLostItsBans(self):
+        # Limnoria's state records the bans the bot itself sends; wipe it to
+        # simulate a channel that was emptied and recreated (no +b left).
+        self.irc.state.channels[self.channel].bans.clear()
+
+    def _opBot(self):
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+o', self.irc.nick),
+                                       prefix='anop!op@op.host'))
+
+    def testBotOpResyncsMissingBansAndKicksMatches(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        # foo got kicked by `add`; put him back in the state without a JOIN
+        # (which would itself trigger doJoin) and drop the channel's bans.
+        self.irc.state.channels[self.channel].addUser('foo')
+        self._channelLostItsBans()
+        self._opBot()
+        msgs = self._takeAll()
+        bans = [m for m in msgs if m.command == 'MODE' and '+b' in m.args[1]]
+        self.assertTrue(any('*!*@foo.host' in m.args for m in bans),
+                         'Expected the missing ban to be re-applied on op.')
+        self.assertEqual(self._kicked(msgs), ['foo'])
+
+    def testBotOpDoesNotReapplyBansAlreadyOnTheChannel(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '*!*@foo.host'),
+                                       prefix=self.irc.prefix))
+        self._opBot()
+        self.assertEqual(self._takeAll(), [])
+
+    def testBotOpResyncSkipsLiftedEntries(self):
+        self._firedLift()          # banlistExpiry lifted the +b on purpose
+        self._opBot()
+        self.assertEqual(self._takeAll(), [],
+                          'A ban lifted by banlistExpiry must wait for the next join.')
+
+    def testBotOpResyncSkipsManuallyUnbannedEntries(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '*!*@foo.host'),
+                                       prefix=self.irc.prefix))
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('-b', '*!*@foo.host'),
+                                       prefix='anop!op@op.host'))
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertTrue(bucket['entries']['*!*@foo.host'].get('lifted'),
+                         'A manual -b of a bot entry must mark it lifted.')
+        self._opBot()
+        self.assertEqual(self._takeAll(), [],
+                          "An op's deliberate -b must not be undone by a resync.")
+
+    def testResyncOnlyWhenTheBotItselfGainsOps(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+o', 'foo'),
+                                       prefix='anop!op@op.host'))
+        self.assertEqual(self._takeAll(), [])
+
+    def testEndOfBanListResyncsWhenAlreadyOpped(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        self._channelLostItsBans()
+        self.irc.state.channels[self.channel].ops.add(self.irc.nick)
+        self.irc.feedMsg(ircmsgs.IrcMsg(prefix='irc.server', command='368',
+                                         args=(self.irc.nick, self.channel,
+                                               'End of channel ban list')))
+        bans = [m for m in self._takeAll()
+                if m.command == 'MODE' and '+b' in m.args[1]]
+        self.assertTrue(any('*!*@foo.host' in m.args for m in bans),
+                         'Join-time sync (end of ban list) should re-apply it.')
+
+    def testEndOfBanListDoesNothingWhenNotOpped(self):
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.IrcMsg(prefix='irc.server', command='368',
+                                         args=(self.irc.nick, self.channel,
+                                               'End of channel ban list')))
+        self.assertEqual(self._takeAll(), [])
+
+    def testBotOpResyncsNetBlacklistToo(self):
+        self.assertNotError('blacklist net add foo netreason')
+        self._drain()
+        self._channelLostItsBans()
+        self._opBot()
+        bans = [m for m in self._takeAll()
+                if m.command == 'MODE' and '+b' in m.args[1]]
+        self.assertTrue(any('*!*@foo.host' in m.args for m in bans))
+
+    # -------------------------------------------------------------
     # Extban handling: add/timer/net add/net timer reject them with a
     # clear error; doMode's manual-ban auto-sync silently ignores them.
     # -------------------------------------------------------------
