@@ -140,8 +140,12 @@ against the network blacklist before the channel's own list.
   refuse any mask that matches the bot ("I'm not going to ban myself."). A
   manual `+b` on the channel that matches the bot is removed again at once
   (Eggdrop's `got_ban`) and never recorded; this needs ops. With
-  `kickOnSelfBan` on, whoever tried it is also kicked, whether they used a
-  command or set the ban by hand (server-set modes are only undone).
+  `kickOnSelfBan` on, the person is also dealt with: an IRC op with no account
+  on the bot is kicked with `kickOnSelfBanReason`, while a user who has
+  `#channel,op` (or `admin`) on the bot is not kicked and just gets that
+  message in the channel (or in the command's reply). Server-set modes are
+  only undone. "Has the capability" means an explicit capability for a
+  hostmask the bot recognises, not Limnoria's default-allow rule.
 - **Nick changes are re-checked.** A member who changes into a nick that
   matches a stored mask is banned and kicked, the same as on join. That is
   what makes nick bans like `blacklist add *cunt*` (stored as `*cunt*!*@*`)
@@ -191,13 +195,26 @@ supybot.plugins.Blacklist.addManualBans: True
 
 ```
 ###
-# Sets whether to kick whoever tries to ban the bot itself. The ban is always
-# refused (commands) or removed again at once (a manual +b); this only
-# controls the kick.
+# Sets whether to react to someone trying to ban the bot itself. The ban is
+# always refused (commands) or removed again at once (a manual +b); this only
+# controls the reaction: an IRC op with no account with the bot is kicked,
+# while a user with #channel,op (or admin) on the bot just gets the reason
+# said in the channel.
 #
 # Default value: True
 ###
 supybot.plugins.Blacklist.kickOnSelfBan: True
+```
+
+```
+###
+# Sets the kick reason used when someone tries to ban the bot (see
+# kickOnSelfBan). Users with #channel,op or admin on the bot are not kicked;
+# the bot says this in the channel instead, prefixed with their nick.
+#
+# Default value: Nice try. The ban hammer doesn't swing at the one holding it.
+###
+supybot.plugins.Blacklist.kickOnSelfBanReason: Nice try. The ban hammer doesn't swing at the one holding it.
 ```
 
 ```

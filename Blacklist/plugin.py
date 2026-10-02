@@ -7,7 +7,7 @@ import fnmatch
 import logging
 import urllib.request
 from supybot.commands import *
-from supybot import callbacks, conf, ircmsgs, ircutils, schedule, world
+from supybot import callbacks, conf, ircdb, ircmsgs, ircutils, schedule, world
 
 try:
     from supybot.i18n import PluginInternationalization
@@ -346,29 +346,55 @@ class Blacklist(callbacks.Plugin):
         return not self._looksLikeExtban(mask) and \
             ircutils.hostmaskPatternEqual(mask, self._botHostmask(irc))
 
-    def _kickSelfBanner(self, irc, msg, channel):
-        """Kicks whoever tried to ban the bot (msg.prefix), if kickOnSelfBan
-        is on, they're a real user still in `channel`, and we can kick."""
+    def _isBotTrusted(self, prefix, channel=None):
+        """True if `prefix` maps to a bot user that explicitly has `admin`
+        or the channel's op capability. ignoreDefaultAllow, as AutoMode
+        does, so a stranger can't pass on Limnoria's default-allow rule."""
+        caps = ['admin']
+        if channel:
+            caps.insert(0, ircdb.makeChannelCapability(channel, 'op'))
+        # NB: a loop, not any() -- supybot.commands' `any` shadows the builtin.
+        for cap in caps:
+            if ircdb.checkCapability(prefix, cap, ignoreDefaultAllow=True):
+                return True
+        return False
+
+    def _reactToSelfBan(self, irc, msg, channel):
+        """Somebody (msg.prefix) just tried to ban the bot, and the ban has
+        been refused or undone. If kickOnSelfBan is on: someone who is only
+        an IRC op gets kicked with kickOnSelfBanReason; someone registered
+        with the bot as a channel op or admin just gets the reason said in
+        the channel, tagged with their nick."""
         if not channel or not self.registryValue('kickOnSelfBan', channel):
             return
         if not ircutils.isUserHostmask(msg.prefix) \
                 or ircutils.strEqual(msg.nick, irc.nick):
+            return
+        reason = self.registryValue('kickOnSelfBanReason', channel)
+        if self._isBotTrusted(msg.prefix, channel):
+            irc.queueMsg(ircmsgs.privmsg(channel, f"{msg.nick}: {reason}"))
             return
         try:
             state = irc.state.channels[channel]
         except KeyError:
             return
         if msg.nick in state.users and (state.isOp(irc.nick) or state.isHalfop(irc.nick)):
-            irc.queueMsg(ircmsgs.kick(channel, msg.nick, "Don't try to ban me."))
+            irc.queueMsg(ircmsgs.kick(channel, msg.nick, reason))
 
     def _refuseSelfBan(self, irc, msg, channel=None):
-        """A command asked for a ban that matches the bot: refuse, and kick
-        the requester if kickOnSelfBan. Net commands pass no channel and use
-        the one the command was sent in, if any."""
-        irc.error("I'm not going to ban myself.")
+        """A command asked for a ban that matches the bot. Net commands pass
+        no channel and use the one the command was sent in, if any. A
+        trusted requester gets the reason in the reply itself; anyone else
+        is handled like a manual self-ban (kicked, if the option is on)."""
         if channel is None and msg.args and ircutils.isChannel(msg.args[0]):
             channel = msg.args[0]
-        self._kickSelfBanner(irc, msg, channel)
+        if channel and self.registryValue('kickOnSelfBan', channel) \
+                and self._isBotTrusted(msg.prefix, channel):
+            reason = self.registryValue('kickOnSelfBanReason', channel)
+            irc.error(f"I'm not going to ban myself. {reason}")
+            return
+        irc.error("I'm not going to ban myself.")
+        self._reactToSelfBan(irc, msg, channel)
 
     # Nick characters (RFC 1459 specials included) plus the * and ? wildcards.
     _NICKISH = re.compile(r'^[A-Za-z\[\]\\`_^{|}*?][A-Za-z0-9\[\]\\`_^{|}*?-]*$')
@@ -1156,7 +1182,7 @@ class Blacklist(callbacks.Plugin):
                     continue
                 if state.isOp(irc.nick) or state.isHalfop(irc.nick):
                     irc.queueMsg(ircmsgs.unban(channel, arg))
-                    self._kickSelfBanner(irc, msg, channel)
+                    self._reactToSelfBan(irc, msg, channel)
 
         if ircutils.strEqual(msg.nick, irc.nick):
             return

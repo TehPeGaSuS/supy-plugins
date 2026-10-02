@@ -77,8 +77,15 @@ conf.registerChannelValue(Blacklist, 'addManualBans',
         registry.Boolean(True, """Sets whether to watch for channel bans directly added by users (not using the bot) to the database."""))
 
 conf.registerChannelValue(Blacklist, 'kickOnSelfBan',
-        registry.Boolean(True, """Sets whether to kick whoever tries to ban the bot itself. The ban is always refused
-        (commands) or removed again at once (a manual +b); this only controls the kick."""))
+        registry.Boolean(True, """Sets whether to react to someone trying to ban the bot itself. The ban is always refused
+        (commands) or removed again at once (a manual +b); this only controls the reaction: an IRC op with no
+        account with the bot is kicked with kickOnSelfBanReason, while a user with #channel,op (or admin) on the bot
+        just gets that message in the channel."""))
+
+conf.registerChannelValue(Blacklist, 'kickOnSelfBanReason',
+        registry.String("Nice try. The ban hammer doesn't swing at the one holding it.",
+        """Sets the kick reason used when someone tries to ban the bot (see kickOnSelfBan). Users with #channel,op
+        or admin on the bot are not kicked; the bot says this in the channel instead."""))
 
 conf.registerChannelValue(Blacklist, 'enforceGlobal',
         registry.Boolean(True, """Sets whether this channel enforces the network-wide (net) blacklist:
