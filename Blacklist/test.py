@@ -233,6 +233,83 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertEqual(m.command, 'MODE')
 
     # -------------------------------------------------------------
+    # banlistExpiry ("dynamic ban") lifecycle: `add` keeps the entry forever
+    # but lifts the IRC +b after banlistExpiry minutes; a later matching join
+    # must re-apply the +b *and* arm a fresh lift, or the ban would outlive
+    # banlistExpiry for good.
+    # -------------------------------------------------------------
+
+    def _firedLift(self, mask='*!*@foo.host'):
+        """Adds foo via `blacklist add`, then simulates the scheduler having
+        fired the IRC-only lift (the real scheduler drops the event once it
+        runs). Returns (entry_id, bucket)."""
+        self.assertNotError('blacklist add foo somereason')
+        self._drain()
+        cb = self._cb()
+        bucket = cb.db['channels'][self.channel.lower()]
+        entry_id = bucket['entries'][mask]['id']
+        cb._unschedule('channel', self.channel, entry_id)
+        cb._fire_expiry(self.irc.network, 'channel', self.channel,
+                         entry_id, 'irc_only')
+        self._drain()
+        return entry_id, bucket
+
+    def testIrcOnlyLiftClearsStaleExpiry(self):
+        mask = '*!*@foo.host'
+        entry_id, bucket = self._firedLift(mask)
+        entry = bucket['entries'][mask]
+        self.assertTrue(mask in bucket['entries'],
+                         'An irc_only lift must keep the DB entry.')
+        self.assertEqual((entry['expire_at'], entry['expire_mode']), (None, None),
+                          'Nothing is pending after the lift fired; a stale '
+                          'expire_at would be re-fired on every reload.')
+        self.assertNotRegexp('blacklist list', r'expiring')
+        # A reload must not send another UNBAN for an already-lifted ban.
+        self._cb()._reschedule_all(self.irc)
+        self.assertTrue(self.irc.takeMsg() is None,
+                         'Reload re-lifted a ban that was already lifted.')
+
+    def testDoJoinReappliesBanAndRearmsLift(self):
+        mask = '*!*@foo.host'
+        entry_id, bucket = self._firedLift(mask)
+        cb = self._cb()
+        name = cb._event_name('channel', self.channel, entry_id)
+        try:
+            self.irc.feedMsg(ircmsgs.join(self.channel,
+                                           prefix='foo!foouser@foo.host'))
+            m = self.irc.takeMsg()
+            self.assertFalse(m is None, 'Expected the +b to be re-applied on join.')
+            self.assertEqual(m.command, 'MODE')
+            m2 = self.irc.takeMsg()
+            self.assertFalse(m2 is None, 'Expected a kick on join.')
+            self.assertEqual(m2.command, 'KICK')
+            entry = bucket['entries'][mask]
+            self.assertEqual(entry['expire_mode'], 'irc_only')
+            self.assertTrue(entry['expire_at'] and entry['expire_at'] > time.time(),
+                             'Re-applied ban must get a fresh expire_at.')
+            self.assertTrue(name in schedule.schedule.events,
+                             'Re-applied ban must have its lift re-scheduled.')
+        finally:
+            try:
+                schedule.removeEvent(name)
+            except KeyError:
+                pass
+
+    def testDoJoinDoesNotTouchTimedEntry(self):
+        # `timer` entries ('full') are governed by their own timer; a join
+        # that re-applies the ban must leave their expiry alone.
+        self.assertNotError('blacklist timer foo 60 spamming')
+        self._drain()
+        cb = self._cb()
+        bucket = cb.db['channels'][self.channel.lower()]
+        entry = bucket['entries']['*!*@foo.host']
+        before = (entry['expire_at'], entry['expire_mode'])
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
+        self._drain()
+        self.assertEqual((entry['expire_at'], entry['expire_mode']), before)
+        self.assertEqual(entry['expire_mode'], 'full')
+
+    # -------------------------------------------------------------
     # Extban handling: add/timer/net add/net timer reject them with a
     # clear error; doMode's manual-ban auto-sync silently ignores them.
     # -------------------------------------------------------------

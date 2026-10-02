@@ -564,6 +564,15 @@ class Blacklist(callbacks.Plugin):
                 if mask and mode == 'full':
                     del bucket['entries'][mask]
                     self._dbWrite()
+                elif mask and mode == 'irc_only':
+                    # The +b is lifted but the entry stays; nothing is pending
+                    # any more. Clearing this keeps a reload from re-sending
+                    # the UNBAN (and lifting a ban re-applied meanwhile), and
+                    # stops `list` showing a stale "[expiring...]".
+                    entry = bucket['entries'][mask]
+                    entry['expire_at'] = None
+                    entry['expire_mode'] = None
+                    self._dbWrite()
 
         if not mask or irc is None:
             return
@@ -572,6 +581,29 @@ class Blacklist(callbacks.Plugin):
         else:
             for chan in list(irc.state.channels.keys()):
                 irc.queueMsg(ircmsgs.unban(chan, mask))
+
+    def _rearm_irc_lift(self, irc, channel, mask, entry):
+        """A bot-added entry's +b was just re-applied on join: arm a fresh
+        banlistExpiry lift, the same way `add` does, so the ban doesn't
+        outlive banlistExpiry. Timed ('full') entries keep their own timer,
+        and manual-ban entries are never lifted by this path."""
+        if not entry.get('is_bot_cmd') or entry.get('expire_mode') == 'full':
+            return
+        expiry = self.registryValue('banlistExpiry', channel)
+        expire_at = time.time() + (expiry * 60) if expiry > 0 else None
+        mode = 'irc_only' if expire_at else None
+        with self._db_lock:
+            live = (self.db['channels'].get(channel.lower()) or {}) \
+                .get('entries', {}).get(mask)
+            if live is None:
+                return
+            live['expire_at'] = expire_at
+            live['expire_mode'] = mode
+            self._dbWrite()
+        self._unschedule('channel', channel, entry['id'])
+        if expire_at:
+            self._schedule_expiry(irc.network, 'channel', channel, entry['id'],
+                                  expire_at, mode)
 
     # -----------------------------------------------------------------
     # Mask creation & pastebin
@@ -1326,6 +1358,7 @@ class Blacklist(callbacks.Plugin):
                 if ircutils.hostmaskPatternEqual(mask, msg.prefix):
                     irc.queueMsg(ircmsgs.ban(channel, mask))
                     irc.queueMsg(ircmsgs.kick(channel, msg.nick, e['reason']))
+                    self._rearm_irc_lift(irc, channel, mask, e)
                     return
 
     def _checkFlood(self, irc, msg, channel):
