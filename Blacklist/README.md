@@ -36,6 +36,8 @@ never flagged -- only a `:` before the `@` triggers this.
   `bob!*@*`, `user@host` becomes `*!user@host`, and `bob!user` becomes
   `bob!user@*`. Each part may contain `*`/`?` wildcards (`bo?*` is fine).
 - A full `nick!user@host` is used as given.
+- Masks must be plain ASCII. Networks case-map nicks in US-ASCII only, so a
+  ban containing non-ASCII characters can't match reliably and is rejected.
 
 ## Channel blacklist
 

@@ -250,8 +250,10 @@ class Blacklist(callbacks.Plugin):
         nick!user@host: `nick` -> nick!*@*, `user@host` -> *!user@host,
         `nick!user` -> nick!user@*. Returns None for extban-looking input (a
         leading ~ or $, or a ':' before the '@') and for anything that still
-        isn't a plain hostmask after completion."""
-        if not target or target[0] in '~$' or ':' in target.split('@', 1)[0]:
+        isn't a plain hostmask after completion. ASCII only: networks
+        case-map nicks in US-ASCII, so a non-ASCII ban can't match reliably."""
+        if not target or not target.isascii() \
+                or target[0] in '~$' or ':' in target.split('@', 1)[0]:
             return None
         if '!' not in target:
             if '@' not in target:
@@ -405,7 +407,7 @@ class Blacklist(callbacks.Plugin):
         Anything else is completed the way Eggdrop's +ban does
         (see _completeMask), or None if it can't be."""
         if ircutils.isUserHostmask(target):
-            return target
+            return target if target.isascii() else None
         try:
             hostmask = irc.state.nickToHostmask(target)
         except KeyError:
@@ -413,9 +415,10 @@ class Blacklist(callbacks.Plugin):
         try:
             nick, ident, host = ircutils.splitHostmask(hostmask)
             template = self.banmasks.get(num, self.banmasks[2])
-            return template.replace("nick", nick).replace("ident", ident).replace("host", host)
+            mask = template.replace("nick", nick).replace("ident", ident).replace("host", host)
         except Exception:
             return None
+        return mask if mask.isascii() else None
 
     def _createNetMask(self, irc, target):
         return self._createMask(irc, target, self.registryValue('netMaskNumber'))
@@ -526,7 +529,7 @@ class Blacklist(callbacks.Plugin):
         """
         if not self._isKnownNick(irc, target) and self._completeMask(target) is None:
             irc.error("The banmask specified is incorrect. It must be in "
-                      "the format of nick!user@host.")
+                      "the format of nick!user@host (ASCII only).")
             return
         mask = self._createMask(irc, target, self.registryValue('maskNumber', channel))
         if not mask:
@@ -578,7 +581,7 @@ class Blacklist(callbacks.Plugin):
         """
         if not self._isKnownNick(irc, target) and self._completeMask(target) is None:
             irc.error("The banmask specified is incorrect. It must be in "
-                      "the format of nick!user@host.")
+                      "the format of nick!user@host (ASCII only).")
             return
         mask = self._createMask(irc, target, self.registryValue('maskNumber', channel))
         if not mask:
@@ -821,7 +824,7 @@ class Blacklist(callbacks.Plugin):
             p = self.plugin
             if not p._isKnownNick(irc, target) and p._completeMask(target) is None:
                 irc.error("The banmask specified is incorrect. It must be in "
-                          "the format of nick!user@host.")
+                          "the format of nick!user@host (ASCII only).")
                 return
             mask = p._createNetMask(irc, target)
             if not mask:
@@ -863,7 +866,7 @@ class Blacklist(callbacks.Plugin):
             p = self.plugin
             if not p._isKnownNick(irc, target) and p._completeMask(target) is None:
                 irc.error("The banmask specified is incorrect. It must be in "
-                          "the format of nick!user@host.")
+                          "the format of nick!user@host (ASCII only).")
                 return
             mask = p._createNetMask(irc, target)
             if not mask:

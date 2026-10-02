@@ -515,6 +515,16 @@ class BlacklistTestCase(ChannelPluginTestCase):
                     '~baduser', 'z:fingerprint'):
             self.assertRegexp('blacklist add %s' % bad, r'nick!user@host')
 
+    def testNonAsciiMasksRejected(self):
+        # Nicks are case-mapped in US-ASCII, so non-ASCII bans can't match
+        # reliably: rejected both as a bare nick and as a full mask.
+        for bad in ('caf\u00e9*', 'caf\u00e9*!*@*', '*!*@h\u00f6st.example'):
+            self.assertRegexp('blacklist add %s' % bad, r'ASCII only')
+            self.assertRegexp('blacklist timer %s' % bad, r'ASCII only')
+            self.assertRegexp('blacklist net add %s' % bad, r'ASCII only')
+        bucket = self._cb().db['channels'].get(self.channel.lower())
+        self.assertTrue(not bucket or not bucket['entries'])
+
     def testUnknownNickCompletesLikeEggdrop(self):
         # Eggdrop's +ban: nick -> nick!*@*, user@host -> *!user@host,
         # nick!user -> nick!user@*  (the nick need not be around).
