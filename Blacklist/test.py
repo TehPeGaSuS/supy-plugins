@@ -141,6 +141,127 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self._drain()
         self.assertResponse('blacklist net list', 'Network blacklist is empty.')
 
+    def _exempt(self, cmd, *args):
+        self.assertNotError('blacklist exempt %s %s' % (cmd, ' '.join(args)))
+        self._drain()
+
+    def testExemptLabelsGroupSeveralMasks(self):
+        for args in (('add', 'Mimi', '*!*@a.host'), ('add', 'Mimi', '*!*@b.host'),
+                     ('add', 'Bob', 'bob!*@*'), ('add', '*!*@loose.host')):
+            self._exempt(*args)
+        self.assertResponse(
+            'blacklist exempt list',
+            'Mimi: *!*@a.host, *!*@b.host | Bob: bob!*@* | *!*@loose.host')
+        # Names are case-insensitive and shown as first filed.
+        self.assertResponse('blacklist exempt list mimi',
+                            'Mimi: *!*@a.host, *!*@b.host')
+        self.assertError('blacklist exempt list nobody')
+
+    def testExemptAddAppendsAndRelabels(self):
+        self._exempt('add', 'Mimi', '*!*@a.host')
+        self._exempt('add', 'Mimi', '*!*@b.host')    # appended, not replaced
+        self._exempt('add', '*!*@c.host')             # bare mask still works
+        self._exempt('add', 'Mimi', '*!*@c.host')     # ...and can be filed later
+        self.assertResponse('blacklist exempt list',
+                            'Mimi: *!*@a.host, *!*@b.host, *!*@c.host')
+
+    def testExemptRemoveByMaskNameOrBoth(self):
+        for args in (('Mimi', '*!*@a.host'), ('Mimi', '*!*@b.host'),
+                     ('Mimi', '*!*@c.host'), ('Bob', 'bob!*@*')):
+            self._exempt('add', *args)
+        self._exempt('remove', 'Mimi', '*!*@a.host')     # one mask of a name
+        self.assertResponse('blacklist exempt list mimi',
+                            'Mimi: *!*@b.host, *!*@c.host')
+        self._exempt('remove', '*!*@b.host')              # a bare mask
+        self.assertResponse('blacklist exempt list mimi', 'Mimi: *!*@c.host')
+        self._exempt('remove', 'MIMI')                    # everything under a name
+        self.assertResponse('blacklist exempt list', 'Bob: bob!*@*')
+        self.assertError('blacklist exempt remove Mimi')
+        self.assertError('blacklist exempt remove Bob *!*@nope')
+
+    def testExemptRejectsBadInput(self):
+        self.assertError('blacklist exempt add notamask')
+        self.assertError('blacklist exempt add Mimi notamask')
+        self.assertError('blacklist exempt add *!*@a.host *!*@b.host')  # mask as name
+        self.assertError('blacklist exempt add Caf\u00e9 *!*@a.host')
+        self.assertError('blacklist exempt add Mimi *!*@h\u00f6st.example')
+
+    def _withFakePaste(self, fn):
+        """Runs fn with maxInlineEntries=2 and a captured fake paste upload;
+        returns the list of (channel, content) uploads."""
+        cb = self._cb()
+        uploads = []
+        cb._createPastebin = lambda channel, content: (
+            uploads.append((channel, content)) or 'https://paste.example/abc')
+        conf.supybot.plugins.Blacklist.maxInlineEntries.setValue(2)
+        try:
+            fn()
+        finally:
+            conf.supybot.plugins.Blacklist.maxInlineEntries.setValue(5)
+            del cb._createPastebin
+        return uploads
+
+    def testLongExemptListGoesToThePasteService(self):
+        for args in (('Mimi', '*!*@a.host'), ('Mimi', '*!*@b.host'),
+                     ('Bob', 'bob!*@*'), ('*!*@loose.host',)):
+            self._exempt('add', *args)
+        def run():
+            self.assertRegexp('blacklist exempt list',
+                              r'too large \(4 masks\).*https://paste\.example/abc')
+            # a single name's masks fit inline again
+            self.assertResponse('blacklist exempt list mimi',
+                                'Mimi: *!*@a.host, *!*@b.host')
+        uploads = self._withFakePaste(run)
+        self.assertEqual(len(uploads), 1)
+        channel, text = uploads[0]
+        self.assertEqual(channel, self.channel)
+        self.assertTrue('Mimi:\n  *!*@a.host\n  *!*@b.host\n' in text)
+        self.assertTrue('(no name):\n  *!*@loose.host\n' in text)
+
+    def testShortExemptListStaysInline(self):
+        self._exempt('add', 'Mimi', '*!*@a.host')
+        self._exempt('add', 'Bob', 'bob!*@*')
+        uploads = self._withFakePaste(lambda: self.assertResponse(
+            'blacklist exempt list', 'Mimi: *!*@a.host | Bob: bob!*@*'))
+        self.assertEqual(uploads, [])
+
+    def testLongNetExemptListGoesToThePasteService(self):
+        for args in ('Mimi *!*@a.host', 'Mimi *!*@b.host', 'Bob bob!*@*'):
+            self.assertNotError('blacklist net exemptadd %s' % args)
+            self._drain()
+        uploads = self._withFakePaste(lambda: self.assertRegexp(
+            'blacklist net exemptlist', r'too large \(3 masks\).*paste\.example'))
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0][0], None)
+        self.assertTrue('Network exempt masks (3 masks)' in uploads[0][1])
+
+    def testLabelledExemptStillProtects(self):
+        self._exempt('add', 'Foo', 'foo!*@*')
+        self.assertError('blacklist add foo shouldnotwork')
+
+    def testExemptWorksOnAnOldDatabaseWithoutNames(self):
+        bucket = self._cb()._ensure_channel_bucket(self.channel)
+        bucket['exempt'] = ['old!*@*']
+        bucket.pop('exempt_names', None)
+        self.assertResponse('blacklist exempt list', 'old!*@*')
+        self._exempt('add', 'Mimi', '*!*@a.host')
+        self.assertResponse('blacklist exempt list', 'Mimi: *!*@a.host | old!*@*')
+        self._exempt('remove', 'old!*@*')
+        self.assertResponse('blacklist exempt list', 'Mimi: *!*@a.host')
+
+    def testNetExemptLabels(self):
+        for args in ('Mimi *!*@a.host', 'Mimi *!*@b.host', 'Bob bob!*@*'):
+            self.assertNotError('blacklist net exemptadd %s' % args)
+            self._drain()
+        self.assertResponse('blacklist net exemptlist',
+                            'Mimi: *!*@a.host, *!*@b.host | Bob: bob!*@*')
+        self.assertNotError('blacklist net exemptremove Mimi *!*@a.host')
+        self._drain()
+        self.assertNotError('blacklist net exemptremove bob')
+        self._drain()
+        self.assertResponse('blacklist net exemptlist', 'Mimi: *!*@b.host')
+        self.assertError('blacklist net exemptlist nobody')
+
     def testNetExempt(self):
         self.assertNotError('blacklist net exemptadd foo!*@*')
         self.assertError('blacklist net add foo nope')

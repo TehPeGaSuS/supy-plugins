@@ -81,10 +81,24 @@ if `addManualBans` is on, and manual unbans are synced back the same way — see
 ### Per-channel exemptions
 
 ```
-blacklist exempt add [<channel>] <hostmask>
+blacklist exempt add [<channel>] [<nick>] <hostmask>
+blacklist exempt remove [<channel>] <nick> [<hostmask>]
 blacklist exempt remove [<channel>] <hostmask>
-blacklist exempt list [<channel>]
+blacklist exempt list [<channel>] [<nick>]
 ```
+Masks are appended one at a time, never replaced. An optional name (usually
+the person's nick) groups several masks under one person, so
+`exempt add Mimi *!*@a.host` followed by `exempt add Mimi *!*@b.host` leaves
+both. `remove <nick> <hostmask>` drops one of them, `remove <nick>` drops all
+of that name's masks, and `remove <hostmask>` drops a single mask. `list`
+shows `Mimi: *!*@a.host, *!*@b.host | Bob: bob!*@*`, or just one name. Names
+are case-insensitive and ASCII, and masks must be plain ASCII too. Lists made
+before names existed keep working, with their masks shown unnamed.
+
+Like the ban list, a list longer than `maxInlineEntries` masks is uploaded to
+the configured paste service (`pastebinUrl`/`pastebinField`) and answered with
+the link; a single name's masks usually fit inline.
+
 Hostmasks on this list can never be added to the channel's blacklist, whether
 via `add`/`timer` or auto-detected manual bans. Checked against the *real*
 hostmask being banned, not the ban mask pattern, so `exempt add nick!*@*`
@@ -104,9 +118,10 @@ blacklist net delete <mask|ID>
 blacklist net list
 blacklist net search <pattern>
 blacklist net clear confirm
-blacklist net exemptadd <hostmask>
+blacklist net exemptadd [<nick>] <hostmask>
+blacklist net exemptremove <nick> [<hostmask>]
 blacklist net exemptremove <hostmask>
-blacklist net exemptlist
+blacklist net exemptlist [<nick>]
 ```
 `net add` is permanent and bans/kicks the target immediately in every
 enforcing channel; `net timer` is the temporary version. Joins are checked

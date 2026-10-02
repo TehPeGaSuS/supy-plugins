@@ -193,6 +193,99 @@ class Blacklist(callbacks.Plugin):
         return entry_id
 
     # -----------------------------------------------------------------
+    # Exempt lists: masks, optionally grouped under a label (usually the
+    # person's nick). Shared by the channel lists and the network list. The
+    # flat store['exempt'] list is what matching uses; store['exempt_names']
+    # maps mask -> label purely for grouping, so old databases keep working.
+    # -----------------------------------------------------------------
+
+    def _exemptAdd(self, store, first, second):
+        """Appends (never replaces). `first` is a label and `second` its
+        mask, or `first` alone is a bare mask. Returns an error string or
+        None."""
+        label, mask = (first, second) if second is not None else (None, first)
+        if not ircutils.isUserHostmask(mask) or not mask.isascii():
+            return "Must be a nick!user@host mask (wildcards allowed, ASCII only)."
+        if label is not None and (not label.isascii() or ircutils.isUserHostmask(label)):
+            return "The name must be a plain ASCII label (usually a nick), not a mask."
+        with self._db_lock:
+            masks = store.setdefault('exempt', [])
+            names = store.setdefault('exempt_names', {})
+            if mask not in masks:
+                masks.append(mask)
+            if label is not None:
+                names[mask] = label
+            self._dbWrite()
+        return None
+
+    def _exemptRemove(self, store, first, second):
+        """`first second` removes that mask from that label; a lone `first`
+        removes that mask, or every mask under that label. Returns an error
+        string or None."""
+        with self._db_lock:
+            masks = store.setdefault('exempt', [])
+            names = store.setdefault('exempt_names', {})
+            def labelled(m):
+                return names.get(m, '').lower() == first.lower()
+            if second is not None:
+                victims = [m for m in masks if m == second and labelled(m)]
+                if not victims:
+                    return "That mask isn't listed under %s." % first
+            elif first in masks:
+                victims = [first]
+            else:
+                victims = [m for m in masks if labelled(m)]
+                if not victims:
+                    return "No exempt mask or name matches %s." % first
+            for m in victims:
+                masks.remove(m)
+                names.pop(m, None)
+            self._dbWrite()
+        return None
+
+    def _exemptGroups(self, store, label=None):
+        """[(name or None, [masks])] in listing order -- named groups first,
+        then the unnamed masks -- or just one name's group."""
+        with self._db_lock:
+            masks = list(store.get('exempt', []))
+            names = dict(store.get('exempt_names', {}))
+        if label is not None:
+            sel = [m for m in masks if names.get(m, '').lower() == label.lower()]
+            return [(names[sel[0]], sel)] if sel else []
+        groups, plain = {}, []
+        for m in masks:
+            n = names.get(m)
+            if n:
+                groups.setdefault(n.lower(), (n, []))[1].append(m)
+            else:
+                plain.append(m)
+        out = list(groups.values())
+        if plain:
+            out.append((None, plain))
+        return out
+
+    def _replyExemptList(self, irc, store, channel, title, label, empty):
+        """Replies with the exempt list ('Mimi: m1, m2 | Bob: m3 | m4, m5'),
+        or, past maxInlineEntries masks, uploads it to the configured paste
+        service (pastebinUrl/pastebinField, same as the ban list) and
+        replies with the link. `label` limits it to one name."""
+        groups = self._exemptGroups(store, label)
+        total = sum(len(ms) for _, ms in groups)
+        if not total:
+            irc.error("No exempt masks under %s." % label) if label else irc.reply(empty)
+            return
+        if total > (self.registryValue('maxInlineEntries', channel) or 5):
+            text = f"{title} ({total} masks):\n" + "=" * 45 + "\n"
+            for name, ms in groups:
+                text += (f"{name}:\n" if name else "(no name):\n")
+                text += "".join(f"  {m}\n" for m in ms)
+            url = self._createPastebin(channel, text)
+            irc.reply(f"Exempt list too large ({total} masks). View here: {url}")
+        else:
+            irc.reply(" | ".join(
+                (f"{n}: " if n else "") + ", ".join(ms) for n, ms in groups))
+
+    # -----------------------------------------------------------------
     # Exemption checks
     # -----------------------------------------------------------------
 
@@ -805,48 +898,50 @@ class Blacklist(callbacks.Plugin):
     # -----------------------------------------------------------------
 
     class exempt(callbacks.Commands):
-        """Manages hostmasks that this channel's blacklist will never touch."""
+        """Manages hostmasks that this channel's blacklist will never touch.
+        Masks are appended one at a time, and can be grouped under a name
+        (usually a nick) so one person can carry several."""
 
         plugin = None
 
-        def add(self, irc, msg, args, channel, mask):
-            """[<channel>] <hostmask>
-            Exempts <hostmask> from this channel's blacklist: `add`, `timer`
-            and auto-detected manual bans will refuse to blacklist a real
-            hostmask matching it.
+        def add(self, irc, msg, args, channel, first, second):
+            """[<channel>] <nick> <hostmask> | [<channel>] <hostmask>
+            Adds <hostmask> to this channel's exempt list (appended, never
+            replacing), optionally filed under <nick>: `add`, `timer` and
+            auto-detected manual bans refuse to blacklist a hostmask matching
+            it, and joins matching it are left alone.
             """
-            if not ircutils.isUserHostmask(mask):
-                irc.error("Must be a nick!user@host mask (wildcards allowed).")
-                return
             p = self.plugin
             with p._db_lock:
-                bucket = p._ensure_channel_bucket(channel)
-                if mask not in bucket['exempt']:
-                    bucket['exempt'].append(mask)
-                    p._dbWrite()
-            irc.replySuccess()
-        add = wrap(add, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
+                store = p._ensure_channel_bucket(channel)
+            err = p._exemptAdd(store, first, second)
+            irc.error(err) if err else irc.replySuccess()
+        add = wrap(add, [('checkChannelCapability', 'op'), 'channel',
+                         'somethingWithoutSpaces', optional('somethingWithoutSpaces')])
 
-        def remove(self, irc, msg, args, channel, mask):
-            """[<channel>] <hostmask>"""
-            p = self.plugin
-            with p._db_lock:
-                bucket = p._get_channel_bucket(channel)
-                if bucket and mask in bucket['exempt']:
-                    bucket['exempt'].remove(mask)
-                    p._dbWrite()
-                    irc.replySuccess()
-                    return
-            irc.error("That mask isn't on this channel's exempt list.")
-        remove = wrap(remove, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
-
-        def list(self, irc, msg, args, channel):
-            """[<channel>]"""
+        def remove(self, irc, msg, args, channel, first, second):
+            """[<channel>] <nick> [<hostmask>] | [<channel>] <hostmask>
+            Removes <hostmask> from the exempt list, or, given only a <nick>,
+            every mask filed under that name.
+            """
             p = self.plugin
             bucket = p._get_channel_bucket(channel)
-            masks = bucket['exempt'] if bucket else []
-            irc.reply(", ".join(masks) if masks else "No exempt masks for this channel.")
-        list = wrap(list, [('checkChannelCapability', 'op'), 'channel'])
+            err = p._exemptRemove(bucket, first, second) if bucket \
+                else "This channel has no exempt list."
+            irc.error(err) if err else irc.replySuccess()
+        remove = wrap(remove, [('checkChannelCapability', 'op'), 'channel',
+                               'somethingWithoutSpaces', optional('somethingWithoutSpaces')])
+
+        def list(self, irc, msg, args, channel, label):
+            """[<channel>] [<nick>]
+            Lists the exempt masks, grouped by name, or just <nick>'s masks.
+            """
+            p = self.plugin
+            p._replyExemptList(irc, p._get_channel_bucket(channel) or {}, channel,
+                               f"Exempt masks for {channel}", label,
+                               "No exempt masks for this channel.")
+        list = wrap(list, [('checkChannelCapability', 'op'), 'channel',
+                           optional('somethingWithoutSpaces')])
 
     # -----------------------------------------------------------------
     # Network-wide blacklist
@@ -1003,37 +1098,36 @@ class Blacklist(callbacks.Plugin):
             irc.reply(f"Cleared {len(masks)} entries from the network blacklist.")
         clear = wrap(clear, ['admin', 'somethingWithoutSpaces'])
 
-        def exemptadd(self, irc, msg, args, mask):
-            """<hostmask>"""
+        def exemptadd(self, irc, msg, args, first, second):
+            """<nick> <hostmask> | <hostmask>
+            Adds <hostmask> to the network exempt list (appended, never
+            replacing), optionally filed under <nick>.
+            """
             p = self.plugin
-            if not ircutils.isUserHostmask(mask):
-                irc.error("Must be a nick!user@host mask (wildcards allowed).")
-                return
-            with p._db_lock:
-                if mask not in p.db['net']['exempt']:
-                    p.db['net']['exempt'].append(mask)
-                    p._dbWrite()
-            irc.replySuccess()
-        exemptadd = wrap(exemptadd, ['admin', 'somethingWithoutSpaces'])
+            err = p._exemptAdd(p.db['net'], first, second)
+            irc.error(err) if err else irc.replySuccess()
+        exemptadd = wrap(exemptadd, ['admin', 'somethingWithoutSpaces',
+                                     optional('somethingWithoutSpaces')])
 
-        def exemptremove(self, irc, msg, args, mask):
-            """<hostmask>"""
+        def exemptremove(self, irc, msg, args, first, second):
+            """<nick> [<hostmask>] | <hostmask>
+            Removes <hostmask> from the network exempt list, or, given only a
+            <nick>, every mask filed under that name.
+            """
             p = self.plugin
-            with p._db_lock:
-                if mask in p.db['net']['exempt']:
-                    p.db['net']['exempt'].remove(mask)
-                    p._dbWrite()
-                    irc.replySuccess()
-                    return
-            irc.error("That mask isn't on the network exempt list.")
-        exemptremove = wrap(exemptremove, ['admin', 'somethingWithoutSpaces'])
+            err = p._exemptRemove(p.db['net'], first, second)
+            irc.error(err) if err else irc.replySuccess()
+        exemptremove = wrap(exemptremove, ['admin', 'somethingWithoutSpaces',
+                                           optional('somethingWithoutSpaces')])
 
-        def exemptlist(self, irc, msg, args):
-            """takes no arguments"""
+        def exemptlist(self, irc, msg, args, label):
+            """[<nick>]
+            Lists the network exempt masks, grouped by name, or just <nick>'s.
+            """
             p = self.plugin
-            masks = p.db['net']['exempt']
-            irc.reply(", ".join(masks) if masks else "No exempt masks on the network blacklist.")
-        exemptlist = wrap(exemptlist, ['admin'])
+            p._replyExemptList(irc, p.db['net'], None, "Network exempt masks",
+                               label, "No exempt masks on the network blacklist.")
+        exemptlist = wrap(exemptlist, ['admin', optional('somethingWithoutSpaces')])
 
     # -----------------------------------------------------------------
     # IRC event handlers
