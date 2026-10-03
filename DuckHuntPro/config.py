@@ -286,4 +286,50 @@ conf.registerChannelValue(DuckHuntPro, 'antifloodMsgInterval',
     flood-control warnings for the same limit (not too low, or the warnings
     become the flood)."""))
 
+
+# ---- The original's tunable numbers (Duck_Hunt.cfg) ------------------------
+
+conf.registerGlobalValue(DuckHuntPro, 'xpPerDuck',
+    registry.Integer(data.XP_PER_DUCK, """Experience points for killing a duck
+    (xp_duck)."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'xpPerGoldenDuckHp',
+    registry.Integer(data.BASE_XP_GOLDEN_DUCK, """Experience points for killing
+    a golden duck, per hit point it had."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'xpLuckyShot',
+    registry.Integer(data.XP_LUCKY_SHOT, """Bonus experience points for a
+    "lucky" kill (a ricochet that hits the duck)."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'chanceRicochetTowardsDuck',
+    registry.NonNegativeInteger(data.CHANCE_RICOCHET_TOWARDS_DUCK, """Percent chance for a
+    deflected bullet to ricochet towards the duck
+    (chances_to_ricochet_towards_duck)."""))
+
+_TIERS = (('upTo10', 'a channel of 10 users or fewer'),
+          ('upTo20', '11 to 20 users'),
+          ('upTo30', '21 to 30 users'),
+          ('above30', '31 users or more'))
+
+conf.registerGroup(DuckHuntPro, 'chancesToHitSomeoneElse')
+conf.registerGroup(DuckHuntPro, 'chancesWildFireHitSomeone')
+for _i, (_name, _what) in enumerate(_TIERS):
+    conf.registerGlobalValue(DuckHuntPro.chancesToHitSomeoneElse, _name,
+        registry.PositiveInteger(data.ACCIDENT_CHANCE_DUCK_PRESENT[_i][1],
+            "Percent chance that a missed shot at a duck hits someone else, in %s." % _what))
+    conf.registerGlobalValue(DuckHuntPro.chancesWildFireHitSomeone, _name,
+        registry.PositiveInteger(data.ACCIDENT_CHANCE_WILD_FIRE[_i][1],
+            "Percent chance that a wild shot (no duck) hits someone, in %s." % _what))
+
+conf.registerGroup(DuckHuntPro, 'shopCosts')
+for _key, _cost in data.ITEM_COSTS.items():
+    conf.registerGlobalValue(DuckHuntPro.shopCosts, _key,
+        registry.NonNegativeInteger(_cost, "Price in xp of the shop item %s." % _key))
+
+conf.registerGroup(DuckHuntPro, 'dropChances')
+for _key, _chance in data.DROP_TABLE.items():
+    conf.registerGlobalValue(DuckHuntPro.dropChances, _key,
+        registry.NonNegativeInteger(_chance, """Chance, out of 1000, of the kill drop
+        "%s" (rolled in the original's fixed order; the first success wins).""" % _key))
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

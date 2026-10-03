@@ -117,10 +117,12 @@ CHANCE_RICOCHET_TOWARDS_DUCK = 10
 MAX_RICOCHETS = 5
 
 
-def accidentChance(population, duckPresent):
+def accidentChance(population, duckPresent, tiers=None):
     """% chance a stray shot hits a random bystander, given channel
-    population and whether a duck was present when it was fired."""
-    tiers = ACCIDENT_CHANCE_DUCK_PRESENT if duckPresent else ACCIDENT_CHANCE_WILD_FIRE
+    population and whether a duck was present when it was fired. `tiers`
+    overrides the default table ((ceiling or None, percent), ...)."""
+    if tiers is None:
+        tiers = ACCIDENT_CHANCE_DUCK_PRESENT if duckPresent else ACCIDENT_CHANCE_WILD_FIRE
     for ceiling, chance in tiers:
         if ceiling is None or population <= ceiling:
             return chance
@@ -208,7 +210,7 @@ XP_BOOK_VALUES = {
 }
 
 
-def rollDrop(rng):
+def rollDrop(rng, table=None):
     """Rolls the kill drop table exactly as Duck_Hunt.tcl's hit_a_duck does:
     each key is checked in a FIXED order, as an independent Bernoulli trial
     (roll 1-1000 <= that key's per-1000 chance), and the FIRST one to
@@ -216,7 +218,7 @@ def rollDrop(rng):
     pick, so keys later in DROP_TABLE's order have their effective odds
     reduced by earlier keys already "using up" that kill's roll. Returns the
     winning key, or None if every roll failed (the much more common case)."""
-    for key, chance in DROP_TABLE.items():
+    for key, chance in (DROP_TABLE if table is None else table).items():
         if rng.randint(1, 1000) <= chance:
             return key
     return None

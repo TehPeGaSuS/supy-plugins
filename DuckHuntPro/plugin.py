@@ -466,7 +466,7 @@ class DuckHuntPro(callbacks.Plugin):
             line = t(self._LOG_UNARM[action], clock, target, hunter)
         elif action.startswith('item_'):
             number = int(action[5:])
-            cost = data.ITEM_COSTS[data.SHOP_ITEMS[number - 1]]
+            cost = self._shopCost(data.SHOP_ITEMS[number - 1])
             key = 'm%d' % (300 + number)
             if number == 10:
                 line = t(key, clock, hunter, extra, cost)
@@ -1214,6 +1214,9 @@ class DuckHuntPro(callbacks.Plugin):
     # Output (Duck_Hunt.tcl's display_output) and message helpers
     # -----------------------------------------------------------------
 
+    def _shopCost(self, key):
+        return self.registryValue('shopCosts.' + key)
+
     def _lang(self, channel):
         return 'fr' if self.registryValue('language', channel) == 'fr' else 'en'
 
@@ -1418,7 +1421,10 @@ class DuckHuntPro(callbacks.Plugin):
             population = len(irc.state.channels[channel].users)
         except KeyError:
             population = 1
-        chance = data.accidentChance(population, duckPresent)
+        group = 'chancesToHitSomeoneElse' if duckPresent else 'chancesWildFireHitSomeone'
+        chance = data.accidentChance(population, duckPresent, [
+            (10, self.registryValue(group + '.upTo10')), (20, self.registryValue(group + '.upTo20')),
+            (30, self.registryValue(group + '.upTo30')), (None, self.registryValue(group + '.above30'))])
         someoneHit = confiscationSent = penaltySent = False
         ricochets = 0
         source = nick
@@ -1471,7 +1477,7 @@ class DuckHuntPro(callbacks.Plugin):
                     + tail, 'public')
                 self._huntLog(channel, 'deflect', nick, victim.lower(), noLF=True, now=now)
                 if (duckPresent and self._activeDuck.get(key)
-                        and self._rng.uniform(0, 100) < data.CHANCE_RICOCHET_TOWARDS_DUCK):
+                        and self._rng.uniform(0, 100) < self.registryValue('chanceRicochetTowardsDuck')):
                     damage = data.NORMAL_DAMAGE
                     for ammoKey, dmg in data.AMMO_TYPE_DAMAGE.items():
                         if db.itemActive(player, ammoKey, now):
@@ -1570,13 +1576,13 @@ class DuckHuntPro(callbacks.Plugin):
                     self._out(irc, channel, nick, t('m271', nick, sound, damage))
                 self._huntLog(channel, 'hit_golden_duck', nick, now=now, network=network)
                 return
-            xpWon = data.BASE_XP_GOLDEN_DUCK * duck['hp_total']
+            xpWon = self.registryValue('xpPerGoldenDuckHp') * duck['hp_total']
             if isLucky:
-                xpWon += data.XP_LUCKY_SHOT
+                xpWon += self.registryValue('xpLuckyShot')
         elif duck.get('is_fake'):
             xpWon = 0
         else:
-            xpWon = data.XP_PER_DUCK + (data.XP_LUCKY_SHOT if isLucky else 0)
+            xpWon = self.registryValue('xpPerDuck') + (self.registryValue('xpLuckyShot') if isLucky else 0)
         cloverMsg = ''
         clover = db.itemActive(player, 'four_leaf_clover', now)
         if clover:
@@ -1672,7 +1678,8 @@ class DuckHuntPro(callbacks.Plugin):
         applies the winning drop. Returns the announcement, or None on a dry
         roll (the common case). `lootOut` (a list) receives the drop's name
         for the hunting log."""
-        key = data.rollDrop(self._rng)
+        key = data.rollDrop(self._rng, {k: self.registryValue('dropChances.' + k)
+                                       for k in data.DROP_TABLE})
         if key is None:
             return None
         t = lambda k, *a: self._t(channel, k, *a)
@@ -2004,7 +2011,7 @@ class DuckHuntPro(callbacks.Plugin):
             # Tcl: any shop use during a duck session adds to the reflex time.
             player['stats']['reflex_ms'] += int((now - ducks[0]['spawned_at']) * 1000)
         out = lambda text: self._out(irc, channel, nick, text, 'pref')
-        costs = [data.ITEM_COSTS[k] for k in data.SHOP_ITEMS]
+        costs = [self._shopCost(k) for k in data.SHOP_ITEMS]
         itemId = parts[0] if parts else ''
         targetNick = parts[1] if len(parts) > 1 else ''
         valid = [str(i) for i in range(1, 24)]

@@ -1730,6 +1730,45 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn('[10 xp]', kill[0])
         self.assertIn('*BANG*', kill[0])
 
+    def testTunableNumbersDefaultToTheOriginalsValues(self):
+        cb = self._cb()
+        self.assertEqual((cb.registryValue('xpPerDuck'), cb.registryValue('xpPerGoldenDuckHp'),
+                          cb.registryValue('chanceRicochetTowardsDuck')), (10, 12, 10))
+        self.assertEqual([cb.registryValue('chancesToHitSomeoneElse.' + k)
+                          for k in ('upTo10', 'upTo20', 'upTo30', 'above30')], [10, 12, 14, 15])
+        self.assertEqual([cb.registryValue('chancesWildFireHitSomeone.' + k)
+                          for k in ('upTo10', 'upTo20', 'upTo30', 'above30')], [1, 2, 3, 4])
+        self.assertEqual(cb.registryValue('shopCosts.fake_duck'), 50)
+        self.assertEqual(cb.registryValue('dropChances.junk'), 20)
+
+    def testXpPerDuckIsConfigurable(self):
+        conf.supybot.plugins.DuckHuntPro.xpPerDuck.setValue(25)
+        self._putDuck()
+        kill = [x for x in self._shot() if 'You shot down the duck in' in x]
+        self.assertIn('[25 xp]', kill[0])
+
+    def testShopCostsAreConfigurable(self):
+        conf.supybot.plugins.DuckHuntPro.shopCosts.extra_ammo.setValue(3)
+        self._shopRun('1', setup=lambda p: p.update(clip_ammo=0))
+        self.assertEqual(self._player()['xp'], 1000 - 3)
+
+    def testDropChancesAreConfigurable(self):
+        cb = self._cb()
+        for key in data.DROP_TABLE:
+            getattr(conf.supybot.plugins.DuckHuntPro.dropChances, key).setValue(0)
+        conf.supybot.plugins.DuckHuntPro.dropChances.sight.setValue(1000)
+        conf.supybot.plugins.DuckHuntPro.dropsEnabled.setValue(True)
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        cb._rollAndApplyDrop(self.channel, player, self.nick, time.time())
+        self.assertIn('sight', player['items'])
+
+    def testAccidentChancesAreConfigurable(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.chancesWildFireHitSomeone.upTo10.setValue(77)
+        self.assertEqual(data.accidentChance(5, False, [(10, 77), (None, 1)]), 77)
+        # the plugin builds the same table from the settings
+        self.assertEqual(cb.registryValue('chancesWildFireHitSomeone.upTo10'), 77)
+
     def testKillingOneOfSeveralDucksSaysOneOfTheDucks(self):
         self._putDuck()
         self._putDuck()
