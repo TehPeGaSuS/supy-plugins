@@ -638,8 +638,9 @@ class Blacklist(callbacks.Plugin):
 
     def _netReachText(self, reached, skipped, limit=8):
         """One line saying where a network ban landed: the channels it was
-        applied in, those where the bot has no op (so it won't take), and how
-        many have enforceGlobal off."""
+        applied in and those where the bot has no op (so it won't take).
+        Channels with enforceGlobal off are only mentioned when that leaves
+        the ban enforced nowhere."""
         def capped(names):
             text = ", ".join(names[:limit])
             return text + (f" and {len(names) - limit} more" if len(names) > limit else "")
@@ -652,15 +653,13 @@ class Blacklist(callbacks.Plugin):
             parts.append("I'm not op in any channel, so it won't be applied anywhere.")
         elif no_op:
             parts.append(f"I'm not op in {capped(no_op)}, so it won't be applied there.")
-        if skipped:
-            n = len(skipped)
-            s = 's' if n != 1 else ''
-            if reached:
-                parts.append(f"enforceGlobal is off in {n} other channel{s}.")
+        if not reached:
+            if skipped:
+                n = len(skipped)
+                parts.append("Not enforced anywhere yet: enforceGlobal is off in "
+                             f"{n} channel{'s' if n != 1 else ''}.")
             else:
-                parts.append(f"Not enforced anywhere yet: enforceGlobal is off in {n} channel{s}.")
-        elif not reached:
-            parts.append("Not enforced anywhere yet.")
+                parts.append("Not enforced anywhere yet.")
         return " ".join(parts)
 
     def _resyncBans(self, irc, channel):

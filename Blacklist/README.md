@@ -135,12 +135,13 @@ enforcing channel; `net timer` is the temporary version. Joins are checked
 against the network blacklist before the channel's own list.
 
 The reply says where the ban actually landed, for example `Added to the
-network blacklist. Banned in #a, #d. I'm not op in #c, #e, so it won't be applied there.
-enforceGlobal is off in 5 other channels.` Where the bot has no op the ban is
-queued but the server will refuse it, so those channels get their own
-sentence. If the bot has no op in any channel the ban applies to, it just says
-`I'm not op in any channel, so it won't be applied anywhere.` If no channel has
-`enforceGlobal` on, it says `Not enforced anywhere yet`.
+network blacklist. Banned in #a, #d. I'm not op in #c, #e, so it won't be
+applied there.` Where the bot has no op the ban is queued but the server will
+refuse it, so those channels get their own sentence; if that is every channel
+the ban applies to, it says `I'm not op in any channel, so it won't be applied
+anywhere.` Channels with `enforceGlobal` off aren't mentioned, unless that
+leaves the ban enforced nowhere: then it says `Not enforced anywhere yet` and
+how many channels have it off.
 
 ## Enforcement (Eggdrop-style)
 

@@ -303,13 +303,13 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertRegex(
             self._replyTo('blacklist net add foo r1'),
             r'Added to the network blacklist\. I\'m not op in any channel, so it '
-            r'won\'t be applied anywhere\. enforceGlobal is off in 1 other channel\.')
+            r'won\'t be applied anywhere\.$')
         self.assertNotError('blacklist net delete 1')
         self._drain()
         self._botIsOpped()
         self.assertRegex(
             self._replyTo('blacklist net timer foo 5 r2'),
-            r'for 5 minutes\. Banned in #test\. enforceGlobal is off in 1 other channel\.')
+            r'for 5 minutes\. Banned in #test\.$')
 
     def testNetAddSaysWhenNoChannelEnforcesIt(self):
         other = self._joinOtherChannel()
@@ -323,8 +323,7 @@ class BlacklistTestCase(ChannelPluginTestCase):
         text = self._cb()._netReachText(
             [('#a', True), ('#c', False), ('#d', True), ('#e', False)], ['#f'])
         self.assertEqual(
-            text, "Banned in #a, #d. I'm not op in #c, #e, so it won't be applied there. "
-                  "enforceGlobal is off in 1 other channel.")
+            text, "Banned in #a, #d. I'm not op in #c, #e, so it won't be applied there.")
         self.assertEqual(
             self._cb()._netReachText([('#c', False), ('#e', False)], []),
             "I'm not op in any channel, so it won't be applied anywhere.")
