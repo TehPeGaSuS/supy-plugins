@@ -35,8 +35,9 @@ needed in private):
 
 Staff commands need `#channel,op`, `#channel,halfop` or the global `admin`
 capability (the original's `mno|mnol` commands), for example
-`capability add <user> #channel,op` (Admin plugin; you can only grant a
-capability you hold yourself).
+`channel capability add #channel <user> op` (or `halfop`; needs
+`#channel,op` yourself). The global form is `admin capability add <user>
+admin`, which only an admin can run and only for capabilities they hold.
 
 | Command | |
 |---|---|
