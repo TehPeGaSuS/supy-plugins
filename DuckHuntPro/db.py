@@ -116,8 +116,10 @@ def pruneExpiredBread(chan, now):
 
 
 def activeBreadCount(chan, now):
-    pruneExpiredBread(chan, now)
-    return len(chan['bread'])
+    """Pieces still fresh at `now`. Counting leaves expired pieces in place:
+    the plugin's minute tick removes them one by one so each triggers the
+    original's bread-expired replan."""
+    return len([b for b in chan['bread'] if b['expires_at'] > now])
 
 
 class Database:

@@ -190,6 +190,16 @@ conf.registerChannelValue(DuckHuntPro, 'autoGunHandBackTime',
     registry.String('00:00', """Local time (HH:MM) weapons are auto-returned
     each day, when gunHandBackMode is 1."""))
 
+conf.registerGlobalValue(DuckHuntPro, 'method',
+    registry.Integer(2, """How duck flights are scheduled (the original's `method`):
+    1 = every minute each channel has a chance of a flight (random timing),
+    2 = the day's flight times are planned in advance, replanned at midnight
+    and whenever bread is bought or expires."""))
+
+conf.registerChannelValue(DuckHuntPro, 'showBreadReplanning',
+    registry.Boolean(True, """Log the new flight plan each time buying or
+    losing bread replans the day (the original's show_bread_replanning)."""))
+
 conf.registerChannelValue(DuckHuntPro, 'preferredDisplayMode',
     registry.Integer(1, """Where the game's per-player replies go: 1 = PRIVMSG to
     the channel, anything else = NOTICE to the player (the original's

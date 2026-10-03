@@ -77,12 +77,19 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduled = set()  # event names we've scheduled, for die()
         self._httpRunning = False
         self._floodWindows = {}  # (network, channel, nick) -> [timestamps]
+        self._postInitDone = False   # Duck_Hunt.tcl's post_init_done
+        self._enabledHooks = {}      # (network, channel) -> (registry value, callback)
         # The nested `admin` command group is instantiated by BasePlugin's
         # __init__ (above) but has no reference to this instance -- hand it
         # one explicitly. (This is NOT automatic and forgetting it only fails
         # at runtime.)
         self.admin.plugin = self
+        self._scheduleEvent("DuckHuntPro:postinit",
+                            time.time() + self.registryValue('postInitDelay'),
+                            self._setPostInitDone, ())
         self._reschedulePlannedFlights(irc)
+        self._scheduleMidnight()
+        self._scheduleMinuteTick()
         self._scheduleAmmoRefill()
         if self.registryValue('quarterlyResetEnabled'):
             self._scheduleQuarterlyReset()
@@ -93,6 +100,9 @@ class DuckHuntPro(callbacks.Plugin):
     def die(self):
         conf.supybot.plugins.DuckHuntPro.web.enable.removeCallback(self._doWebConf)
         self._stopHttp()
+        for value, callback in self._enabledHooks.values():
+            value.removeCallback(callback)
+        self._enabledHooks.clear()
         for name in list(self._scheduled):
             self._unschedule(name)
         super().die()
@@ -238,8 +248,11 @@ class DuckHuntPro(callbacks.Plugin):
     # -----------------------------------------------------------------
 
     def _scheduleEvent(self, name, at, func, args):
+        def run(*a):
+            self._scheduled.discard(name)    # it has fired: nothing left to cancel
+            return func(*a)
         try:
-            schedule.addEvent(func, at, name=name, args=args)
+            schedule.addEvent(run, at, name=name, args=args)
             self._scheduled.add(name)
         except AssertionError:
             # Already scheduled (e.g. plugin reload) -- leave it alone.
@@ -262,12 +275,39 @@ class DuckHuntPro(callbacks.Plugin):
     # Duck spawn planning (method 2: pre-planned daily flight times)
     # -----------------------------------------------------------------
 
+    def _flightName(self, network, channelName, t):
+        return "DuckHuntPro:flight:%s:%s:%r" % (network, channelName.lower(), t)
+
+    def _planName(self, network, channelName):
+        return "DuckHuntPro:plan:%s:%s" % (network, channelName.lower())
+
+    def _setPostInitDone(self):
+        self._postInitDone = True
+
+    def _cancelFlights(self, network, channelName):
+        """Drops a channel's scheduled flights and any pending first plan."""
+        chan = self.db.channel(network, channelName)
+        with self.db.lock:
+            old = list(chan.get('planned_flights', []))
+            chan['planned_flights'] = []
+        for t in old:
+            self._unschedule(self._flightName(network, channelName, t))
+        self._unschedule(self._planName(network, channelName))
+
+    def _schedulePlanAfterDelay(self, network, channelName):
+        self._scheduleEvent(self._planName(network, channelName),
+                            time.time() + self.registryValue('postInitDelay'),
+                            self._planDay, (network, channelName))
+
     def _reschedulePlannedFlights(self, irc):
-        """Restores spawn timers lost across a bot restart, and plans a
-        fresh day for any enabled channel that has no future flights."""
+        """Restores flight timers lost across a bot restart, and plans a
+        fresh day (after postInitDelay) for any enabled channel that has no
+        future flights. (The original re-plans from scratch on every load;
+        restoring the day's remaining flights is a deliberate improvement.)"""
         now = time.time()
         network = irc.network
         for cname in list(irc.state.channels.keys()):
+            self._hookEnabled(network, cname)
             if not self.registryValue('enabled', cname):
                 continue
             chan = self.db.channel(network, cname)
@@ -283,12 +323,10 @@ class DuckHuntPro(callbacks.Plugin):
 
             if future:
                 for t in future:
-                    name = "DuckHuntPro:flight:%s:%s:%r" % (network, cname, t)
-                    self._scheduleEvent(name, t, self._fireSpawn, (network, cname))
-            else:
-                delay = self.registryValue('postInitDelay')
-                name = "DuckHuntPro:plan:%s:%s" % (network, cname)
-                self._scheduleEvent(name, now + delay, self._planDay, (network, cname))
+                    self._scheduleEvent(self._flightName(network, cname, t), t,
+                                        self._fireSpawn, (network, cname))
+            elif self.registryValue('method') == 2:
+                self._schedulePlanAfterDelay(network, cname)
 
             for entry in futurePending:
                 name = "DuckHuntPro:special:%s:%s:%s:%r" % (
@@ -304,17 +342,40 @@ class DuckHuntPro(callbacks.Plugin):
         if not ircutils.strEqual(msg.nick, irc.nick):
             return
         channel = msg.args[0]
+        network = irc.network
+        self._hookEnabled(network, channel)
         if not self.registryValue('enabled', channel):
             return
-        network = irc.network
         chan = self.db.channel(network, channel)
         with self.db.lock:
             hasFuture = any(t > time.time() for t in chan.get('planned_flights', []))
-        if not hasFuture:
-            delay = self.registryValue('postInitDelay')
-            name = "DuckHuntPro:plan:%s:%s" % (network, channel.lower())
-            self._scheduleEvent(name, time.time() + delay, self._planDay, (network, channel))
+        if not hasFuture and self.registryValue('method') == 2:
+            self._schedulePlanAfterDelay(network, channel)
         self._scheduleGunHandBack(network, channel)
+
+    def _hookEnabled(self, network, channelName):
+        """Duck_Hunt.tcl hooks `.chanset +/-DuckHunt` to re-plan at once;
+        this watches the channel's `enabled` setting the same way."""
+        key = (network.lower(), channelName.lower())
+        if key in self._enabledHooks:
+            return
+        value = self.registryValue('enabled', channelName, value=False)
+        state = {'on': bool(self.registryValue('enabled', channelName))}
+
+        def changed():
+            on = bool(self.registryValue('enabled', channelName))
+            if on != state['on']:
+                state['on'] = on
+                self._onEnabledChanged(network, channelName, on)
+        value.addCallback(changed)
+        self._enabledHooks[key] = (value, changed)
+
+    def _onEnabledChanged(self, network, channelName, on):
+        if on:
+            if self.registryValue('method') == 2:
+                self._planDay(network, channelName)
+        else:
+            self._cancelFlights(network, channelName)
 
     # -----------------------------------------------------------------
     # Nick-change stat fusion
@@ -504,46 +565,83 @@ class DuckHuntPro(callbacks.Plugin):
                 pass
         return hours
 
-    def _planDay(self, network, channelName):
-        """Pre-computes this channel's duck-flight times for the next 24h,
-        matching the original script's method=2 (scheduled) spawning.
-
-        Active bread adds extra flight slots (data.BREAD_EXTRA_DUCKS_PER_PIECE
-        per piece), matching Duck_Hunt.tcl's plan_out_flights. Unlike the
-        original, buying bread mid-day doesn't force an immediate replan of
-        today's already-built schedule here -- the boost takes effect on the
-        next time this channel's day gets (re)planned, which is how this
-        self-rescheduling chain already refreshes on its own. Documented as
-        a deliberate simplification, not an oversight."""
+    def _planDay(self, network, channelName, reason=None, now=None):
+        """Port of Duck_Hunt.tcl's plan_out_flights for method 2: plans the
+        day's flights as clock times. Each duck gets an hour drawn without
+        replacement from the allowed (non-sleeping) hours -- the pool is
+        refilled when it runs out -- and a random minute (00:00 becomes
+        00:01; a taken minute is re-rolled). Active bread adds one flight
+        per piece. A replan after bread was bought or expired keeps the
+        nearest upcoming time so frequent replans don't thin the ducks out.
+        Only the times still ahead of now fire today, as with the original's
+        binds (they would fire tomorrow too, but midnight replans first).
+        Returns the planned 'HH:MM' strings. (`now` is for tests.)"""
         chan = self.db.channel(network, channelName)
-        breadCount = db.activeBreadCount(chan, time.time())
-        n = self.registryValue('ducksPerDay', channelName) + breadCount * data.BREAD_EXTRA_DUCKS_PER_PIECE
+        if (self.registryValue('method') != 2
+                or not self.registryValue('enabled', channelName)):
+            self._cancelFlights(network, channelName)
+            with self.db.lock:
+                chan['planned_soarings'] = []
+            self.db.save()
+            return []
+        self._cancelFlights(network, channelName)
+        now = now if now is not None else time.time()
         sleepHours = self._sleepHours(channelName)
-        now = time.time()
+        reference = ['%02d' % h for h in range(24) if h not in sleepHours]
+        if not reference:
+            return []
+        breadCount = db.activeBreadCount(chan, now)
+        perDay = self.registryValue('ducksPerDay', channelName) + breadCount * data.BREAD_EXTRA_DUCKS_PER_PIECE
+        keep = None
+        # (precedence as in the Tcl: bread_added always; bread_expired only
+        # with bread left and after the post-init delay)
+        if reason == 'bread_added' or (reason == 'bread_expired' and breadCount > 0
+                                       and self._postInitDone):
+            current = datetime.fromtimestamp(now).strftime('%H,%M')
+            for scanned in sorted(chan.get('planned_soarings', [])):
+                if scanned.replace(':', ',', 1) > current:
+                    keep = scanned
+                    break
+        hours = list(reference)
+        soarings = []
+        for number in range(1, perDay + 1):
+            if keep is not None and number == 1:
+                hour, minute = keep.split(':')
+            else:
+                hour = hours.pop(self._rng.randint(0, len(hours) - 1))
+                if not hours:
+                    hours = list(reference)
+                minute = '%02d' % self._rng.randint(0, 59)
+                if hour == '00' and minute == '00':
+                    minute = '01'
+            while '%s:%s' % (hour, minute) in soarings:
+                minute = '%02d' % self._rng.randint(0, 59)
+            soarings.append('%s:%s' % (hour, minute))
+        today = datetime.fromtimestamp(now)
         times = []
-        attempts = 0
-        while len(times) < n and attempts < n * 20:
-            attempts += 1
-            t = now + self._rng.uniform(0, 86400)
-            if sleepHours and datetime.fromtimestamp(t).hour in sleepHours:
-                continue
-            times.append(t)
+        for entry in soarings:
+            h, m = (int(x) for x in entry.split(':'))
+            at = today.replace(hour=h, minute=m, second=0, microsecond=0).timestamp()
+            if at > now:
+                times.append(at)
         times.sort()
-
         with self.db.lock:
+            chan['planned_soarings'] = soarings
             chan['planned_flights'] = times
         self.db.save()
-
-        cname = channelName.lower()
         for t in times:
-            name = "DuckHuntPro:flight:%s:%s:%r" % (network, cname, t)
-            self._scheduleEvent(name, t, self._fireSpawn, (network, channelName))
+            self._scheduleEvent(self._flightName(network, channelName, t), t,
+                                self._fireSpawn, (network, channelName))
+        return soarings
 
-        if times:
-            name = "DuckHuntPro:plan:%s:%s" % (network, cname)
-            self._scheduleEvent(name, times[-1] + 1, self._planDay, (network, channelName))
+    def _plannedText(self, network, channelName):
+        chan = self.db.getChannel(network, channelName)
+        return ', '.join(sorted(chan.get('planned_soarings', []))) if chan else ''
 
     def _fireSpawn(self, network, channelName):
+        """A planned (or method-1) flight is due. Skipped when a duck already
+        flew in this very second -- the original's guard against Eggdrop
+        timer drift launching two."""
         irc = self._getIrc(network)
         if irc is None:
             return
@@ -551,7 +649,81 @@ class DuckHuntPro(callbacks.Plugin):
             return
         if channelName not in irc.state.channels:
             return
+        chan = self.db.channel(network, channelName)
+        last = chan.get('last_duck_at')
+        if last is not None and int(time.time()) == int(last):
+            return
         self._spawnDuck(irc, channelName)
+
+    # -----------------------------------------------------------------
+    # Midnight replan, the per-minute tick (bread expiry, method 1)
+    # -----------------------------------------------------------------
+
+    def _scheduleMidnight(self):
+        nxt = (datetime.now() + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0).timestamp()
+        self._scheduleEvent("DuckHuntPro:midnight:%r" % nxt, nxt, self._midnight, ())
+
+    def _midnight(self):
+        """The original replans every channel's flights at 00:00 (method 2)."""
+        try:
+            if self.registryValue('method') == 2:
+                for irc in list(world.ircs):
+                    for cname in list(irc.state.channels.keys()):
+                        if self.registryValue('enabled', cname):
+                            self._planDay(irc.network, cname)
+        finally:
+            self._scheduleMidnight()
+
+    def _scheduleMinuteTick(self):
+        at = (int(time.time() // 60) + 1) * 60
+        self._scheduleEvent("DuckHuntPro:tick:%r" % at, at, self._minuteTick, ())
+
+    def _minuteTick(self):
+        try:
+            self._expireBread()
+            if self.registryValue('method') == 1:
+                self._checkBushes()
+        finally:
+            self._scheduleMinuteTick()
+
+    def _expireBread(self):
+        """Duck_Hunt.tcl's check_for_expired_pieces_of_bread: expired pieces
+        go away one by one, each triggering a replan (method 2)."""
+        now = time.time()
+        for irc in list(world.ircs):
+            for cname in list(irc.state.channels.keys()):
+                if (not self.registryValue('enabled', cname)
+                        or not self.registryValue('shopEnabled', cname)):
+                    continue
+                chan = self.db.getChannel(irc.network, cname)
+                if not chan or not chan.get('bread'):
+                    continue
+                with self.db.lock:
+                    expired = [b for b in chan['bread'] if b['expires_at'] < now]
+                    chan['bread'] = [b for b in chan['bread'] if b['expires_at'] >= now]
+                if expired:
+                    self.db.save()
+                    for _ in expired:
+                        self._onBreadChanged(irc.network, cname, 'bread_expired')
+
+    def _checkBushes(self):
+        """Method 1: every minute each enabled channel gets a chance of a
+        flight, outside the ducks' sleeping hours; each piece of bread adds
+        two chances per day."""
+        now = datetime.now()
+        for irc in list(world.ircs):
+            for cname in list(irc.state.channels.keys()):
+                if not self.registryValue('enabled', cname):
+                    continue
+                sleepHours = self._sleepHours(cname)
+                span = 1440 - len(sleepHours) * 60
+                if now.hour in sleepHours or span <= 0:
+                    continue
+                chan = self.db.channel(irc.network, cname)
+                extra = 2 * db.activeBreadCount(chan, time.time())
+                if self._rng.randint(1, span) <= self.registryValue('ducksPerDay', cname) + extra:
+                    self._fireSpawn(irc.network, cname)
 
     def _fireSpecialSpawn(self, network, channelName, firesAt):
         """Fires a decoy- or fake_duck-purchased spawn scheduled by
@@ -590,12 +762,23 @@ class DuckHuntPro(callbacks.Plugin):
         name = "DuckHuntPro:special:%s:%s:%s:%r" % (network, channelName.lower(), kind, firesAt)
         self._scheduleEvent(name, firesAt, self._fireSpecialSpawn, (network, channelName, firesAt))
 
-    def _onBreadChanged(self, network, channelName, reason):
-        """Hook for the original's plan_out_flights(chan, bread_added /
-        bread_expired): the day's flights get replanned when bread is bought
-        or runs out. reason is 'bread_added' or 'bread_expired'. (Replanning
-        is implemented in the scheduling phase; until then this does nothing.)"""
-        return None
+    def _onBreadChanged(self, network, channelName, reason, who=None):
+        """Bread was bought ('bread_added') or ran out ('bread_expired'):
+        the day's flights are replanned (method 2), as the original's
+        replan_flights does, and the replan is logged when
+        showBreadReplanning is on."""
+        if (self.registryValue('method') != 2
+                or not self.registryValue('enabled', channelName)):
+            return
+        if reason == 'bread_expired' and not self._postInitDone:
+            return
+        self._planDay(network, channelName, reason)
+        if self.registryValue('showBreadReplanning', channelName):
+            listing = self._plannedText(network, channelName)
+            text = (self._t(channelName, 'm346', 'DuckHuntPro', channelName, listing)
+                    if reason == 'bread_expired' else
+                    self._t(channelName, 'm345', 'DuckHuntPro', who or '?', channelName, listing))
+            self.log.info(ircutils.stripFormatting(text))
 
     def _currentEscapeTime(self, network, channelName, now):
         base = self.registryValue('escapeTime', channelName)
@@ -1723,7 +1906,7 @@ class DuckHuntPro(callbacks.Plugin):
                     out(t('m387', nick, maxBread, channel))
                 else:
                     db.addBread(chan, now, data.BREAD_DURATION)
-                    self._onBreadChanged(network, channel, 'bread_added')
+                    self._onBreadChanged(network, channel, 'bread_added', nick)
                     count = len(chan['bread'])
                     output = t('m347', nick, cost, plural, count,
                                messages.plural(count, t('m348'), t('m349')), channel)
@@ -1901,56 +2084,67 @@ class DuckHuntPro(callbacks.Plugin):
             irc.reply(messages.get(lang, 'admin_delete_ok', nick=nick))
         delete = wrap(delete, ['admin', 'channel', 'somethingWithoutSpaces'])
 
+        def _checked(self, irc, msg, channel):
+            """The original's shared channel checks for planning, replanning
+            and launch: returns False (after a NOTICE) when the channel is
+            unknown to the bot or the game is off there."""
+            p = self.plugin
+            if channel not in irc.state.channels:
+                p._out(irc, channel, msg.nick, p._t(channel, 'm75', channel), 'notice')
+            elif not p.registryValue('enabled', channel):
+                p._out(irc, channel, msg.nick,
+                       p._t(channel, 'm76', 'DuckHuntPro', channel), 'notice')
+            else:
+                return True
+            return False
+
         def planning(self, irc, msg, args, channel):
             """[<channel>]
-            Shows the local time (HH:MM) of every duck flight currently
-            planned for today on this channel, matching Duck_Hunt.tcl's
-            duckplanning output.
+            Shows today's planned duck flights on <channel> (method 2).
             """
             p = self.plugin
-            lang = p.registryValue('language', channel)
-            chan = p.db.getChannel(irc.network, channel)
-            flights = sorted(chan.get('planned_flights', [])) if chan else []
-            if not flights:
-                irc.reply(messages.get(lang, 'admin_planning_empty'))
+            if p.registryValue('method') != 2:
+                irc.error('Flights are not planned in advance (method is not 2).')
                 return
-            times = ', '.join(datetime.fromtimestamp(t).strftime('%H:%M') for t in flights)
-            irc.reply(messages.get(lang, 'admin_planning_line', channel=channel, times=times))
+            if not self._checked(irc, msg, channel):
+                return
+            if not p._postInitDone:
+                p._out(irc, channel, msg.nick, p._t(channel, 'm243', 'DuckHuntPro'), 'notice')
+                return
+            listing = p._plannedText(irc.network, channel)
+            p._out(irc, channel, msg.nick, p._t(channel, 'm81', channel, listing)
+                   if listing else p._t(channel, 'm154', channel), 'notice')
         planning = wrap(planning, ['admin', 'channel'])
 
         def replanning(self, irc, msg, args, channel):
             """[<channel>]
-            Forces an immediate recompute of this channel's remaining duck
-            schedule (same logic as the daily self-replan, triggered
-            early), then shows the new times -- matching Duck_Hunt.tcl's
-            duckreplanning output.
+            Computes a different flight plan for the rest of today on
+            <channel> (method 2) and shows it.
             """
             p = self.plugin
-            network = irc.network
-            lang = p.registryValue('language', channel)
-            chan = p.db.getChannel(network, channel)
-            if chan:
-                for t in chan.get('planned_flights', []):
-                    p._unschedule("DuckHuntPro:flight:%s:%s:%r" % (network, channel.lower(), t))
-                p._unschedule("DuckHuntPro:plan:%s:%s" % (network, channel.lower()))
-            p._planDay(network, channel)
-            chan = p.db.getChannel(network, channel)
-            flights = sorted(chan.get('planned_flights', [])) if chan else []
-            times = ', '.join(datetime.fromtimestamp(t).strftime('%H:%M') for t in flights)
-            irc.reply(messages.get(lang, 'admin_replanning_ok', channel=channel, times=times))
+            if p.registryValue('method') != 2:
+                irc.error('Flights are not planned in advance (method is not 2).')
+                return
+            if not self._checked(irc, msg, channel):
+                return
+            if not p._postInitDone:
+                p._out(irc, channel, msg.nick, p._t(channel, 'm243', 'DuckHuntPro'), 'notice')
+                return
+            soarings = p._planDay(irc.network, channel)
+            p._out(irc, channel, msg.nick,
+                   p._t(channel, 'm149', channel, ', '.join(sorted(soarings))), 'notice')
         replanning = wrap(replanning, ['admin', 'channel'])
 
         def launch(self, irc, msg, args, channel, golden):
-            """[<channel>] [golden]
-            Immediately force-spawns a duck, bypassing the schedule
-            entirely. Pass a true value to force it golden. Adds to
-            whatever's already in flight -- matches Duck_Hunt.tcl's
-            !ducklaunch, which never checks for an existing duck either.
+            """[<channel>] [<golden: 0|1>]
+            Makes a duck fly right now on <channel>; golden is 0 (the
+            default: never golden) or 1 (golden). It adds to whatever is
+            already flying and, like the original, says nothing back.
             """
-            p = self.plugin
-            lang = p.registryValue('language', channel)
-            p._spawnDuck(irc, channel, forceGolden=bool(golden))
-            irc.reply(messages.get(lang, 'admin_launch_ok'))
+            if not self._checked(irc, msg, channel):
+                return
+            self.plugin._spawnDuck(irc, channel, forceGolden=bool(golden),
+                                   forceNonGolden=not golden)
         launch = wrap(launch, ['admin', 'channel', optional('boolean')])
 
         def export(self, irc, msg, args, channel):

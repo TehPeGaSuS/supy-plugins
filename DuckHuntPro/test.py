@@ -65,17 +65,27 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         """Conf values are process-global and survive from one test method to
         the next, so a test that flips an option (and forgets to flip it
         back) silently changes every test that runs after it. Start each test
-        from the registry defaults instead."""
+        from the registry defaults instead, and make the per-channel values
+        inherit from them again (a channel value that was set explicitly stops
+        following its parent)."""
         for name, value in conf.supybot.plugins.DuckHuntPro.getValues(getChildren=True):
-            if '.web.' in name:       # its callbacks start/stop the HTTP server
-                continue
+            if '.web.' in name or '.#' in name or '.:' in name:
+                continue     # the web group's callbacks start/stop the HTTP server
             if hasattr(value, '_default') and hasattr(value, 'setValue'):
                 value.setValue(value._default)
+                for child in list(getattr(value, '_children', {}).values()):
+                    if hasattr(child, '_setValue'):
+                        child._setValue(value.value, inherited=True)
 
     def setUp(self):
         super().setUp()
         self._resetConfig()
         conf.supybot.plugins.DuckHuntPro.enabled.setValue(True)
+        self._cb()._postInitDone = True      # the post-init delay has "elapsed"
+        # Enabling the channel just now planned a day (the `enabled` hook); tests
+        # start without one.
+        self._cb()._cancelFlights(self.irc.network, self.channel)
+        self._cb().db.channel(self.irc.network, self.channel)['planned_soarings'] = []
         # Drops are rolled per-key with a bottomless RNG queue in most
         # tests; leaving this on would let an exhausted ScriptedRNG queue
         # (which falls back to returning its lower bound, 1) silently
@@ -1240,7 +1250,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def testBuyBreadStacksAndTellsTheCount(self):
         cb = self._cb()
         calls = []
-        cb._onBreadChanged = lambda network, channel, reason: calls.append(reason)
+        cb._onBreadChanged = lambda network, channel, reason, who=None: calls.append(reason)
         c = data.ITEM_COSTS['bread']
         for n in (1, 2):
             self.assertEqual(self._shopRun('21'), [self._breadMsg(n)])
@@ -1339,7 +1349,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._planDay(network, self.channel)
         expectedCount = (cb.registryValue('ducksPerDay', self.channel)
                           + 2 * data.BREAD_EXTRA_DUCKS_PER_PIECE)
-        self.assertEqual(len(chan['planned_flights']), expectedCount)
+        self.assertEqual(len(chan['planned_soarings']), expectedCount)
 
     def testDuckDetectorNotifiesOnNextSpawn(self):
         cb = self._cb()
@@ -2245,30 +2255,235 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def testAdminPlanningShowsTimeList(self):
         cb = self._cb()
         chan = cb.db.channel(self.irc.network, self.channel)
-        t1 = datetime(2026, 1, 1, 3, 14).timestamp()
-        t2 = datetime(2026, 1, 1, 9, 5).timestamp()
-        chan['planned_flights'] = [t2, t1]  # out of order on purpose
+        chan['planned_soarings'] = ['09:05', '03:14']   # out of order on purpose
         cb.db.save()
-        m = self.assertNotError('admin planning')
-        self.assertTrue('03:14' in m.args[1] and '09:05' in m.args[1])
-        self.assertTrue(m.args[1].index('03:14') < m.args[1].index('09:05'))  # sorted
+        self.assertEqual(self._texts(self._cmd('admin planning'), 'NOTICE'),
+                         [messages.tcl('en', 'm81', self.channel, '03:14, 09:05')])
 
     def testAdminPlanningEmpty(self):
-        self.assertRegexp('admin planning', 'No flights')
+        self.assertEqual(self._texts(self._cmd('admin planning'), 'NOTICE'),
+                         [messages.tcl('en', 'm154', self.channel)])
 
     def testAdminReplanningRebuildsSchedule(self):
         cb = self._cb()
-        m = self.assertNotError('admin replanning')
+        sent = self._texts(self._cmd('admin replanning'), 'NOTICE')
         chan = cb.db.getChannel(self.irc.network, self.channel)
-        self.assertTrue(len(chan['planned_flights']) > 0)
-        # Message shows the actual new times, not just a generic "done".
-        self.assertTrue(re.search(r'\d{2}:\d{2}', m.args[1]))
+        self.assertEqual(len(chan['planned_soarings']), cb.registryValue('ducksPerDay', self.channel))
+        # the reply lists the new plan, sorted
+        self.assertEqual(sent, [messages.tcl(
+            'en', 'm149', self.channel, ', '.join(sorted(chan['planned_soarings'])))])
+
+    # ---- parity with Duck_Hunt.tcl's flight planning --------------------
+
+    NOON = datetime(2026, 1, 1, 12, 0).timestamp()
+
+    def _planTo(self, now=None, reason=None, **config):
+        """Plans with the scheduler stubbed out; returns (soarings, [(name, at)])."""
+        cb = self._cb()
+        calls = []
+        cb._scheduleEvent = lambda name, at, f, args: calls.append((name, at))
+        try:
+            for key, value in config.items():
+                getattr(conf.supybot.plugins.DuckHuntPro, key).setValue(value)
+            soarings = cb._planDay(self.irc.network, self.channel, reason, now)
+        finally:
+            del cb._scheduleEvent
+        return soarings, calls
+
+    def testPlanDrawsEachAllowedHourOnceBeforeReusingAny(self):
+        # 24 hours, 18 ducks: no hour twice
+        soarings, _ = self._planTo(self.NOON)
+        hours = [s.split(':')[0] for s in soarings]
+        self.assertEqual(len(soarings), 18)
+        self.assertEqual(len(set(hours)), 18)
+
+    def testPlanSkipsTheSleepingHours(self):
+        soarings, _ = self._planTo(self.NOON, duckSleepHours='0 1 2 3 4 5')
+        hours = sorted(int(s.split(':')[0]) for s in soarings)
+        self.assertEqual(hours, list(range(6, 24)))     # 18 ducks, 18 hours: each once
+
+    def testPlanRefillsTheHourPoolWhenItRunsOut(self):
+        soarings, _ = self._planTo(self.NOON, ducksPerDay=30)
+        counts = {}
+        for s in soarings:
+            counts[s.split(':')[0]] = counts.get(s.split(':')[0], 0) + 1
+        self.assertEqual(len(soarings), 30)
+        self.assertEqual(sorted(counts.values()), [1] * 18 + [2] * 6)
+
+    def testPlanNeverPicksMidnightSharp(self):
+        cb = self._cb()
+        cb._rng = ScriptedRNG([0, 0])          # hour index 0 = '00', minute 0
+        soarings, _ = self._planTo(self.NOON, ducksPerDay=1)
+        self.assertEqual(soarings, ['00:01'])
+
+    def testPlanRerollsATakenMinute(self):
+        cb = self._cb()
+        # only hour 05 is awake: hour pick, minute 10, hour pick, minute 10 (taken), minute 11
+        cb._rng = ScriptedRNG([0, 10, 0, 10, 11])
+        soarings, _ = self._planTo(self.NOON, ducksPerDay=2,
+                                   duckSleepHours=' '.join(str(h) for h in range(24) if h != 5))
+        self.assertEqual(soarings, ['05:10', '05:11'])
+
+    def testOnlyTheTimesStillAheadAreScheduled(self):
+        soarings, calls = self._planTo(self.NOON)
+        ahead = [s for s in soarings if s > '12:00']
+        self.assertEqual(len(calls), len(ahead))
+        self.assertTrue(all(at > self.NOON for _, at in calls))
+        chan = self._cb().db.getChannel(self.irc.network, self.channel)
+        self.assertEqual(len(chan['planned_flights']), len(ahead))
+        self.assertEqual(len(chan['planned_soarings']), 18)       # the whole plan is kept
+
+    def testBreadReplanKeepsTheNearestUpcomingTime(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['planned_soarings'] = ['20:00', '03:00', '13:30']
+        soarings, _ = self._planTo(self.NOON, reason='bread_added')
+        self.assertEqual(soarings[0], '13:30')
+        self.assertEqual(len(soarings), 18)
+
+    def testBreadExpiredReplanOnlyKeepsATimeWhileBreadRemains(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['planned_soarings'] = ['13:30']
+        cb._rng = ScriptedRNG([])               # all hours/minutes come out as the lowest
+        soarings, _ = self._planTo(self.NOON, reason='bread_expired')
+        self.assertNotEqual(soarings[0], '13:30')            # no bread left: fresh plan
+        chan['planned_soarings'] = ['13:30']
+        db.addBread(chan, self.NOON, data.BREAD_DURATION)
+        soarings, _ = self._planTo(self.NOON, reason='bread_expired')
+        self.assertEqual(soarings[0], '13:30')
+
+    def testBreadHookReplansAndLogs(self):
+        cb = self._cb()
+        plans = []
+        cb._planDay = lambda network, channel, reason=None, now=None: plans.append(reason) or ['07:07']
+        cb._onBreadChanged(self.irc.network, self.channel, 'bread_added', 'bob')
+        cb._onBreadChanged(self.irc.network, self.channel, 'bread_expired')
+        self.assertEqual(plans, ['bread_added', 'bread_expired'])
+
+    def testNoReplanOnBreadWhenMethodIsOne(self):
+        cb = self._cb()
+        plans = []
+        cb._planDay = lambda *a, **k: plans.append(1)
+        conf.supybot.plugins.DuckHuntPro.method.setValue(1)
+        cb._onBreadChanged(self.irc.network, self.channel, 'bread_added', 'bob')
+        self.assertEqual(plans, [])
+
+    def testExpiredBreadIsRemovedOneByOneWithAReplanEach(self):
+        cb = self._cb()
+        calls = []
+        cb._onBreadChanged = lambda network, channel, reason, who=None: calls.append(reason)
+        chan = cb.db.channel(self.irc.network, self.channel)
+        now = time.time()
+        chan['bread'] = [{'expires_at': now - 5}, {'expires_at': now - 1},
+                         {'expires_at': now + 600}]
+        cb._expireBread()
+        self.assertEqual(calls, ['bread_expired', 'bread_expired'])
+        self.assertEqual(len(chan['bread']), 1)
+
+    def testCountingBreadDoesNotRemoveExpiredPieces(self):
+        chan = self._cb().db.channel(self.irc.network, self.channel)
+        now = time.time()
+        chan['bread'] = [{'expires_at': now - 5}, {'expires_at': now + 600}]
+        self.assertEqual(db.activeBreadCount(chan, now), 1)
+        self.assertEqual(len(chan['bread']), 2)
+
+    def testMidnightReplansEnabledChannelsAndSchedulesTheNextMidnight(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['planned_soarings'] = []
+        for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:midnight:')]:
+            cb._unschedule(name)
+        cb._midnight()
+        self.assertEqual(len(chan['planned_soarings']), 18)
+        names = [n for n in cb._scheduled if n.startswith('DuckHuntPro:midnight:')]
+        self.assertEqual(len(names), 1)
+        at = float(names[0].rsplit(':', 1)[1])
+        dt = datetime.fromtimestamp(at)
+        self.assertEqual((dt.hour, dt.minute, dt.second), (0, 0, 0))
+        self.assertTrue(at > time.time())
+        cb._unschedule(names[0])
+
+    def testPlannedFlightIsSkippedWhenADuckJustFlew(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = time.time()
+        cb._fireSpawn(self.irc.network, self.channel)
+        self.assertTrue(self._key() not in cb._activeDuck)
+        chan['last_duck_at'] = time.time() - 5
+        cb._fireSpawn(self.irc.network, self.channel)
+        self.assertTrue(self._key() in cb._activeDuck)
+        cb._removeDuck(self.irc.network, self.channel)
+
+    def testMethodOneRollsEveryMinuteOutsideSleepHours(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.method.setValue(1)
+        cb._rng = ScriptedRNG([18])                    # 18 <= 18 ducks per day: a flight
+        cb._checkBushes()
+        self.assertTrue(self._key() in cb._activeDuck)
+        cb._removeDuck(self.irc.network, self.channel)
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = None
+        cb._rng = ScriptedRNG([19])                    # just over: nothing
+        cb._checkBushes()
+        self.assertTrue(self._key() not in cb._activeDuck)
+
+    def testMethodOneChanceGrowsWithBreadAndRespectsSleepHours(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.method.setValue(1)
+        chan = cb.db.channel(self.irc.network, self.channel)
+        db.addBread(chan, time.time(), data.BREAD_DURATION)
+        cb._rng = ScriptedRNG([20])                    # 18 + 2 per piece of bread
+        cb._checkBushes()
+        self.assertTrue(self._key() in cb._activeDuck)
+        cb._removeDuck(self.irc.network, self.channel)
+        chan['last_duck_at'] = None
+        conf.supybot.plugins.DuckHuntPro.duckSleepHours.setValue(
+            ' '.join(str(h) for h in range(24)))        # everybody sleeps
+        cb._rng = ScriptedRNG([1])
+        cb._checkBushes()
+        self.assertTrue(self._key() not in cb._activeDuck)
+
+    def testMethodOnePlansNothing(self):
+        conf.supybot.plugins.DuckHuntPro.method.setValue(1)
+        self.assertEqual(self._cb()._planDay(self.irc.network, self.channel), [])
+
+    def testEnablingAChannelPlansItAndDisablingCancelsTheFlights(self):
+        cb = self._cb()
+        value = cb.registryValue('enabled', self.channel, value=False)
+        chan = cb.db.channel(self.irc.network, self.channel)
+        try:
+            value.setValue(False)
+            self.assertEqual(chan['planned_flights'], [])
+            value.setValue(True)
+            self.assertEqual(len(chan['planned_soarings']), 18)
+            value.setValue(False)
+            self.assertEqual(chan['planned_flights'], [])
+        finally:
+            value.setValue(True)
+            cb._cancelFlights(self.irc.network, self.channel)
 
     def testAdminLaunchForcesImmediateSpawn(self):
         cb = self._cb()
-        self.assertNotError('admin launch')
+        sent = self._cmd('admin launch')
         self.assertTrue(self._key() in cb._activeDuck)
+        self.assertEqual([x for c, _, x in sent if c in ('PRIVMSG', 'NOTICE')],
+                         [messages.tcl('en', 'm135')])        # just the flight announcement
         cb._removeDuck(self.irc.network, self.channel)
+
+    def testAdminLaunchIsNeverGoldenUnlessAsked(self):
+        cb = self._cb()
+        for arg, golden in (('', False), (' 0', False), (' 1', True)):
+            cb._activeDuck.pop(self._key(), None)
+            cb._rng = ScriptedRNG([0, 3])     # a golden roll would succeed with 0
+            self._cmd('admin launch' + arg)
+            self.assertEqual(cb._activeDuck[self._key()][0]['is_golden'], golden, arg)
+        cb._removeDuck(self.irc.network, self.channel)
+
+    def testAdminCommandsRefuseADisabledChannel(self):
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        self.assertEqual(self._texts(self._cmd('admin launch'), 'NOTICE'),
+                         [messages.tcl('en', 'm76', 'DuckHuntPro', self.channel)])
 
     def testAdminLaunchAddsToExistingDucksInsteadOfBlocking(self):
         # Matches Duck_Hunt.tcl's !ducklaunch: never checks for an existing
