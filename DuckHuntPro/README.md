@@ -112,9 +112,12 @@ the rest are global:
 - `method`, `postInitDelay`, `autoRefillAmmoTime`, `backupTime`,
   `quarterlyResetEnabled`, `huntingLogs`, `huntingLogDirectory`,
   `anonymPrefix`, `warnOnRename`, `warnOnTakeover`, `pendingTransfersMaxAge`
-- `kickViaChanServ` (the original's `kick_method 1`: sends the raw line
-  `CS KICK <channel> <nick> :<reason>`, so the network needs a `CS` alias for
-  ChanServ, as DALnet's does) and
+- `kickViaChanServ` and `chanServKickLine`, both per network (the original's
+  `kick_method 1`): the kick goes through services as the raw line in
+  `chanServKickLine`, `CS KICK {channel} {nick} :{reason}` by default (needs a
+  `CS` alias for ChanServ, as DALnet's has). For networks without it set e.g.
+  `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`, or Undernet's
+  `PRIVMSG X@channels.undernet.org :<its command>`;
   `strayBulletExemptCapability` (its `exempted_flags`: users with that
   capability never take a stray bullet)
 - the original's numbers: `xpPerDuck`, `xpPerGoldenDuckHp`, `xpLuckyShot`,

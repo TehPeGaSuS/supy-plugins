@@ -7,7 +7,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 
 from supybot.commands import *
-from supybot import callbacks, conf, ircmsgs, ircutils, schedule, world
+from supybot import callbacks, conf, ircmsgs, ircutils, registry, schedule, world
 from supybot import ircdb
 import supybot.httpserver as httpserver
 
@@ -1248,8 +1248,14 @@ class DuckHuntPro(callbacks.Plugin):
     def _kickIfOpped(self, irc, channel, nick, reason):
         """Kicks `nick`, or logs the original's m140 complaint if the bot has
         neither op nor halfop."""
-        if self.registryValue('kickViaChanServ'):
-            irc.queueMsg(ircmsgs.IrcMsg(command='CS', args=('KICK', channel, nick, reason)))
+        if self.registryValue('kickViaChanServ', network=irc.network):
+            clean = lambda s: str(s).replace('\r', ' ').replace('\n', ' ')
+            line = self.registryValue('chanServKickLine', network=irc.network).format(
+                channel=clean(channel), nick=clean(nick), reason=clean(reason))
+            try:
+                irc.queueMsg(ircmsgs.IrcMsg(s=line))
+            except Exception as e:
+                self.log.error('DuckHuntPro: bad chanServKickLine %r: %s', line, e)
             return
         try:
             state = irc.state.channels[channel]

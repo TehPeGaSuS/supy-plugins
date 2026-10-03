@@ -1769,11 +1769,36 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # the plugin builds the same table from the settings
         self.assertEqual(cb.registryValue('chancesWildFireHitSomeone.upTo10'), 77)
 
+    def _networkSetting(self, name, value):
+        setting = getattr(conf.supybot.plugins.DuckHuntPro, name).getSpecific(network=self.irc.network)
+        old = setting.value
+        self.addCleanup(setting.setValue, old)
+        setting.setValue(value)
+
     def testKicksCanGoThroughChanServ(self):
+        self._networkSetting('kickViaChanServ', True)
+        self._cb()._kickIfOpped(self.irc, self.channel, 'bob', 'boom now')
+        self.assertEqual(self._sent(), [('CS', 'KICK', 'boom now')])
+
+    def testChanServKickLineIsPerNetworkAndCustomisable(self):
+        self._networkSetting('kickViaChanServ', True)
+        self._networkSetting('chanServKickLine', 'PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}')
+        self._cb()._kickIfOpped(self.irc, self.channel, 'bob', 'you got shot')
+        self.assertEqual(self._sent(), [('PRIVMSG', 'X@channels.undernet.org',
+                                         'KICK %s bob you got shot' % self.channel)])
+
+    def testBadChanServKickLineSendsNothing(self):
+        self._networkSetting('kickViaChanServ', True)
+        self._networkSetting('chanServKickLine', '')
+        self._cb()._kickIfOpped(self.irc, self.channel, 'bob', 'x')
+        self.assertEqual(self._sent(), [])
+
+    def testKickSettingsAreOffByDefaultAndPerNetwork(self):
         cb = self._cb()
-        conf.supybot.plugins.DuckHuntPro.kickViaChanServ.setValue(True)
-        cb._kickIfOpped(self.irc, self.channel, 'bob', 'boom')
-        self.assertEqual(self._sent(), [('CS', 'KICK', 'boom')])
+        self.assertFalse(cb.registryValue('kickViaChanServ', network=self.irc.network))
+        self.assertEqual(cb.registryValue('chanServKickLine', network=self.irc.network),
+                         'CS KICK {channel} {nick} :{reason}')
+        self.assertFalse(cb.registryValue('kickViaChanServ', network='othernet'))
 
     def testStrayBulletExemptCapability(self):
         cb = self._cb()

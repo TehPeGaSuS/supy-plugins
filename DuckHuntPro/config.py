@@ -287,11 +287,18 @@ conf.registerChannelValue(DuckHuntPro, 'antifloodMsgInterval',
     become the flood)."""))
 
 
-conf.registerGlobalValue(DuckHuntPro, 'kickViaChanServ',
-    registry.Boolean(False, """Make the game's kicks with `CS KICK <channel> <nick>
-    <reason>` (Anope/Epona services, e.g. on DALnet) instead of kicking
-    directly (the original's kick_method 1). Needed when the bot has no op
-    but is allowed to use ChanServ."""))
+conf.registerNetworkValue(DuckHuntPro, 'kickViaChanServ',
+    registry.Boolean(False, """Make the game's kicks through services instead of
+    kicking directly (the original's kick_method 1), on this network. Needed
+    when the bot has no op but is allowed to use services."""))
+
+conf.registerNetworkValue(DuckHuntPro, 'chanServKickLine',
+    registry.String('CS KICK {channel} {nick} :{reason}', """The raw IRC line
+    kickViaChanServ sends on this network, with {channel}, {nick} and {reason}
+    filled in. The default is the original's `CS kick` (the network needs a CS
+    alias for ChanServ, as DALnet's has). Without an alias, for example:
+    `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`; on Undernet the
+    service is X: `PRIVMSG X@channels.undernet.org :<its command>`."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'strayBulletExemptCapability',
     registry.String('', """A capability (for example "duckhuntpro.exempt"):
