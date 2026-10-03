@@ -177,6 +177,11 @@ conf.registerChannelValue(DuckHuntPro, 'autoGunHandBackTime',
     registry.String('00:00', """Local time (HH:MM) weapons are auto-returned
     each day, when gunHandBackMode is 1."""))
 
+conf.registerGlobalValue(DuckHuntPro, 'autoRefillAmmoTime',
+    registry.String('00:00', """Local time (HH:MM) at which every player's
+    clips are refilled to their level's count each day (the original script's
+    auto_refill_ammo_time)."""))
+
 conf.registerChannelValue(DuckHuntPro, 'confiscationEnforcementOnFusion',
     registry.Boolean(False, """When a renamed player's stats would be merged
     into their new nick (see nick-change stat fusion), whether a disarmed

@@ -7,7 +7,9 @@ actually tune at runtime.
 Level table syntax mirrors the source's comment for level_grantings(n):
   "xp,precision,deflection,defense,jam,clip_size,clip_count,
    xp_missed_shot,xp_wild_shot,xp_accident"
-  - xp: XP required to reach the NEXT level (level 40's is the effective cap).
+  - xp: ABSOLUTE xp threshold (not an increment): a player is on the first
+    level whose threshold their total xp is still below (level 40's is the
+    effective cap).
   - precision: % chance to hit the duck.
   - deflection: % chance an accidental bullet ricochets off the player.
   - defense: % chance an accidental bullet is absorbed with no effect.
@@ -22,15 +24,16 @@ Level table syntax mirrors the source's comment for level_grantings(n):
 from collections import namedtuple
 
 Level = namedtuple('Level', [
-    'xp_to_next', 'accuracy', 'deflection', 'defense', 'jam_pct',
+    'xp_threshold', 'accuracy', 'deflection', 'defense', 'jam_pct',
     'clip_size', 'clip_count', 'xp_missed_shot', 'xp_wild_shot', 'xp_accident',
 ])
 
 # Index = level number (0-40). Transcribed verbatim from Duck_Hunt.cfg
-# lines 250-290 (level_grantings array). Row 0's xp_to_next is -4 in the
-# source, not a typo: the original doc says players "start at level 1 with
-# 0 xp", and levelForXp()'s cumulative walk (0 + -4 = -4, then -4 + 20 = 16)
-# reproduces exactly that -- a fresh player at 0 xp lands on level 1.
+# lines 250-290 (level_grantings array). The first column is an ABSOLUTE xp
+# threshold, as in the Tcl get_level_and_grantings: a player is on the first
+# level whose threshold their xp has not reached yet. Row 0's -4 is not a
+# typo: level 0 only exists below -4 xp, so a fresh player at 0 xp lands on
+# level 1 (its row, not row 0's, supplies their stats and clips).
 LEVELS = [
     Level(-4, 55, 0, 0, 15, 6, 1, -1, -1, -4),
     Level(20, 55, 0, 0, 15, 6, 2, -1, -1, -4),
@@ -79,17 +82,13 @@ MAX_LEVEL = len(LEVELS) - 1
 
 
 def levelForXp(xp):
-    """Returns the level index (0-40) for a given total xp."""
-    level = 0
-    total = 0
+    """Returns the level index (0-40) for a given total xp (Duck_Hunt.tcl's
+    get_level_and_grantings: the first level whose absolute xp threshold the
+    player's xp is still below; the last level is the cap)."""
     for i, lvl in enumerate(LEVELS):
-        if i == MAX_LEVEL:
+        if xp < lvl.xp_threshold:
             return i
-        total += lvl.xp_to_next
-        if xp < total:
-            return i
-        level = i + 1
-    return level
+    return MAX_LEVEL
 
 
 # Core numeric constants, cfg lines 20-121, 211-221.

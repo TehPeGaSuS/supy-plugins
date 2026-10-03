@@ -145,15 +145,75 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         prev = None
         for lvl in data.LEVELS:
             if prev is not None:
-                self.assertTrue(lvl.xp_to_next > prev,
+                self.assertTrue(lvl.xp_threshold > prev,
                                  'level xp thresholds must strictly increase')
-            prev = lvl.xp_to_next
+            prev = lvl.xp_threshold
             for pct in (lvl.accuracy, lvl.deflection, lvl.defense, lvl.jam_pct):
                 self.assertTrue(0 <= pct <= 100, 'percentage field out of range: %r' % (lvl,))
             self.assertTrue(lvl.clip_size >= 1)
             self.assertTrue(lvl.clip_count >= 1)
         # Matches the source's documented starting condition.
         self.assertEqual(data.levelForXp(0), 1)
+
+    def testLevelThresholdsAreAbsolute(self):
+        # Expected values worked out from the Tcl get_level_and_grantings over
+        # the cfg's level_grantings thresholds (-4, 20, 50, 90, ...), where a
+        # player's level is the first row whose threshold their xp is below.
+        expected = {-5: 0, -4: 1, 0: 1, 19: 1, 20: 2, 49: 2, 50: 3, 89: 3, 90: 4,
+                    200: 6, 650: 11, 2090: 20, 3500: 26, 8199: 39, 8200: 40,
+                    10000: 40, 10 ** 9: 40}
+        for xp, level in expected.items():
+            self.assertEqual(data.levelForXp(xp), level, 'xp %d' % xp)
+
+    def testDailyRefillRestoresClipsToTheLevelCount(self):
+        cb = self._cb()
+        p = cb.db.player(self.irc.network, self.channel, 'foo')
+        p['xp'] = 700          # level 12: 4 clips of 3
+        p['clip_ammo'] = 1
+        p['clips_left'] = 0
+        fresh = cb.db.player(self.irc.network, self.channel, 'bar')
+        fresh['xp'] = 700      # never initialised (clips_left is None)
+        extra = cb.db.player(self.irc.network, self.channel, 'baz')
+        extra['xp'] = 0
+        extra['clip_ammo'] = 6
+        extra['clips_left'] = 9   # e.g. from drops: refill resets to the level count
+        self.assertTrue(cb._refillAmmo())
+        self.assertEqual(p['clips_left'], data.LEVELS[data.levelForXp(700)].clip_count)
+        self.assertEqual(p['clip_ammo'], 1, 'the clip in the gun is left alone')
+        self.assertTrue(fresh['clips_left'] is None)
+        self.assertEqual(extra['clips_left'], data.LEVELS[1].clip_count)
+        self.assertFalse(cb._refillAmmo(), 'nothing left to change')
+
+    def testRefillIsScheduledDailyAtTheConfiguredTime(self):
+        cb = self._cb()
+        for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:refill:')]:
+            cb._unschedule(name)
+        conf.supybot.plugins.DuckHuntPro.autoRefillAmmoTime.setValue('04:30')
+        try:
+            cb._scheduleAmmoRefill()
+            names = [n for n in cb._scheduled if n.startswith('DuckHuntPro:refill:')]
+            self.assertEqual(len(names), 1)
+            at = float(names[0].rsplit(':', 1)[1])
+            dt = datetime.fromtimestamp(at)
+            self.assertEqual((dt.hour, dt.minute), (4, 30))
+            self.assertTrue(time.time() < at <= time.time() + 86400 + 1)
+        finally:
+            conf.supybot.plugins.DuckHuntPro.autoRefillAmmoTime.setValue('00:00')
+            for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:refill:')]:
+                cb._unschedule(name)
+
+    def testAmmoIsClampedWhenXpDropsToALowerLevel(self):
+        cb = self._cb()
+        p = cb.db.player(self.irc.network, self.channel, 'foo')
+        p['xp'] = 40       # level 2: 6 rounds, 2 clips
+        p['clip_ammo'] = 6
+        p['clips_left'] = 2
+        p['xp'] = -10      # below level 1's 20-xp threshold... and below -4: level 0
+        cb._clampAmmo(p)
+        lvl = data.LEVELS[data.levelForXp(p['xp'])]
+        self.assertTrue(p['clip_ammo'] <= lvl.clip_size)
+        self.assertTrue(p['clips_left'] <= lvl.clip_count)
+        self.assertEqual(p['clips_left'], 1)   # level 0 only gets one clip
 
     def testBangKillsDuckAndGrantsXp(self):
         cb = self._putDuck()

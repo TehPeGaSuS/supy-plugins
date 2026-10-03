@@ -109,6 +109,7 @@ class DuckHuntPro(callbacks.Plugin):
         self.shop.plugin = self
         self.admin.plugin = self
         self._reschedulePlannedFlights(irc)
+        self._scheduleAmmoRefill()
         if self.registryValue('quarterlyResetEnabled'):
             self._scheduleQuarterlyReset()
         conf.supybot.plugins.DuckHuntPro.web.enable.addCallback(self._doWebConf)
@@ -434,17 +435,65 @@ class DuckHuntPro(callbacks.Plugin):
     # Weapon confiscation + auto-return
     # -----------------------------------------------------------------
 
-    def _nextHandBackTime(self, channelName, now=None):
+    def _nextDailyTime(self, raw, now=None):
+        """Timestamp of the next local HH:MM (from the config string `raw`,
+        00:00 if it can't be parsed) strictly after `now`."""
         now = now if now is not None else time.time()
-        raw = self.registryValue('autoGunHandBackTime', channelName)
         try:
             hh, mm = (int(x) for x in raw.split(':', 1))
+            datetime(2000, 1, 1, hh, mm)
         except (ValueError, AttributeError):
             hh, mm = 0, 0
         dt = datetime.fromtimestamp(now).replace(hour=hh, minute=mm, second=0, microsecond=0)
         if dt.timestamp() <= now:
             dt = dt + timedelta(days=1)
         return dt.timestamp()
+
+    def _nextHandBackTime(self, channelName, now=None):
+        return self._nextDailyTime(
+            self.registryValue('autoGunHandBackTime', channelName), now)
+
+    # -----------------------------------------------------------------
+    # Daily clip refill (Duck_Hunt.tcl refill_ammo / auto_refill_ammo_time)
+    # -----------------------------------------------------------------
+
+    def _scheduleAmmoRefill(self):
+        at = self._nextDailyTime(self.registryValue('autoRefillAmmoTime'))
+        self._scheduleEvent("DuckHuntPro:refill:%r" % at, at, self._fireAmmoRefill, ())
+
+    def _fireAmmoRefill(self):
+        self._refillAmmo()
+        self._scheduleAmmoRefill()
+
+    def _refillAmmo(self):
+        """Every player's remaining clips go back to their level's count,
+        discarding any extras, as the original does for all players on all
+        channels. The clip currently in the gun is left alone, and players who
+        haven't played yet (no ammo initialised) get a full set on first use."""
+        changed = False
+        with self.db.lock:
+            for network in self.db.networks():
+                for cname in self.db.channels(network):
+                    for p in self.db.getChannel(network, cname)['players'].values():
+                        if p['clips_left'] is None:
+                            continue
+                        count = data.LEVELS[data.levelForXp(p['xp'])].clip_count
+                        if p['clips_left'] != count:
+                            p['clips_left'] = count
+                            changed = True
+        if changed:
+            self.db.save()
+        return changed
+
+    def _clampAmmo(self, player):
+        """Duck_Hunt.tcl's recalculate_ammo_on_lvl_change: after xp drops,
+        the clip in the gun and the clips left can't exceed what the
+        (possibly lower) level allows."""
+        lvl = data.LEVELS[data.levelForXp(player['xp'])]
+        if player['clip_ammo'] is not None:
+            player['clip_ammo'] = min(player['clip_ammo'], lvl.clip_size)
+        if player['clips_left'] is not None:
+            player['clips_left'] = min(player['clips_left'], lvl.clip_count)
 
     def _scheduleGunHandBack(self, network, channelName):
         if self.registryValue('gunHandBackMode', channelName) != 1:
@@ -817,6 +866,7 @@ class DuckHuntPro(callbacks.Plugin):
 
         if duck is None:
             player['xp'] = max(0, player['xp'] + lvl.xp_wild_shot)
+            self._clampAmmo(player)
             player['stats']['wild_shots'] += 1
             if (player['gun_state'] == 'armed'
                     and self.registryValue('gunConfiscationOnWildFire', channel)):
@@ -842,6 +892,7 @@ class DuckHuntPro(callbacks.Plugin):
 
         if self._rng.uniform(0, 100) >= accuracy:
             player['xp'] = max(0, player['xp'] + lvl.xp_missed_shot)
+            self._clampAmmo(player)
             player['stats']['missed'] += 1
             self.db.save()
             irc.reply(messages.get(lang, 'miss', nick=msg.nick, xp=lvl.xp_missed_shot))
@@ -996,6 +1047,7 @@ class DuckHuntPro(callbacks.Plugin):
             shooterPlayer['stats']['humans_shot'] += 1
             victimPlayer['stats']['bullets_received'] += 1
             shooterPlayer['xp'] = max(0, shooterPlayer['xp'] + xpAccident)
+            self._clampAmmo(shooterPlayer)
             irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
                 lang, 'accident_hit', shooter=shooterNick, victim=victimNick, xp=xpAccident)))
 
@@ -1258,6 +1310,7 @@ class DuckHuntPro(callbacks.Plugin):
 
         oldLevel = data.levelForXp(player['xp'])
         player['xp'] -= cost
+        self._clampAmmo(player)
         newLevel = data.levelForXp(player['xp'])
         self.db.save()
         irc.reply(reply or messages.get(lang, 'shop_bought', nick=nick, item=item, cost=cost))
