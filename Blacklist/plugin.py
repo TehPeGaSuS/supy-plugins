@@ -649,7 +649,7 @@ class Blacklist(callbacks.Plugin):
         if opped:
             parts.append(f"Banned in {capped(opped)}.")
         if no_op:
-            parts.append(f"No op in {capped(no_op)}, so it won't apply there.")
+            parts.append(f"I'm not op in {capped(no_op)}, so it won't be applied there.")
         if skipped:
             n = len(skipped)
             s = 's' if n != 1 else ''
