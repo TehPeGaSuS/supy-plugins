@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from supybot.commands import *
 from supybot import callbacks, conf, ircmsgs, ircutils, schedule, world
+from supybot import ircdb
 import supybot.httpserver as httpserver
 
 from . import data
@@ -1274,63 +1275,161 @@ class DuckHuntPro(callbacks.Plugin):
 
     def duckreload(self, irc, msg, args, channel):
         """[<channel>]
-        Reloads your weapon (or clears a jam).
+        Reloads your weapon, or unjams it (and reloads it if it is empty).
         """
         network = irc.network
-        lang = self.registryValue('language', channel)
-        self._checkPendingRename(irc, channel, msg.nick)
-        player = self.db.player(network, channel, msg.nick)
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
-
-        if player['gun_state'] in ('confiscated', 'confiscated_permanent'):
-            irc.reply(messages.get(lang, 'gun_not_armed', nick=msg.nick))
+        nick = msg.nick
+        self._checkPendingRename(irc, channel, nick)
+        t = lambda k, *a: self._t(channel, k, *a)
+        out = lambda text: self._out(irc, channel, nick, text)
+        player = self.db.getPlayer(network, channel, nick)
+        if player is None:
+            # Never played: the original shows the level-1 capacities, untouched.
+            lvl = data.LEVELS[data.levelForXp(1)]
+            out(t('m204', nick, lvl.clip_size, lvl.clip_size, lvl.clip_count, lvl.clip_count))
             return
+        now = time.time()
+        player['last_activity'] = now
+        try:
+            if player['gun_state'] != 'armed':
+                out(t('m5', nick))
+                return
+            key = (network.lower(), channel.lower())
+            ducks = self._activeDuck.get(key)
+            if ducks:
+                player['stats']['reflex_ms'] += int((now - ducks[0]['spawned_at']) * 1000)
+            lvl = data.LEVELS[data.levelForXp(player['xp'])]
+            self._ensureAmmo(player, lvl)
+            noAmmoLimit = self.registryValue('unlimitedAmmoPerClip', channel)
+            noClipLimit = self.registryValue('unlimitedAmmoClips', channel)
+            empty = player['clip_ammo'] <= 0 and not noAmmoLimit
+            outOfClips = player['clips_left'] <= 0 and not noClipLimit
 
-        self._ensureAmmo(player, lvl)
-
-        if player['jammed']:
-            player['jammed'] = False
+            def counters():
+                return (self._displayAmmo(player, lvl, channel),
+                        self._displayClips(player, lvl, channel))
+            if player['jammed']:
+                player['jammed'] = False
+                if empty and outOfClips:
+                    out(t('m31', nick, *counters()))          # unjammed, no ammo left
+                elif empty:
+                    player['clip_ammo'] = lvl.clip_size
+                    if not noClipLimit:
+                        player['clips_left'] -= 1
+                    out(t('m32', nick, *counters()))          # unjammed and reloaded
+                else:
+                    out(t('m33', nick, *counters()))          # just unjammed
+            elif empty:
+                if outOfClips:
+                    out(t('m34', nick, *counters()))
+                else:
+                    player['clip_ammo'] = lvl.clip_size
+                    if not noClipLimit:
+                        player['clips_left'] -= 1
+                    out(t('m35', nick, *counters()))
+            else:
+                out(t('m36', nick, *counters()))              # nothing to do
+        finally:
             self.db.save()
-            irc.reply(messages.get(lang, 'reload_ok', nick=msg.nick))
-            return
-
-        if player['clip_ammo'] >= lvl.clip_size:
-            irc.reply(messages.get(lang, 'reload_full', nick=msg.nick))
-            return
-
-        unlimitedClips = self.registryValue('unlimitedAmmoClips', channel)
-        if player['clips_left'] <= 0 and not unlimitedClips:
-            irc.reply(messages.get(lang, 'no_clips_left', nick=msg.nick))
-            return
-
-        player['clip_ammo'] = lvl.clip_size
-        if not unlimitedClips:
-            player['clips_left'] -= 1
-        self.db.save()
-        irc.reply(messages.get(lang, 'reload_ok', nick=msg.nick))
     duckreload = wrap(duckreload, ['channel'])
 
-    def duckstats(self, irc, msg, args, channel, nick):
+    @staticmethod
+    def _formatFloat(value, precision):
+        """Duck_Hunt.tcl's format_floating_point_value: fixed decimals with
+        the trailing zeros (and a dangling point) trimmed."""
+        text = ('%.' + str(precision) + 'f') % value
+        return text.rstrip('0').rstrip('.') if '.' in text else text
+
+    def _karma(self, channel, wild, humans, ducks):
+        """calculate_karma (long form)."""
+        if wild + humans + ducks == 0:
+            return self._t(channel, 'm41')
+        karma = self._formatFloat(
+            100.0 * (-((wild * 1) + (humans * 3)) + (ducks * 2))
+            / ((wild * 1) + (humans * 3) + (ducks * 2)), 2)
+        if float(karma) < 0:
+            return self._t(channel, 'm39', self._formatFloat(abs(float(karma)), 2))
+        return self._t(channel, 'm40', karma)
+
+    _STATS_INVENTORY = (('ap_ammo', 'm370'), ('explosive_ammo', 'm371'), ('grease', 'm372'),
+                        ('sight', 'm373'), ('infrared_detector', 'm374'), ('silencer', 'm375'),
+                        ('four_leaf_clover', 'm376'), ('sunglasses', 'm377'),
+                        ('life_insurance', 'm378'), ('liability_insurance', 'm379'),
+                        ('duck_detector', 'm380'))
+    _STATS_EFFECTS = (('mirror_dazzle', 'm381'), ('sand', 'm382'),
+                      ('water_bucket', 'm383'), ('sabotage', 'm384'))
+
+    def duckstats(self, irc, msg, args, channel, target):
         """[<channel>] [<nick>]
-        Shows hunting stats for you, or for <nick>.
+        Shows your hunting stats, or <nick>'s (a NOTICE).
         """
-        target = nick or msg.nick
-        lang = self.registryValue('language', channel)
+        target = target or msg.nick
         self._checkPendingRename(irc, channel, target)
+        t = lambda k, *a: self._t(channel, k, *a)
+        now = time.time()
         player = self.db.getPlayer(irc.network, channel, target)
-        if not player:
-            irc.reply("%s hasn't played DuckHuntPro here yet." % target)
-            return
-        level = data.levelForXp(player['xp'])
+        known = player is not None
+        if not known:
+            player = db._newPlayer(target)          # a fresh profile's default values
         st = player['stats']
-        bestTime = "%.2fs" % (st['best_time_ms'] / 1000.0) if st['best_time_ms'] is not None else "n/a"
-        gunState = 'jammed' if player['jammed'] else player['gun_state']
-        irc.reply(messages.get(lang, 'duckstats_header', nick=player['display_nick'],
-                                level=level, xp=player['xp']))
-        irc.reply(messages.get(lang, 'duckstats_line', killed=st['killed'],
-                                golden=st['golden_killed'], missed=st['missed'],
-                                jams=st['jams'], best_time=bestTime, gun_state=gunState))
-    duckstats = wrap(duckstats, ['channel', optional('nick')])
+        lvlIndex = data.levelForXp(player['xp'])
+        lvl = data.LEVELS[lvlIndex]
+        if not known:
+            player['clip_ammo'], player['clips_left'] = lvl.clip_size, lvl.clip_count
+        else:
+            self._ensureAmmo(player, lvl)
+        ducks, missed = st['killed'], st['missed']
+        golden = st['golden_killed']
+        neutralized = st['bullets_received'] - st['deaths'] - st['deflected']
+        reliability = 100 - lvl.jam_pct
+        reliabilityMod = ''
+        if db.itemActive(player, 'grease', now):
+            reliabilityMod += '\x0303+%d%%\x03' % int((100 - reliability) / 2)
+        if db.itemActive(player, 'sand', now):
+            reliabilityMod += '\x0304-%d%%\x03' % int(reliability / 2)
+        lang = self._lang(channel)
+        bestTime = ('-' if st['best_time_ms'] is None
+                    else messages.adaptTimeResolution(st['best_time_ms'], True, lang))
+        avgReflex = ('-' if ducks == 0 else messages.adaptTimeResolution(
+            round(st['reflex_ms'] / ducks), True, lang))
+        yes, no = t('m37'), t('m38')
+        totalFired = ducks + missed
+        effective = '%d%%' % ((100 * ducks) // totalFired) if totalFired else '-'
+        accuracyMod = ''
+        if db.itemActive(player, 'mirror_dazzle', now):
+            accuracyMod += '\x0304-%d%%\x03' % int(lvl.accuracy / 2)
+        if db.itemActive(player, 'sight', now):
+            accuracyMod += '\x0303+%d%%\x03' % int((100 - lvl.accuracy) / 3)
+        names = {k: t(m) for k, m in self._STATS_INVENTORY + self._STATS_EFFECTS}
+        inventory = [names[k] for k, _ in self._STATS_INVENTORY if db.itemActive(player, k, now)]
+        effects = [names[k] for k, _ in self._STATS_EFFECTS if db.itemActive(player, k, now)]
+        sep = ' \x0314/\x03 '
+        itemsText = t('m385', sep.join(inventory)) if inventory else ''
+        effectsText = t('m386', sep.join(effects)) if effects else ''
+        toNext = lvl.xp_threshold - player['xp']
+        p = messages.plural
+        text = t('m42',
+                 self._displayAmmo(player, lvl, channel), self._displayClips(player, lvl, channel),
+                 yes if player['jammed'] else no, st['jams'],
+                 yes if player['gun_state'] != 'armed' else no, st['confiscations'],
+                 messages.colorizeValue(player['xp']), lvlIndex, messages.lvl2rank(lvlIndex, lang),
+                 toNext, p(toNext, t('m43'), t('m44')),
+                 self._karma(channel, st['wild_shots'], st['humans_shot'], ducks),
+                 lvl.accuracy, accuracyMod, effective, reliability, reliabilityMod,
+                 lvl.defense, lvl.deflection, bestTime, avgReflex,
+                 ducks, p(ducks, t('m45'), t('m46')),
+                 golden, p(golden, t('m274'), t('m275')),
+                 missed, p(missed, t('m47'), t('m48')),
+                 st['humans_shot'], p(st['humans_shot'], t('m49'), t('m50')),
+                 st['empty_shots'], p(st['empty_shots'], t('m51'), t('m52')),
+                 st['wild_shots'], p(st['wild_shots'], t('m53'), t('m54')),
+                 totalFired, p(totalFired, t('m55'), t('m56')),
+                 st['bullets_received'], p(st['bullets_received'], t('m57'), t('m58')),
+                 st['deaths'], p(st['deaths'], t('m59'), t('m60')),
+                 st['deflected'], p(st['deflected'], t('m61'), t('m62')),
+                 neutralized, p(neutralized, t('m63'), t('m64'))) + itemsText + effectsText
+        self._out(irc, channel, msg.nick, text, 'notice')
+    duckstats = wrap(duckstats, ['channel', optional('somethingWithoutSpaces')])
 
     def duckshooters(self, irc, msg, args, channel):
         """[<channel>]
@@ -1369,16 +1468,32 @@ class DuckHuntPro(callbacks.Plugin):
 
     def lastduck(self, irc, msg, args, channel):
         """[<channel>]
-        Shows how long ago the last duck flew on this channel.
+        Shows how long ago the last duck flew on <channel>. In the channel it
+        is a normal reply; sent privately it needs the channel op capability
+        and answers with a NOTICE (the original's lastduck /msg command).
         """
-        lang = self.registryValue('language', channel)
         chan = self.db.getChannel(irc.network, channel)
         lastAt = chan.get('last_duck_at') if chan else None
-        if not lastAt:
-            irc.reply(messages.get(lang, 'lastduck_never'))
+        lang = self._lang(channel)
+        if ircutils.isChannel(msg.args[0]):
+            if not lastAt:
+                self._out(irc, channel, msg.nick, self._t(channel, 'm146', channel))
+            else:
+                self._out(irc, channel, msg.nick, self._t(channel, 'm144', messages.adaptTimeResolution(
+                    (int(time.time()) - int(lastAt)) * 1000, False, lang)))
             return
-        elapsed = time.time() - lastAt
-        irc.reply(messages.get(lang, 'lastduck', elapsed=self._formatDuration(elapsed)))
+        notice = lambda text: self._out(irc, channel, msg.nick, text, 'notice')
+        if not ircdb.checkCapability(msg.prefix, ircdb.makeChannelCapability(channel, 'op')):
+            return
+        if channel not in irc.state.channels:
+            notice(self._t(channel, 'm75', channel))
+        elif not self.registryValue('enabled', channel):
+            notice(self._t(channel, 'm76', 'DuckHuntPro', channel))
+        elif not lastAt:
+            notice(self._t(channel, 'm146', channel))
+        else:
+            notice(self._t(channel, 'm147', channel, messages.adaptTimeResolution(
+                (int(time.time()) - int(lastAt)) * 1000, False, lang)))
     lastduck = wrap(lastduck, ['channel'])
 
     # -----------------------------------------------------------------

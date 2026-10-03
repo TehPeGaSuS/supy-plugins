@@ -302,6 +302,194 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # the jam is rolled before the bullet is spent, as in the original
         self.assertEqual(player['clip_ammo'], lvl.clip_size)
 
+    # ---- parity with Duck_Hunt.tcl's reload_gun / display_stats / lastduck
+
+    def _cmd(self, command, setup=None, private=False):
+        """Runs `command` as the test user and returns what the bot sent.
+        `setup(player)` may adjust the test user's profile first."""
+        cb = self._cb()
+        if setup:
+            setup(cb.db.player(self.irc.network, self.channel, self.nick))
+            cb.db.save()
+        if private:
+            msg = ircmsgs.privmsg(self.irc.nick, command, prefix=self.prefix)
+        else:
+            msg = ircmsgs.privmsg(self.channel, '%s: %s' % (self.irc.nick, command),
+                                  prefix=self.prefix)
+        self.irc.feedMsg(msg)
+        deadline = time.time() + 2
+        sent = []
+        while not sent and time.time() < deadline:
+            time.sleep(0.05)
+            drivers.run()
+            sent = self._sent()
+        time.sleep(0.1)
+        return sent + self._sent()
+
+    def _tidy(self, p, ammo=6, clips=2, jammed=False, xp=0):
+        p.update(xp=xp, clip_ammo=ammo, clips_left=clips, jammed=jammed)
+        return p
+
+    def _player(self):
+        return self._cb().db.getPlayer(self.irc.network, self.channel, self.nick)
+
+    def testReloadWithoutAProfileShowsTheLevelOneCapacities(self):
+        sent = self._cmd('duckreload')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm204', self.nick, 6, 6, 2, 2)])
+        self.assertTrue(self._player() is None)      # reading doesn't create a profile
+
+    def testReloadWhenUnarmed(self):
+        sent = self._cmd('duckreload', setup=lambda p: p.update(gun_state='confiscated'))
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm5', self.nick)])
+
+    def testReloadReloadsAnEmptyGunAndSpendsAClip(self):
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=0, clips=2))
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm35', self.nick, '6/6', '1/2')])
+        p = self._player()
+        self.assertEqual((p['clip_ammo'], p['clips_left']), (6, 1))
+
+    def testReloadDoesNotTopUpAPartlyFullClip(self):
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=3, clips=2))
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm36', self.nick, '3/6', '2/2')])
+        p = self._player()
+        self.assertEqual((p['clip_ammo'], p['clips_left']), (3, 2))
+
+    def testReloadUnjamsOnly(self):
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=4, clips=2, jammed=True))
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm33', self.nick, '4/6', '2/2')])
+        p = self._player()
+        self.assertEqual((p['jammed'], p['clip_ammo'], p['clips_left']), (False, 4, 2))
+
+    def testReloadUnjamsAndReloadsAnEmptyGun(self):
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=0, clips=2, jammed=True))
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm32', self.nick, '6/6', '1/2')])
+        p = self._player()
+        self.assertEqual((p['jammed'], p['clip_ammo'], p['clips_left']), (False, 6, 1))
+
+    def testReloadUnjamsAnEmptyGunWithNoClipsLeft(self):
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=0, clips=0, jammed=True))
+        self.assertEqual(self._texts(sent), [messages.tcl(
+            'en', 'm31', self.nick, '\x03040\x03/6', '\x03040\x03/2')])
+        p = self._player()
+        self.assertEqual((p['jammed'], p['clip_ammo'], p['clips_left']), (False, 0, 0))
+
+    def testReloadWithUnlimitedClipsKeepsTheCount(self):
+        conf.supybot.plugins.DuckHuntPro.unlimitedAmmoClips.setValue(True)
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=0, clips=0))
+        self.assertEqual(self._texts(sent), [messages.tcl(
+            'en', 'm35', self.nick, '6/6', messages.tcl('en', 'm65'))])
+        self.assertEqual(self._player()['clips_left'], 0)
+
+    def testReloadCountsReactionTimeWhileADuckFlies(self):
+        cb = self._putDuck()
+        cb._activeDuck[self._key()][0]['spawned_at'] -= 1.5
+        self._cmd('duckreload', setup=lambda p: self._tidy(p))
+        self.assertTrue(1400 <= self._player()['stats']['reflex_ms'] <= 2200)
+
+    def _stats(self, setup=None, nick=None):
+        sent = self._cmd('duckstats' + (' ' + nick if nick else ''), setup=setup)
+        self.assertEqual([c for c, _, _ in sent], ['NOTICE'] * len(sent), sent)
+        return '\n'.join(x for _, _, x in sent)
+
+    def testDuckstatsOfAnUnknownNickShowsTheDefaults(self):
+        text = self._stats(nick='ghost')
+        self.assertIn('ammo: 6/6', text)
+        self.assertIn('charg.: 2/2', text)
+        self.assertIn('lvl 1 (', text)
+        self.assertIn('karma: neutral', text)
+        self.assertIn('best time: -', text)
+
+    def testDuckstatsShowsTheOriginalSheet(self):
+        def setup(p):
+            self._tidy(p, ammo=4, clips=1, xp=70)
+            p['stats'].update(killed=3, golden_killed=1, missed=1, empty_shots=2, humans_shot=0,
+                              wild_shots=4, bullets_received=5, deaths=1, deflected=2,
+                              jams=2, confiscations=1, best_time_ms=3500, reflex_ms=9000)
+        text = self._stats(setup)
+        lvl = data.LEVELS[data.levelForXp(70)]            # level 3
+        self.assertIn('ammo: 4/6', text)
+        self.assertIn('charg.: 1/2', text)
+        self.assertIn('jammed: no (2 times)', text)
+        self.assertIn('confisc.: no (1 times)', text)
+        self.assertIn('70 xp', text)
+        self.assertIn('lvl 3 (', text)
+        self.assertIn('/ 20 xp pts for lvl sup.', text)
+        # 4 wild, 0 humans, 3 ducks: 100 * (-4 + 6) / (4 + 6) = 20 -> good hunter
+        self.assertIn('karma: \x03033\x17' if False else 'good hunter', text)
+        self.assertIn('theor. accuracy: %d%%' % lvl.accuracy, text)
+        self.assertIn('effectiv. of fire: 75%', text)
+        self.assertIn('gun reliability: %d%%' % (100 - lvl.jam_pct), text)
+        self.assertIn('armor: %d%%' % lvl.defense, text)
+        self.assertIn('deflection: %d%%' % lvl.deflection, text)
+        self.assertIn('best time: 3.5s', text)
+        self.assertIn('average react. time: 3s', text)
+        self.assertIn('3 ducks (incl. 1 golden duck)', text)
+        self.assertIn('1 miss', text)
+        self.assertIn('4 wild shots', text)
+        self.assertIn('4 ammo used', text)
+        self.assertIn('5 stray bullets', text)
+        self.assertIn('1 lethal', text)
+        self.assertIn('2 ricocheted', text)
+        self.assertIn('2 neutralized', text)        # 5 received - 1 death - 2 ricochets
+        self.assertIn('\n', text)                    # the sheet is several lines
+        self.assertNotIn('Inventory', text)
+
+    def testDuckstatsKarmaWording(self):
+        cb = self._cb()
+        self.assertEqual(cb._karma(self.channel, 0, 0, 0), 'neutral')
+        self.assertIn('33.33%', cb._karma(self.channel, 4, 0, 1))
+        self.assertIn('bad hunter', cb._karma(self.channel, 4, 0, 1))
+        self.assertIn('good hunter', cb._karma(self.channel, 0, 0, 5))
+        self.assertIn('100%', cb._karma(self.channel, 0, 0, 5))
+
+    def testDuckstatsModifiersInventoryAndEffects(self):
+        def setup(p):
+            self._tidy(p)
+            now = time.time()
+            db.giveItem(p, 'grease', now, duration=86400)
+            db.giveItem(p, 'sand', now, duration=None, uses=1, value='bob')
+            db.giveItem(p, 'mirror_dazzle', now, duration=None, uses=1, value='bob')
+            db.giveItem(p, 'sight', now, duration=None, uses=1)
+            db.giveItem(p, 'silencer', now, duration=86400)
+            db.giveItem(p, 'water_bucket', now, duration=3600, value='bob')
+        text = self._stats(setup)
+        self.assertIn('gun reliability: 85%\x0303+7%\x03\x0304-42%\x03', text)
+        self.assertIn('theor. accuracy: 55%\x0304-27%\x03\x0303+15%\x03', text)
+        self.assertIn('Inventory', text)
+        self.assertIn('Grease \x0314/\x03 Sight \x0314/\x03 Silencer', text)
+        self.assertIn('Effects', text)
+        self.assertIn('Bedazzled \x0314/\x03 Sand \x0314/\x03 Soggy', text)
+
+    def testDuckstatsAnotherPlayerGoesToTheAsker(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, 'bob')['stats']['killed'] = 2
+        text = self._stats(nick='bob')
+        self.assertIn('2 ducks', text)
+
+    def testLastduckInTheChannel(self):
+        self.assertEqual(self._texts(self._cmd('lastduck')),
+                         [messages.tcl('en', 'm146', self.channel)])
+        chan = self._cb().db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = time.time() - 3725
+        self.assertEqual(self._texts(self._cmd('lastduck')), [messages.tcl(
+            'en', 'm144', '1 hour 2 minutes and 5 seconds')])
+
+    def testLastduckInNoticeMode(self):
+        conf.supybot.plugins.DuckHuntPro.preferredDisplayMode.setValue(2)
+        sent = self._cmd('lastduck')
+        self.assertEqual([c for c, _, _ in sent], ['NOTICE'])
+
+    def testLastduckByMessageIsANoticeWithTheChannelName(self):
+        chan = self._cb().db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = time.time() - 65
+        sent = self._cmd('lastduck %s' % self.channel, private=True)
+        self.assertEqual(sent, [('NOTICE', self.nick, messages.tcl(
+            'en', 'm147', self.channel, '1 minute and 5 seconds'))])
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        sent = self._cmd('lastduck %s' % self.channel, private=True)
+        self.assertEqual(sent, [('NOTICE', self.nick, messages.tcl(
+            'en', 'm76', 'DuckHuntPro', self.channel))])
+
     def testReloadClearsJam(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
@@ -312,16 +500,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertFalse(player['jammed'])
 
     def testReloadFullClipReportsNoOp(self):
-        self.assertRegexp('duckreload', 'already full')
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p))
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm36', self.nick, '6/6', '2/2')])
 
     def testReloadNoClipsLeftError(self):
-        cb = self._cb()
-        player = cb.db.player(self.irc.network, self.channel, self.nick)
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
-        player['clip_ammo'] = lvl.clip_size - 1
-        player['clips_left'] = 0
-        cb.db.save()
-        self.assertRegexp('duckreload', 'no spare clips')
+        sent = self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=0, clips=0))
+        self.assertEqual(self._texts(sent), [messages.tcl(
+            'en', 'm34', self.nick, '\x03040\x03/6', '\x03040\x03/2')])
 
     def testEmptyClipMessage(self):
         cb = self._cb()
