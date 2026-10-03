@@ -77,7 +77,7 @@ class DuckHuntPro(callbacks.Plugin):
                                  # bang()/accidents always target index 0
         self._scheduled = set()  # event names we've scheduled, for die()
         self._httpRunning = False
-        self._floodWindows = {}  # (network, channel, nick) -> [timestamps]
+        self._floodState = {}    # antiflood: (network, channel, command, nick) -> state
         self._postInitDone = False   # Duck_Hunt.tcl's post_init_done
         self._enabledHooks = {}      # (network, channel) -> (registry value, callback)
         self.db.dropStalePendingTransfers(self.registryValue('pendingTransfersMaxAge'))
@@ -513,25 +513,77 @@ class DuckHuntPro(callbacks.Plugin):
     # Antiflood
     # -----------------------------------------------------------------
 
-    def _floodCheck(self, network, channel, nick):
-        """Simplified from Duck_Hunt.tcl's 5 independent per-command
-        thresholds plus 1 global one down to a single per-player, rolling
-        60-second window shared across all commands -- full parity on
-        every knob wasn't judged worth the complexity for what's meant to
-        be a lightweight safety net, not a security boundary. Returns
-        False if the action should be silently dropped."""
-        if not self.registryValue('antifloodEnabled', channel):
-            return True
-        now = time.time()
-        key = (network.lower(), channel.lower(), nick.lower())
-        window = self._floodWindows.setdefault(key, [])
-        cutoff = now - 60
-        while window and window[0] < cutoff:
-            window.pop(0)
-        if len(window) >= self.registryValue('antifloodMaxPerMinute', channel):
+    _FLOOD_DEFAULTS = {'floodShoot': (30, 600), 'floodReload': (15, 120), 'floodStats': (2, 120),
+                       'floodLastduck': (1, 300), 'floodShop': (3, 600), 'floodGlobal': (30, 600)}
+
+    def _floodLimit(self, channel, key):
+        """A "requests:seconds" limit setting; the default if it is malformed."""
+        try:
+            maxInstances, length = (int(x) for x in self.registryValue(key, channel).split(':'))
+            if maxInstances > 0 and length > 0:
+                return maxInstances, length
+        except ValueError:
+            pass
+        return self._FLOOD_DEFAULTS[key]
+
+    def _floodAdvance(self, state, length, now):
+        """Replays the original's timers up to `now`: every counted use is
+        released `length` seconds after it, and the warning state goes from
+        "just warned" (2) to "may warn again" (1) once the interval is over."""
+        while True:
+            due = [(t + length, 0) for t in state['times'][:1]]
+            if state['resetAt'] is not None:
+                due.append((state['resetAt'], 1))
+            if not due or min(due)[0] > now:
+                return state
+            when, kind = min(due)
+            if kind == 1:
+                state['msg'], state['resetAt'] = 1, None
+            else:
+                state['times'].pop(0)
+                state['msg'], state['resetAt'] = 0, None
+
+    def _antiflood(self, irc, msg, channel, focus, command, limitKey, now=None):
+        """Duck_Hunt.tcl's antiflood. `focus` is 'nick' (a limit per player)
+        or 'chan' (everyone together, `command` '*'). Returns True when the
+        command must be dropped, after the original's throttled warning."""
+        now = time.time() if now is None else now
+        maxInstances, length = self._floodLimit(channel, limitKey)
+        nick = msg.nick
+        key = (irc.network.lower(), channel.lower(), command,
+               nick.lower() if focus == 'nick' else None)
+        state = self._floodState.setdefault(key, {'times': [], 'msg': 0, 'resetAt': None})
+        self._floodAdvance(state, length, now)
+        if len(state['times']) < maxInstances:
+            state['times'].append(now)
             return False
-        window.append(now)
+        t = lambda k, *a: self._t(channel, k, *a)
+        if state['msg'] in (0, 1):
+            if state['msg'] == 0:
+                counts = (maxInstances, messages.plural(maxInstances, t('m104'), t('m105')),
+                          length, messages.plural(length, t('m106'), t('m107')))
+                if command == '*':
+                    text = t('m103', 'DuckHuntPro', *counts) if focus == 'chan' else t('m421', nick, 'DuckHuntPro', *counts)
+                    kind = 'public'
+                else:
+                    text = t('m108', command, *counts) if focus == 'chan' else t('m273', nick, command, *counts)
+                    kind = 'pref'
+            else:
+                text = t('m109')
+                kind = 'public' if command == '*' else 'pref'
+            state['msg'] = 2
+            state['resetAt'] = now + self.registryValue('antifloodMsgInterval', channel)
+            self._out(irc, channel, nick, text, kind)
         return True
+
+    def _floodBlocked(self, irc, msg, channel, command, limitKey, now=None):
+        """The check at the head of every game command: the command's own
+        per-player limit, then (only when that let it through) the channel-wide
+        one. Returns True when the command is to be ignored."""
+        if not self.registryValue('antifloodEnabled', channel):
+            return False
+        return (self._antiflood(irc, msg, channel, 'nick', command, limitKey, now)
+                or self._antiflood(irc, msg, channel, 'chan', '*', 'floodGlobal', now))
 
     # -----------------------------------------------------------------
     # Weapon confiscation + auto-return
@@ -1083,11 +1135,9 @@ class DuckHuntPro(callbacks.Plugin):
         Shoots at the current duck.
         """
         network = irc.network
-        self._checkPendingRename(irc, channel, msg.nick)
-        if not self._floodCheck(network, channel, msg.nick):
-            irc.reply(messages.get(self.registryValue('language', channel),
-                                   'antiflood_blocked', nick=msg.nick))
+        if self._floodBlocked(irc, msg, channel, 'bang', 'floodShoot'):
             return
+        self._checkPendingRename(irc, channel, msg.nick)
         player = self.db.player(network, channel, msg.nick)
         try:
             self._shoot(irc, msg.nick, channel, network, player)
@@ -1500,6 +1550,8 @@ class DuckHuntPro(callbacks.Plugin):
         """
         network = irc.network
         nick = msg.nick
+        if self._floodBlocked(irc, msg, channel, 'duckreload', 'floodReload'):
+            return
         self._checkPendingRename(irc, channel, nick)
         t = lambda k, *a: self._t(channel, k, *a)
         out = lambda text: self._out(irc, channel, nick, text)
@@ -1584,6 +1636,8 @@ class DuckHuntPro(callbacks.Plugin):
         """[<channel>] [<nick>]
         Shows your hunting stats, or <nick>'s (a NOTICE).
         """
+        if self._floodBlocked(irc, msg, channel, 'duckstats', 'floodStats'):
+            return
         target = target or msg.nick
         self._checkPendingRename(irc, channel, target)
         t = lambda k, *a: self._t(channel, k, *a)
@@ -1697,6 +1751,8 @@ class DuckHuntPro(callbacks.Plugin):
         lastAt = chan.get('last_duck_at') if chan else None
         lang = self._lang(channel)
         if ircutils.isChannel(msg.args[0]):
+            if self._floodBlocked(irc, msg, channel, 'lastduck', 'floodLastduck'):
+                return
             if not lastAt:
                 self._out(irc, channel, msg.nick, self._t(channel, 'm146', channel))
             else:
@@ -1743,11 +1799,9 @@ class DuckHuntPro(callbacks.Plugin):
             return
         network = irc.network
         nick = msg.nick
-        self._checkPendingRename(irc, channel, nick)
-        if not self._floodCheck(network, channel, nick):
-            irc.reply(messages.get(self.registryValue('language', channel),
-                                   'antiflood_blocked', nick=nick))
+        if self._floodBlocked(irc, msg, channel, 'shop', 'floodShop'):
             return
+        self._checkPendingRename(irc, channel, nick)
         player = self.db.player(network, channel, nick)
         try:
             self._shop(irc, channel, nick, network, player, (text or '').split())

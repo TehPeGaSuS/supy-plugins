@@ -246,12 +246,29 @@ conf.registerChannelValue(DuckHuntPro, 'confiscationEnforcementOnFusion',
     original script."""))
 
 conf.registerChannelValue(DuckHuntPro, 'antifloodEnabled',
-    registry.Boolean(True, """Whether to rate-limit rapid repeated use of
-    game commands per player."""))
+    registry.Boolean(True, """Whether to rate-limit the game commands (the
+    original's antiflood)."""))
 
-conf.registerChannelValue(DuckHuntPro, 'antifloodMaxPerMinute',
-    registry.PositiveInteger(10, """Maximum uses of any single DuckHuntPro
-    command a player gets per rolling 60-second window before further uses
-    are silently dropped (with an occasional warning)."""))
+_FLOOD_HELP = """ as "<requests>:<seconds>": no more than that many uses of the
+    command per player in that many seconds (a rolling window)."""
+
+for _name, _default, _what in (
+        ('floodShoot', '30:600', 'the shooting command'),
+        ('floodReload', '15:120', 'duckreload'),
+        ('floodStats', '2:120', 'duckstats'),
+        ('floodLastduck', '1:300', 'lastduck'),
+        ('floodShop', '3:600', 'shop')):
+    conf.registerChannelValue(DuckHuntPro, _name,
+        registry.String(_default, "Individual flood limit for %s%s" % (_what, _FLOOD_HELP)))
+
+conf.registerChannelValue(DuckHuntPro, 'floodGlobal',
+    registry.String('30:600', """Flood limit on all the game's commands
+    together, for the whole channel ("<requests>:<seconds>"). The original
+    suggests at least the largest individual limit."""))
+
+conf.registerChannelValue(DuckHuntPro, 'antifloodMsgInterval',
+    registry.PositiveInteger(60, """Minimum number of seconds between two
+    flood-control warnings for the same limit (not too low, or the warnings
+    become the flood)."""))
 
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

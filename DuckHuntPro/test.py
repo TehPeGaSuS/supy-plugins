@@ -83,6 +83,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self._resetConfig()
         conf.supybot.plugins.DuckHuntPro.enabled.setValue(True)
         self._cb()._postInitDone = True      # the post-init delay has "elapsed"
+        self._cb()._floodState.clear()
         # Enabling the channel just now planned a day (the `enabled` hook); tests
         # start without one.
         self._cb()._cancelFlights(self.irc.network, self.channel)
@@ -95,7 +96,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # a fully-scripted queue.
         conf.supybot.plugins.DuckHuntPro.dropsEnabled.setValue(False)
         # Same reasoning: conf values are a process-global singleton that
-        # persists across test methods, so a low antifloodMaxPerMinute set
+        # persists across test methods, so a low flood limit set
         # by one antiflood-specific test would otherwise leak into every
         # later test that calls bang()/shop buy more than once. Off by
         # default here; the two antiflood tests re-enable it explicitly.
@@ -2818,23 +2819,100 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     # Phase 3: antiflood
     # -----------------------------------------------------------------
 
-    def testFloodCheckAllowsUpToLimitThenBlocks(self):
+    def _flood(self, command, key, now, nick=None):
+        cb = self._cb()
+        msg = ircmsgs.privmsg(self.channel, 'x', prefix=(nick or self.nick) + '!u@h')
+        blocked = cb._floodBlocked(self.irc, msg, self.channel, command, key, now)
+        return blocked, self._texts(self._sent())
+
+    def testFloodSettingsHaveTheOriginalsDefaults(self):
+        cb = self._cb()
+        self.assertEqual([cb._floodLimit(self.channel, k) for k in (
+            'floodShoot', 'floodReload', 'floodStats', 'floodLastduck', 'floodShop', 'floodGlobal')],
+            [(30, 600), (15, 120), (2, 120), (1, 300), (3, 600), (30, 600)])
+        conf.supybot.plugins.DuckHuntPro.floodStats.setValue('banana')
+        self.assertEqual(cb._floodLimit(self.channel, 'floodStats'), (2, 120))
+
+    def testFloodBlocksAfterTheLimitAndWarnsOnce(self):
+        conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1000), (False, []))
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1001), (False, []))
+        warning = messages.tcl('en', 'm273', self.nick, 'duckstats', 2, 'requests', 120, 'seconds')
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1002), (True, [warning]))
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1003), (True, []))   # silent
+
+    def testFloodWarnsAgainAfterTheMessageInterval(self):
+        conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
+        for now in (1000, 1001):
+            self._flood('duckstats', 'floodStats', now)
+        self._flood('duckstats', 'floodStats', 1002)                       # the warning
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1061), (True, []))
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1063),     # 60 s later
+                         (True, [messages.tcl('en', 'm109')]))
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1064), (True, []))
+
+    def testFloodReleasesUsesAfterTheWindow(self):
+        conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
+        self._flood('duckstats', 'floodStats', 1000)
+        self._flood('duckstats', 'floodStats', 1050)
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1100)[0], True)
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1120), (False, []))   # 1000 + 120
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1121)[0], True)
+
+    def testFloodLimitsArePerPlayerAndPerCommand(self):
+        conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
+        conf.supybot.plugins.DuckHuntPro.floodStats.setValue('1:100')
+        self._flood('duckstats', 'floodStats', 1000)
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1001, nick='someoneelse')[0], False)
+        self.assertEqual(self._flood('duckreload', 'floodReload', 1001)[0], False)
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1001)[0], True)
+
+    def testGlobalFloodLimitCountsOnlyWhatTheCommandLimitLetsThrough(self):
+        conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
+        conf.supybot.plugins.DuckHuntPro.floodGlobal.setValue('3:600')
+        conf.supybot.plugins.DuckHuntPro.floodStats.setValue('1:600')
+        self.assertEqual(self._flood('duckstats', 'floodStats', 1000)[0], False)   # global 1
+        for now in (1001, 1002, 1003):
+            self.assertEqual(self._flood('duckstats', 'floodStats', now)[0], True)  # own limit
+        self.assertEqual(self._flood('duckreload', 'floodReload', 1004)[0], False)  # global 2
+        self.assertEqual(self._flood('lastduck', 'floodLastduck', 1005, nick='x')[0], False)  # 3
+        blocked, said = self._flood('duckreload', 'floodReload', 1006, nick='y')
+        self.assertTrue(blocked)
+        self.assertEqual(said, [messages.tcl('en', 'm103', 'DuckHuntPro', 3, 'requests', 600, 'seconds')])
+
+    def testFloodWarningNamesThePlayerWhenTheGlobalLimitIsPerPlayerFocus(self):
+        cb = self._cb()
+        msg = ircmsgs.privmsg(self.channel, 'x', prefix=self.prefix)
+        conf.supybot.plugins.DuckHuntPro.floodGlobal.setValue('1:600')
+        cb._antiflood(self.irc, msg, self.channel, 'nick', '*', 'floodGlobal', 1000)
+        self.assertTrue(cb._antiflood(self.irc, msg, self.channel, 'nick', '*', 'floodGlobal', 1001))
+        self.assertEqual(self._texts(self._sent()),
+                         [messages.tcl('en', 'm421', self.nick, 'DuckHuntPro', 1, 'request', 600, 'seconds')])
+
+    def testFloodLeavesNothingBehindOnceEverythingIsReleased(self):
         cb = self._cb()
         conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
-        conf.supybot.plugins.DuckHuntPro.antifloodMaxPerMinute.setValue(2)
-        network, channel, nick = self.irc.network, self.channel, self.nick
-        self.assertTrue(cb._floodCheck(network, channel, nick))
-        self.assertTrue(cb._floodCheck(network, channel, nick))
-        self.assertFalse(cb._floodCheck(network, channel, nick))
+        self._flood('duckstats', 'floodStats', 1000)
+        self._flood('duckstats', 'floodStats', 1001)
+        self._flood('duckstats', 'floodStats', 1002)              # warned
+        self._flood('duckstats', 'floodStats', 5000)              # all released, allowed again
+        state = [s for k, s in cb._floodState.items() if k[2] == 'duckstats'][0]
+        self.assertEqual((len(state['times']), state['msg']), (1, 0))
 
     def testBangBlockedByAntiflood(self):
         cb = self._cb()
         conf.supybot.plugins.DuckHuntPro.antifloodEnabled.setValue(True)
-        conf.supybot.plugins.DuckHuntPro.antifloodMaxPerMinute.setValue(1)
+        conf.supybot.plugins.DuckHuntPro.floodShoot.setValue('1:600')
         cb._rng = ScriptedRNG([100])
-        self.assertNotError('bang')
+        self._cmd('bang')
         self._drain()
-        self.assertRegexp('bang', 'slow down')
+        sent = self._cmd('bang')
+        self.assertEqual(self._texts(sent),
+                         [messages.tcl('en', 'm273', self.nick, 'bang', 1, 'request', 600, 'seconds')])
+
+    def testDisabledAntifloodNeverBlocks(self):
+        for now in range(1000, 1010):
+            self.assertEqual(self._flood('duckstats', 'floodStats', now), (False, []))
 
     # -----------------------------------------------------------------
     # Multi-duck (removing the single-duck-per-channel cap)

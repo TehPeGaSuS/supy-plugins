@@ -203,8 +203,6 @@ MESSAGES = {
         'admin_launch_ok': 'A duck has been launched immediately.',
         'admin_export_ok': 'Player stats exported to {path}.',
 
-        'antiflood_blocked': '{nick}, slow down -- try that again in a bit.',
-
         'fusion_merged': "{old}'s stats have been merged into {new} (nick change).",
     },
 }
