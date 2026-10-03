@@ -1248,6 +1248,9 @@ class DuckHuntPro(callbacks.Plugin):
     def _kickIfOpped(self, irc, channel, nick, reason):
         """Kicks `nick`, or logs the original's m140 complaint if the bot has
         neither op nor halfop."""
+        if self.registryValue('kickViaChanServ'):
+            irc.queueMsg(ircmsgs.IrcMsg(command='CS', args=('KICK', channel, nick, reason)))
+            return
         try:
             state = irc.state.channels[channel]
         except KeyError:
@@ -1662,6 +1665,15 @@ class DuckHuntPro(callbacks.Plugin):
             return None
         candidates = [u for u in users if not ircutils.strEqual(u, irc.nick)
                       and not ircutils.strEqual(u, excludeNick)]
+        exempt = self.registryValue('strayBulletExemptCapability')
+        if exempt:
+            def immune(nick):
+                try:
+                    return ircdb.checkCapability(irc.state.nickToHostmask(nick), exempt,
+                                                 ignoreDefaultAllow=True)
+                except KeyError:
+                    return False
+            candidates = [u for u in candidates if not immune(u)]
         if self.registryValue('onlyHuntersCanBeShot', channel):
             chan = self.db.getChannel(network, channel)
             hunters = set()

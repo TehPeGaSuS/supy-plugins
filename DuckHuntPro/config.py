@@ -287,6 +287,18 @@ conf.registerChannelValue(DuckHuntPro, 'antifloodMsgInterval',
     become the flood)."""))
 
 
+conf.registerGlobalValue(DuckHuntPro, 'kickViaChanServ',
+    registry.Boolean(False, """Make the game's kicks with `CS KICK <channel> <nick>
+    <reason>` (Anope/Epona services, e.g. on DALnet) instead of kicking
+    directly (the original's kick_method 1). Needed when the bot has no op
+    but is allowed to use ChanServ."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'strayBulletExemptCapability',
+    registry.String('', """A capability (for example "duckhuntpro.exempt"):
+    users who have it, or are bots that have it, can never take a stray
+    bullet. The original's exempted_flags; leave empty to exempt only the
+    bot itself."""))
+
 # ---- The original's tunable numbers (Duck_Hunt.cfg) ------------------------
 
 conf.registerGlobalValue(DuckHuntPro, 'xpPerDuck',

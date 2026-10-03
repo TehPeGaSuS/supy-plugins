@@ -1769,6 +1769,33 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # the plugin builds the same table from the settings
         self.assertEqual(cb.registryValue('chancesWildFireHitSomeone.upTo10'), 77)
 
+    def testKicksCanGoThroughChanServ(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.kickViaChanServ.setValue(True)
+        cb._kickIfOpped(self.irc, self.channel, 'bob', 'boom')
+        self.assertEqual(self._sent(), [('CS', 'KICK', 'boom')])
+
+    def testStrayBulletExemptCapability(self):
+        cb = self._cb()
+        self._addHunter('bob')
+        self._addHunter('carol')
+        conf.supybot.plugins.DuckHuntPro.strayBulletExemptCapability.setValue('duckhuntpro.exempt')
+        real = ircdb.checkCapability
+        ircdb.checkCapability = lambda prefix, cap, *a, **kw: (
+            cap == 'duckhuntpro.exempt' and prefix.startswith('bob!'))
+        state = self.irc.state
+        state.nickToHostmask = lambda nick: '%s!u@h' % nick
+        try:
+            picks = set()
+            for roll in (0, 0):
+                cb._rng = ScriptedRNG([roll])
+                picks.add(cb._pickAccidentVictim(self.irc, self.channel, self.irc.network, 'nobody'))
+            self.assertNotIn('bob', picks)
+            self.assertIn('carol', picks)
+        finally:
+            ircdb.checkCapability = real
+            del state.nickToHostmask
+
     def testKillingOneOfSeveralDucksSaysOneOfTheDucks(self):
         self._putDuck()
         self._putDuck()
