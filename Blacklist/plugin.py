@@ -637,22 +637,29 @@ class Blacklist(callbacks.Plugin):
         return reached, skipped
 
     def _netReachText(self, reached, skipped, limit=8):
-        """One line saying which channels a network ban reached."""
+        """One line saying where a network ban landed: the channels it was
+        applied in, those where the bot has no op (so it won't take), and how
+        many have enforceGlobal off."""
         def capped(names):
             text = ", ".join(names[:limit])
             return text + (f" and {len(names) - limit} more" if len(names) > limit else "")
-        if reached:
-            text = "Banned in " + capped(
-                [c if opped else f"{c} (no ops)" for c, opped in reached])
-            other = " other"
-        else:
-            text = "Not enforced anywhere yet"
-            other = ""
+        parts = []
+        opped = [c for c, has_op in reached if has_op]
+        no_op = [c for c, has_op in reached if not has_op]
+        if opped:
+            parts.append(f"Banned in {capped(opped)}.")
+        if no_op:
+            parts.append(f"No op in {capped(no_op)}, so it won't apply there.")
         if skipped:
             n = len(skipped)
-            text += (f"{'; ' if reached else ': '}enforceGlobal is off in "
-                     f"{n}{other} channel{'s' if n != 1 else ''}")
-        return text + "."
+            s = 's' if n != 1 else ''
+            if reached:
+                parts.append(f"enforceGlobal is off in {n} other channel{s}.")
+            else:
+                parts.append(f"Not enforced anywhere yet: enforceGlobal is off in {n} channel{s}.")
+        elif not reached:
+            parts.append("Not enforced anywhere yet.")
+        return " ".join(parts)
 
     def _resyncBans(self, irc, channel):
         """Re-applies stored bans that are missing from the channel's ban

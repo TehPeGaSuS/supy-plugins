@@ -302,14 +302,14 @@ class BlacklistTestCase(ChannelPluginTestCase):
         conf.supybot.plugins.Blacklist.enforceGlobal.get(other).setValue(False)
         self.assertRegex(
             self._replyTo('blacklist net add foo r1'),
-            r'Added to the network blacklist\. Banned in #test \(no ops\); '
-            r'enforceGlobal is off in 1 other channel\.')
+            r'Added to the network blacklist\. No op in #test, so it won\'t apply '
+            r'there\. enforceGlobal is off in 1 other channel\.')
         self.assertNotError('blacklist net delete 1')
         self._drain()
         self._botIsOpped()
         self.assertRegex(
             self._replyTo('blacklist net timer foo 5 r2'),
-            r'for 5 minutes\. Banned in #test; enforceGlobal is off in 1 other channel\.')
+            r'for 5 minutes\. Banned in #test\. enforceGlobal is off in 1 other channel\.')
 
     def testNetAddSaysWhenNoChannelEnforcesIt(self):
         other = self._joinOtherChannel()
@@ -318,6 +318,17 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertRegex(
             self._replyTo('blacklist net add foo r1'),
             r'Not enforced anywhere yet: enforceGlobal is off in 2 channels\.')
+
+    def testNetReachTextSeparatesChannelsWithoutOp(self):
+        text = self._cb()._netReachText(
+            [('#a', True), ('#c', False), ('#d', True), ('#e', False)], ['#f'])
+        self.assertEqual(
+            text, "Banned in #a, #d. No op in #c, #e, so it won't apply there. "
+                  "enforceGlobal is off in 1 other channel.")
+        self.assertEqual(self._cb()._netReachText([('#c', False)], []),
+                         "No op in #c, so it won't apply there.")
+        self.assertEqual(self._cb()._netReachText([], []),
+                         "Not enforced anywhere yet.")
 
     def testNetReachTextCapsALongChannelList(self):
         cb = self._cb()
