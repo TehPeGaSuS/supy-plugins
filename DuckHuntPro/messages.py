@@ -9,6 +9,8 @@ adding another language later is just adding a sibling dict with the same
 keys -- `get()` below falls back to English for anything missing.
 """
 
+import re
+
 from . import tclmessages
 
 
@@ -21,7 +23,12 @@ def tcl(lang, key, *args):
     anything else for English), formatted with Tcl-style positional args like
     msgcat::mc does (a message without args is returned as is)."""
     text = _tclTable(lang)[key]
-    return text % args if args else text
+    if not args:
+        return text
+    if re.search(r'%\d+\$s', text):         # msgcat's positional form: %2$s
+        return re.sub(r'%(\d+)\$s|%%', lambda m: '%' if m.group(0) == '%%'
+                      else str(args[int(m.group(1)) - 1]), text)
+    return text % args
 
 
 def tclList(lang, key):

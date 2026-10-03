@@ -80,11 +80,6 @@ class DuckHuntPro(callbacks.Plugin):
         self._floodWindows = {}  # (network, channel, nick) -> [timestamps]
         self._postInitDone = False   # Duck_Hunt.tcl's post_init_done
         self._enabledHooks = {}      # (network, channel) -> (registry value, callback)
-        # The nested `admin` command group is instantiated by BasePlugin's
-        # __init__ (above) but has no reference to this instance -- hand it
-        # one explicitly. (This is NOT automatic and forgetting it only fails
-        # at runtime.)
-        self.admin.plugin = self
         self.db.dropStalePendingTransfers(self.registryValue('pendingTransfersMaxAge'))
         self._scheduleEvent("DuckHuntPro:postinit",
                             time.time() + self.registryValue('postInitDelay'),
@@ -1041,6 +1036,7 @@ class DuckHuntPro(callbacks.Plugin):
         'pref' follows preferredDisplayMode (1 = PRIVMSG to the channel,
         otherwise NOTICE to the player); 'public' is always the channel.
         Formatting is stripped when monochrome is on or the channel is +c."""
+        channel = channel or None           # a command without a channel (duckexport)
         mono = self.registryValue('monochrome', channel)
         if not mono:
             try:
@@ -1053,7 +1049,7 @@ class DuckHuntPro(callbacks.Plugin):
             kind == 'pref' and self.registryValue('preferredDisplayMode', channel) == 1)
         for line in text.split('\n'):
             if line:
-                irc.queueMsg(ircmsgs.privmsg(channel, line) if toChannel
+                irc.queueMsg(ircmsgs.privmsg(channel, line) if toChannel and channel
                              else ircmsgs.notice(nick, line))
 
     def _kickIfOpped(self, irc, channel, nick, reason):
@@ -1708,7 +1704,7 @@ class DuckHuntPro(callbacks.Plugin):
                     (int(time.time()) - int(lastAt)) * 1000, False, lang)))
             return
         notice = lambda text: self._out(irc, channel, msg.nick, text, 'notice')
-        if not ircdb.checkCapability(msg.prefix, ircdb.makeChannelCapability(channel, 'op')):
+        if not self._isStaff(msg.prefix, channel):
             return
         if channel not in irc.state.channels:
             notice(self._t(channel, 'm75', channel))
@@ -2010,6 +2006,7 @@ class DuckHuntPro(callbacks.Plugin):
         hand-back. With -static the confiscation is permanent: only `rearm`
         undoes it and no automatic hand-back mode touches it.
         """
+        self._requireStaff(irc, msg, channel)
         t = lambda k, *a: self._t(channel, k, *a)
         out = lambda text: self._out(irc, channel, msg.nick, text, 'public')
         parts = (text or '').split()
@@ -2047,13 +2044,14 @@ class DuckHuntPro(callbacks.Plugin):
         else:
             out(t('m130', nick, target))
         self.db.save()
-    unarm = wrap(unarm, [('checkChannelCapability', 'op'), 'channel', optional('text')])
+    unarm = wrap(unarm, ['channel', optional('text')])
 
     def rearm(self, irc, msg, args, channel, target):
         """[<channel>] <nick>
         Gives <nick> their weapon back, whether it was confiscated
         automatically, temporarily or permanently.
         """
+        self._requireStaff(irc, msg, channel)
         t = lambda k, *a: self._t(channel, k, *a)
         out = lambda text: self._out(irc, channel, msg.nick, text, 'public')
         if not target:
@@ -2069,166 +2067,337 @@ class DuckHuntPro(callbacks.Plugin):
             player['gun_state'] = 'armed'
             out(t('m73', msg.nick, target))
             self.db.save()
-    rearm = wrap(rearm, [('checkChannelCapability', 'op'), 'channel', optional('somethingWithoutSpaces')])
+    rearm = wrap(rearm, ['channel', optional('somethingWithoutSpaces')])
 
-    def _exportPlayers(self):
-        lines = ['network\tchannel\tnick\tlevel\txp\tkilled\tgolden_killed']
-        for network in self.db.networks():
-            for cname in self.db.channels(network):
-                chan = self.db.getChannel(network, cname)
-                for p in chan['players'].values():
-                    lines.append('%s\t%s\t%s\t%d\t%d\t%d\t%d' % (
-                        network, cname, p['display_nick'], data.levelForXp(p['xp']),
-                        p['xp'], p['stats']['killed'], p['stats']['golden_killed']))
+    # -----------------------------------------------------------------
+    # Staff commands (the original's /msg commands, Duck_Hunt.cfg's *_auth)
+    # -----------------------------------------------------------------
+
+    def _isStaff(self, prefix, channel):
+        """The original's `o|o` / `m|m` flags (channel op or halfop). Limnoria
+        has no per-channel flags, so it is the #channel,op / #channel,halfop
+        capabilities; global admin counts too."""
+        for cap in (ircdb.makeChannelCapability(channel, 'op'),
+                    ircdb.makeChannelCapability(channel, 'halfop'), 'admin'):
+            if ircdb.checkCapability(prefix, cap):
+                return True
+        return False
+
+    def _requireStaff(self, irc, msg, channel):
+        if not self._isStaff(msg.prefix, channel):
+            irc.errorNoCapability(ircdb.makeChannelCapability(channel, 'op'), Raise=True)
+
+    def _staffArgs(self, irc, msg, text, cmd, syntaxKey, minArgs, maxArgs):
+        """Common head of the admin commands: splits `text`, checks the staff
+        capability on its first word (the channel), and answers with the
+        command's syntax NOTICE when the argument count is wrong. Returns the
+        word list, or None when the command is over."""
+        parts = (text or '').split()
+        chan = parts[0] if parts else None
+        if chan is None:
+            if not (ircdb.checkCapability(msg.prefix, 'admin')):
+                irc.errorNoCapability('admin', Raise=True)
+        else:
+            self._requireStaff(irc, msg, chan)
+        if not minArgs <= len(parts) <= maxArgs:
+            self._out(irc, chan or '', msg.nick, self._t(chan, syntaxKey, cmd), 'notice')
+            return None
+        return parts
+
+    def _knownChannel(self, irc, msg, chan, requireEnabled=True):
+        """The original's `validchan` and `channel get $chan DuckHunt` checks:
+        the channel's name as the bot knows it, or None after the NOTICE."""
+        for name in irc.state.channels:
+            if ircutils.strEqual(name, chan):
+                if requireEnabled and not self.registryValue('enabled', name):
+                    self._out(irc, name, msg.nick, self._t(name, 'm76', 'DuckHuntPro', name), 'notice')
+                    return None
+                return name
+        self._out(irc, chan, msg.nick, self._t(chan, 'm75', chan), 'notice')
+        return None
+
+    def ducklist(self, irc, msg, args, text):
+        """<channel> [<search>]
+        Lists the profiles (nicks) known on <channel>, or those containing
+        <search>."""
+        parts = self._staffArgs(irc, msg, text, 'ducklist', 'm122', 1, 2)
+        if parts is None:
+            return
+        chan = self._knownChannel(irc, msg, parts[0], requireEnabled=False)
+        if chan is None:
+            return
+        notice = lambda out: self._out(irc, chan, msg.nick, out, 'notice')
+        info = self.db.getChannel(irc.network, chan)
+        if not info or not info['players']:
+            notice(self._t(chan, 'm123', chan))
+            return
+        nicks = sorted(info['players'])
+        search = parts[1] if len(parts) > 1 else ''
+        if search:
+            nicks = [n for n in nicks if search.lower() in n.lower()]
+        if not nicks:
+            notice(self._t(chan, 'm126', search))
+        elif len(nicks) == 1:
+            notice(self._t(chan, 'm124', nicks[0]))
+        else:
+            notice(self._t(chan, 'm125', len(nicks), ' '.join(nicks)))
+    ducklist = wrap(ducklist, [optional('text')])
+
+    def duckfusion(self, irc, msg, args, text):
+        """<channel> <destination nick> <source nick> [<source nick> ...]
+        Merges the stats of the source profiles into the destination's."""
+        parts = self._staffArgs(irc, msg, text, 'duckfusion', 'm74', 3, 1000)
+        if parts is None:
+            return
+        chan = self._knownChannel(irc, msg, parts[0])
+        if chan is None:
+            return
+        dst = parts[1]
+        notice = lambda out: self._out(irc, chan, msg.nick, out, 'notice')
+        if self.db.getPlayer(irc.network, chan, dst) is None:
+            notice(self._t(chan, 'm77', dst, chan))
+            return
+        merged = False
+        for src in parts[2:]:
+            if self.db.getPlayer(irc.network, chan, src) is None:
+                notice(self._t(chan, 'm77', src, chan))
+            elif src.lower() == dst.lower():
+                continue                # merging a profile into itself would delete it
+            else:
+                self.db.mergeStats(irc.network, chan, dst, src)
+                merged = True
+                notice(self._t(chan, 'm78', dst, src, dst, chan))
+        if merged:
+            self._clampAmmo(self.db.getPlayer(irc.network, chan, dst))
+            self.db.save()
+    duckfusion = wrap(duckfusion, [optional('text')])
+
+    def duckrename(self, irc, msg, args, text):
+        """<channel> <old nick> <new nick>
+        Renames a profile."""
+        parts = self._staffArgs(irc, msg, text, 'duckrename', 'm131', 3, 3)
+        if parts is None:
+            return
+        chan = self._knownChannel(irc, msg, parts[0])
+        if chan is None:
+            return
+        old, new = parts[1], parts[2]
+        notice = lambda out: self._out(irc, chan, msg.nick, out, 'notice')
+        if self.db.getPlayer(irc.network, chan, old) is None:
+            notice(self._t(chan, 'm77', old, chan))
+        elif not self.db.renamePlayer(irc.network, chan, old, new):
+            notice(self._t(chan, 'm132', new, chan, 'duckfusion'))
+        else:
+            notice(self._t(chan, 'm133', old, new, chan))
+    duckrename = wrap(duckrename, [optional('text')])
+
+    def duckdelete(self, irc, msg, args, text):
+        """<channel> <nick>
+        Deletes a profile."""
+        parts = self._staffArgs(irc, msg, text, 'duckdelete', 'm141', 2, 2)
+        if parts is None:
+            return
+        chan = self._knownChannel(irc, msg, parts[0], requireEnabled=False)
+        if chan is None:
+            return
+        notice = lambda out: self._out(irc, chan, msg.nick, out, 'notice')
+        if not self.db.deletePlayer(irc.network, chan, parts[1]):
+            notice(self._t(chan, 'm142', parts[1], chan))
+        else:
+            notice(self._t(chan, 'm143', parts[1], chan))
+    duckdelete = wrap(duckdelete, [optional('text')])
+
+    def _planningChecks(self, irc, msg, text, cmd, syntaxKey):
+        """The head shared by duckplanning and duckreplanning: returns the
+        channel when the plan can be shown or recomputed."""
+        if self.registryValue('method') != 2:
+            irc.error('Flights are not planned in advance (method is not 2).', Raise=True)
+        parts = self._staffArgs(irc, msg, text, cmd, syntaxKey, 1, 1)
+        if parts is None:
+            return None
+        chan = self._knownChannel(irc, msg, parts[0])
+        if chan is None:
+            return None
+        if not self._postInitDone:
+            self._out(irc, chan, msg.nick, self._t(chan, 'm243', 'DuckHuntPro'), 'notice')
+            return None
+        return chan
+
+    def duckplanning(self, irc, msg, args, text):
+        """<channel>
+        Shows today's planned duck flights on <channel> (method 2 only)."""
+        chan = self._planningChecks(irc, msg, text, 'duckplanning', 'm79')
+        if chan is None:
+            return
+        listing = self._plannedText(irc.network, chan)
+        self._out(irc, chan, msg.nick, self._t(chan, 'm81', chan, listing)
+                  if listing else self._t(chan, 'm154', chan), 'notice')
+    duckplanning = wrap(duckplanning, [optional('text')])
+
+    def duckreplanning(self, irc, msg, args, text):
+        """<channel>
+        Computes a different flight plan for the rest of today (method 2
+        only) and shows it."""
+        chan = self._planningChecks(irc, msg, text, 'duckreplanning', 'm148')
+        if chan is None:
+            return
+        soarings = self._planDay(irc.network, chan)
+        self._out(irc, chan, msg.nick,
+                  self._t(chan, 'm149', chan, ', '.join(sorted(soarings))), 'notice')
+    duckreplanning = wrap(duckreplanning, [optional('text')])
+
+    def ducklaunch(self, irc, msg, args, text):
+        """<channel> [<golden duck: 0|1>]
+        Makes a duck fly right now on <channel>; 1 makes it a golden one. It
+        adds to whatever is already flying and, like the original, says
+        nothing back."""
+        parts = self._staffArgs(irc, msg, text, 'ducklaunch', 'm82', 1, 2)
+        if parts is None:
+            return
+        if len(parts) == 2 and parts[1] not in ('0', '1'):
+            self._out(irc, parts[0], msg.nick, self._t(parts[0], 'm82', 'ducklaunch'), 'notice')
+            return
+        chan = self._knownChannel(irc, msg, parts[0])
+        if chan is None:
+            return
+        golden = len(parts) == 2 and parts[1] == '1'
+        self._spawnDuck(irc, chan, forceGolden=golden, forceNonGolden=not golden)
+    ducklaunch = wrap(ducklaunch, [optional('text')])
+
+    # The export's columns, in the original's order: (sort key, header message).
+    _EXPORT_COLUMNS = ('nick', 'last_activity', 'xp', 'level', 'xp_lvl_up', 'ammo', 'max_ammo',
+                       'ammo_clips', 'max_clips', 'accuracy', 'effective_accuracy', 'deflection',
+                       'armor', 'jamming', 'jammed', 'jammed_nbr', 'gun', 'confisc', 'ducks',
+                       'golden_ducks', 'missed', 'empty', 'accidents', 'wild_shots',
+                       'total_ammo', 'shot_at', 'neutralized', 'deflected', 'deaths',
+                       'best_time', 'average_reflex_time', 'karma', 'rank', 'items')
+    _EXPORT_WIDTHS = (0, 19, 5, 3, 4, 3, 3, 3, 3, 4, 7, 4, 4, 4, 1, 4, 2, 4, 5, 3, 5, 5, 4, 5,
+                      6, 4, 4, 4, 4, 16, 16, 7, 0, 0)
+    _EXPORT_CRITERIA = ('nick', 'last_activity', 'xp', 'level', 'xp_lvl_up', 'gun', 'ammo',
+                        'max_ammo', 'ammo_clips', 'max_clips', 'accuracy', 'effective_accuracy',
+                        'deflection', 'defense', 'jamming', 'jammed', 'jammed_nbr', 'confisc',
+                        'ducks', 'golden_ducks', 'missed', 'empty', 'accidents', 'wild_shots',
+                        'total_ammo', 'shot_at', 'neutralized', 'deflected', 'deaths',
+                        'best_time', 'average_reflex_time', 'karma', 'rank', 'items')
+
+    @staticmethod
+    def _dictionaryKey(value):
+        """Tcl's `lsort -dictionary`: case-insensitive, digit runs compared as
+        numbers."""
+        return [(0, int(chunk), '') if chunk.isdigit() else (1, 0, chunk.lower())
+                for chunk in re.findall(r'\d+|\D+', str(value))]
+
+    def _exportRow(self, channel, player, now):
+        lvlIndex = data.levelForXp(player['xp'])
+        lvl = data.LEVELS[lvlIndex]
+        st = player['stats']
+        ducks, missed = st['killed'], st['missed']
+        total = ducks + missed
+        clipAmmo = lvl.clip_size if player['clip_ammo'] is None else player['clip_ammo']
+        clips = lvl.clip_count if player['clips_left'] is None else player['clips_left']
+        karma = 0
+        if st['wild_shots'] + st['humans_shot'] + ducks:
+            karma = float(self._formatFloat(
+                100.0 * (-(st['wild_shots'] + st['humans_shot'] * 3) + ducks * 2)
+                / (st['wild_shots'] + st['humans_shot'] * 3 + ducks * 2), 2))
+        lastActivity = player.get('last_activity')
+        return [player['display_nick'], -1 if lastActivity is None else int(lastActivity),
+                player['xp'], lvlIndex, lvl.xp_threshold - player['xp'], clipAmmo, lvl.clip_size,
+                clips, lvl.clip_count, lvl.accuracy,
+                float(self._formatFloat(100.0 * ducks / total, 2)) if total else -1,
+                lvl.deflection, lvl.defense, lvl.jam_pct, 1 if player['jammed'] else 0,
+                st['jams'],
+                {'armed': 1, 'confiscated': 0}.get(player['gun_state'], -1),
+                st['confiscations'], ducks, st['golden_killed'], missed, st['empty_shots'],
+                st['humans_shot'], st['wild_shots'], total, st['bullets_received'],
+                st['bullets_received'] - st['deaths'] - st['deflected'], st['deflected'],
+                st['deaths'],
+                9999999999 if st['best_time_ms'] is None else st['best_time_ms'] / 1000.0,
+                round(st['reflex_ms'] / ducks / 1000.0, 3) if ducks else 9999999999,
+                karma, messages.lvl2rank(lvlIndex, self._lang(channel)),
+                ' '.join(sorted(k for k in player['items'] if db.itemActive(player, k, now)))]
+
+    def _exportPlayers(self, network, sortBy):
+        """Duck_Hunt.tcl's export_players_table: writes a fixed-width table of
+        every channel's players on `network`; returns the file's path."""
+        now = time.time()
+        lang = self.registryValue('language')
+        t = lambda key, *a: messages.tcl(lang, key, *a)
+        sortBy = sortBy or 'nick'
+        sortKey = {'defense': 'armor', 'jammed_nbr': 'jammed_nbr'}.get(sortBy, sortBy)
+        index = self._EXPORT_COLUMNS.index(sortKey)
+        stamp = datetime.fromtimestamp(now)
+        title = t('m207', 'DuckHuntPro', '2.11', network, stamp.strftime('%d'),
+                  stamp.strftime('%m'), stamp.strftime('%Y'), stamp.strftime('%H:%M:%S'), sortBy)
+        lines = [' ' + '-' * (len(title) + 4) + ' ', '|  %s  |' % title,
+                 ' ' + '-' * (len(title) + 4) + ' ', '',
+                 '%s %s' % (t('m244'), ' '.join(self._EXPORT_CRITERIA)), '', '']
+        channels = [(name, self.db.getChannel(network, name)) for name in self.db.channels(network)]
+        channels = [(name, c) for name, c in channels if c and c['players']]
+        if not channels:
+            lines.append(t('m208'))
+        else:
+            rows = {name: [self._exportRow(name, p, now) for p in c['players'].values()]
+                    for name, c in channels}
+            allRows = [row for chanRows in rows.values() for row in chanRows]
+            widths = list(self._EXPORT_WIDTHS)
+            widths[0] = max([len(row[0]) for row in allRows] or [0])
+            widths[32] = max(len(r) for r in messages.tclList(lang, 'm134'))
+            widths[33] = max([len(row[33]) for row in allRows] or [0])
+            headers = [t('m%d' % (209 + i)) for i in range(34)]
+            underline = [max(w, len(h)) for w, h in zip(widths, headers)]
+            colWidth = [w + 3 for w in underline]
+            fmt = lambda cells: ''.join(str(c).ljust(w) for c, w in zip(cells, colWidth))
+            for name, _ in channels:
+                lines += [name, '-' * len(name), fmt(headers), fmt('-' * u for u in underline)]
+                table = sorted(rows[name], key=lambda r: self._dictionaryKey(r[0]))
+                if sortKey in ('nick', 'rank'):
+                    table.sort(key=lambda r: self._dictionaryKey(r[index]))
+                elif sortKey in ('best_time', 'average_reflex_time'):
+                    table.sort(key=lambda r: r[index])
+                elif sortKey == 'items':
+                    table.sort(key=lambda r: self._dictionaryKey(r[index]))
+                    table.sort(key=lambda r: len(r[index]), reverse=True)
+                else:
+                    table.sort(key=lambda r: r[index], reverse=True)
+                for r in table:
+                    r = list(r)
+                    r[10] = '-' if r[10] == -1 else '%s%%' % self._formatFloat(r[10], 2)
+                    for i in (9, 11, 12, 13):
+                        r[i] = '%s%%' % r[i]
+                    r[29] = '-' if r[29] == 9999999999 else messages.adaptTimeResolution(
+                        round(r[29] * 1000), True, lang)
+                    r[30] = '-' if r[30] == 9999999999 else messages.adaptTimeResolution(
+                        round(r[30] * 1000), True, lang)
+                    r[1] = '-' if r[1] == -1 else time.strftime(t('m422'), time.localtime(r[1]))
+                    lines.append(fmt(r))
+                lines += ['', '']
         directory = os.path.join(str(conf.supybot.directories.data), 'DuckHuntPro')
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, 'export-%d.txt' % int(time.time()))
-        with open(path, 'w') as f:
+        path = os.path.join(directory, 'players_table.txt')
+        with open(path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
         return path
 
-    # -----------------------------------------------------------------
-    # Admin toolbox
-    # -----------------------------------------------------------------
-
-    class admin(callbacks.Commands):
-        """Admin tools: list/fusion/rename/delete/planning/replanning/
-        launch/export. All gated behind the `admin` capability."""
-
-        plugin = None
-
-        def list(self, irc, msg, args, channel, pattern):
-            """[<channel>] [<pattern>]
-            Lists player nicks (optionally filtered by a substring), with
-            level/xp, highest xp first.
-            """
-            p = self.plugin
-            lang = p.registryValue('language', channel)
-            chan = p.db.getChannel(irc.network, channel)
-            players = list(chan['players'].values()) if chan else []
-            if pattern:
-                players = [pl for pl in players
-                           if pattern.lower() in pl['display_nick'].lower()]
-            if not players:
-                irc.reply(messages.get(lang, 'admin_list_empty'))
-                return
-            players.sort(key=lambda pl: pl['xp'], reverse=True)
-            lines = ['%s (lvl %d, %d xp)' % (pl['display_nick'], data.levelForXp(pl['xp']), pl['xp'])
-                      for pl in players]
-            irc.reply(' | '.join(lines))
-        list = wrap(list, ['admin', 'channel', optional('text')])
-
-        def fusion(self, irc, msg, args, channel, dest, source):
-            """<channel> <dest> <source>
-            Merges <source>'s stats into <dest> (same logic as automatic
-            nick-change fusion).
-            """
-            p = self.plugin
-            lang = p.registryValue('language', channel)
-            if not p.db.mergeStats(irc.network, channel, dest, source):
-                irc.reply(messages.get(lang, 'admin_target_unknown', nick=source))
-                return
-            irc.reply(messages.get(lang, 'admin_fusion_ok', sources=source, dest=dest))
-        fusion = wrap(fusion, ['admin', 'channel', 'somethingWithoutSpaces', 'somethingWithoutSpaces'])
-
-        def rename(self, irc, msg, args, channel, old, new):
-            """<channel> <old> <new>
-            Pure rename of <old>'s profile to <new> -- refuses if <new>
-            already has a profile (use `fusion` for that case instead).
-            """
-            p = self.plugin
-            lang = p.registryValue('language', channel)
-            if not p.db.renamePlayer(irc.network, channel, old, new):
-                irc.reply(messages.get(lang, 'admin_rename_exists', new=new))
-                return
-            irc.reply(messages.get(lang, 'admin_rename_ok', old=old, new=new))
-        rename = wrap(rename, ['admin', 'channel', 'somethingWithoutSpaces', 'somethingWithoutSpaces'])
-
-        def delete(self, irc, msg, args, channel, nick):
-            """<channel> <nick>
-            Deletes <nick>'s profile entirely.
-            """
-            p = self.plugin
-            lang = p.registryValue('language', channel)
-            if not p.db.deletePlayer(irc.network, channel, nick):
-                irc.reply(messages.get(lang, 'admin_target_unknown', nick=nick))
-                return
-            irc.reply(messages.get(lang, 'admin_delete_ok', nick=nick))
-        delete = wrap(delete, ['admin', 'channel', 'somethingWithoutSpaces'])
-
-        def _checked(self, irc, msg, channel):
-            """The original's shared channel checks for planning, replanning
-            and launch: returns False (after a NOTICE) when the channel is
-            unknown to the bot or the game is off there."""
-            p = self.plugin
-            if channel not in irc.state.channels:
-                p._out(irc, channel, msg.nick, p._t(channel, 'm75', channel), 'notice')
-            elif not p.registryValue('enabled', channel):
-                p._out(irc, channel, msg.nick,
-                       p._t(channel, 'm76', 'DuckHuntPro', channel), 'notice')
-            else:
-                return True
-            return False
-
-        def planning(self, irc, msg, args, channel):
-            """[<channel>]
-            Shows today's planned duck flights on <channel> (method 2).
-            """
-            p = self.plugin
-            if p.registryValue('method') != 2:
-                irc.error('Flights are not planned in advance (method is not 2).')
-                return
-            if not self._checked(irc, msg, channel):
-                return
-            if not p._postInitDone:
-                p._out(irc, channel, msg.nick, p._t(channel, 'm243', 'DuckHuntPro'), 'notice')
-                return
-            listing = p._plannedText(irc.network, channel)
-            p._out(irc, channel, msg.nick, p._t(channel, 'm81', channel, listing)
-                   if listing else p._t(channel, 'm154', channel), 'notice')
-        planning = wrap(planning, ['admin', 'channel'])
-
-        def replanning(self, irc, msg, args, channel):
-            """[<channel>]
-            Computes a different flight plan for the rest of today on
-            <channel> (method 2) and shows it.
-            """
-            p = self.plugin
-            if p.registryValue('method') != 2:
-                irc.error('Flights are not planned in advance (method is not 2).')
-                return
-            if not self._checked(irc, msg, channel):
-                return
-            if not p._postInitDone:
-                p._out(irc, channel, msg.nick, p._t(channel, 'm243', 'DuckHuntPro'), 'notice')
-                return
-            soarings = p._planDay(irc.network, channel)
-            p._out(irc, channel, msg.nick,
-                   p._t(channel, 'm149', channel, ', '.join(sorted(soarings))), 'notice')
-        replanning = wrap(replanning, ['admin', 'channel'])
-
-        def launch(self, irc, msg, args, channel, golden):
-            """[<channel>] [<golden: 0|1>]
-            Makes a duck fly right now on <channel>; golden is 0 (the
-            default: never golden) or 1 (golden). It adds to whatever is
-            already flying and, like the original, says nothing back.
-            """
-            if not self._checked(irc, msg, channel):
-                return
-            self.plugin._spawnDuck(irc, channel, forceGolden=bool(golden),
-                                   forceNonGolden=not golden)
-        launch = wrap(launch, ['admin', 'channel', optional('boolean')])
-
-        def export(self, irc, msg, args, channel):
-            """[<channel>]
-            Exports every network/channel's player stats to a plaintext
-            file under the bot's data directory.
-            """
-            p = self.plugin
-            lang = p.registryValue('language', channel)
-            path = p._exportPlayers()
-            irc.reply(messages.get(lang, 'admin_export_ok', path=path))
-        export = wrap(export, ['admin', 'channel'])
+    def duckexport(self, irc, msg, args, sortBy):
+        """[<sort criterion>]
+        Writes a table of every player's data to a text file (sorted by nick
+        unless a criterion is given). Needs the global admin capability,
+        since it covers every channel."""
+        if not ircdb.checkCapability(msg.prefix, 'admin'):
+            irc.errorNoCapability('admin', Raise=True)
+        notice = lambda out: self._out(irc, '', msg.nick, out, 'notice')
+        lang = self.registryValue('language')
+        sortBy = (sortBy or '').strip()
+        if len(sortBy.split()) > 1:
+            notice(messages.tcl(lang, 'm205', 'duckexport'))
+        elif sortBy and sortBy.lower() not in self._EXPORT_CRITERIA:
+            valid = list(self._EXPORT_CRITERIA)
+            valid.insert(len(valid) - 1, messages.tcl(lang, 'm80'))
+            notice(messages.tcl(lang, 'm206', sortBy, ' '.join(valid)))
+        else:
+            notice(messages.tcl(lang, 'm262', self._exportPlayers(irc.network, sortBy.lower())))
+    duckexport = wrap(duckexport, [optional('text')])
 
 
 Class = DuckHuntPro

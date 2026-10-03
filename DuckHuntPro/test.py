@@ -27,6 +27,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 ###
 
+import os
 import random
 import re
 import time
@@ -36,7 +37,7 @@ from datetime import datetime
 from supybot.test import *
 import supybot.schedule as schedule
 import supybot.drivers as drivers
-from supybot import ircmsgs
+from supybot import ircdb, ircmsgs
 
 from . import data
 from . import db
@@ -2381,51 +2382,148 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     # Phase 3: admin toolbox
     # -----------------------------------------------------------------
 
-    def testAdminListShowsPlayers(self):
-        cb = self._cb()
-        cb.db.player(self.irc.network, self.channel, 'alice')['xp'] = 50
-        cb.db.save()
-        self.assertNotError('admin list')
+    def _notices(self, command, **kw):
+        return self._texts(self._cmd(command, **kw), 'NOTICE')
 
-    def testAdminFusionMergesStats(self):
+    def _players(self, **xp):
         cb = self._cb()
-        cb.db.player(self.irc.network, self.channel, 'alice')['xp'] = 50
-        cb.db.player(self.irc.network, self.channel, 'bob')['xp'] = 30
+        for nick, value in xp.items():
+            cb.db.player(self.irc.network, self.channel, nick)['xp'] = value
         cb.db.save()
-        self.assertNotError('admin fusion bob alice')
+
+    def testDucklistListsSortedNicksAndSearches(self):
+        self._players(zed=1, alice=2, Bob=3)
+        self.assertEqual(self._notices('ducklist ' + self.channel),
+                         [messages.tcl('en', 'm125', 3, 'alice bob zed')])
+        self.assertEqual(self._notices('ducklist %s LI' % self.channel),
+                         [messages.tcl('en', 'm124', 'alice')])
+        self.assertEqual(self._notices('ducklist %s nope' % self.channel),
+                         [messages.tcl('en', 'm126', 'nope')])
+
+    def testDucklistErrors(self):
+        self.assertEqual(self._notices('ducklist ' + self.channel),
+                         [messages.tcl('en', 'm123', self.channel)])
+        self.assertEqual(self._notices('ducklist #nowhere'),
+                         [messages.tcl('en', 'm75', '#nowhere')])
+        self.assertEqual(self._notices('ducklist'), [messages.tcl('en', 'm122', 'ducklist')])
+
+    def testDuckfusionMergesSeveralSources(self):
+        cb = self._cb()
+        self._players(alice=50, bob=30, carol=5)
+        self.assertEqual(self._notices('duckfusion %s bob alice carol' % self.channel),
+                         [messages.tcl('en', 'm78', 'bob', 'alice', 'bob', self.channel),
+                          messages.tcl('en', 'm78', 'bob', 'carol', 'bob', self.channel)])
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')['xp'], 85)
+        for gone in ('alice', 'carol'):
+            self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, gone) is None)
+
+    def testDuckfusionReportsUnknownProfilesAndKeepsGoing(self):
+        cb = self._cb()
+        self._players(alice=50, bob=30)
+        self.assertEqual(self._notices('duckfusion %s bob ghost alice' % self.channel),
+                         [messages.tcl('en', 'm77', 'ghost', self.channel),
+                          messages.tcl('en', 'm78', 'bob', 'alice', 'bob', self.channel)])
+        self.assertEqual(self._notices('duckfusion %s ghost alice' % self.channel),
+                         [messages.tcl('en', 'm77', 'ghost', self.channel)])
+        self.assertEqual(self._notices('duckfusion %s bob' % self.channel),
+                         [messages.tcl('en', 'm74', 'duckfusion')])
+
+    def testDuckfusionIntoItselfChangesNothing(self):
+        cb = self._cb()
+        self._players(bob=30)
+        self._cmd('duckfusion %s bob BOB' % self.channel)
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')['xp'], 30)
+
+    def testDuckfusionClampsAmmoToTheMergedLevel(self):
+        cb = self._cb()
+        self._players(alice=0, bob=0)
+        for nick in ('alice', 'bob'):
+            p = cb.db.getPlayer(self.irc.network, self.channel, nick)
+            p['clip_ammo'], p['clips_left'] = 6, 2
+        self._cmd('duckfusion %s bob alice' % self.channel)
         bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertEqual(bob['xp'], 80)
-        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'alice') is None)
+        lvl = data.LEVELS[data.levelForXp(bob['xp'])]
+        self.assertTrue(bob['clip_ammo'] <= lvl.clip_size and bob['clips_left'] <= lvl.clip_count)
 
-    def testAdminRenameRefusesExistingTarget(self):
+    def testDuckrename(self):
         cb = self._cb()
-        cb.db.player(self.irc.network, self.channel, 'alice')
-        cb.db.player(self.irc.network, self.channel, 'bob')
-        cb.db.save()
-        self.assertRegexp('admin rename alice bob', 'already has a profile')
-
-    def testAdminDeleteRemovesProfile(self):
-        cb = self._cb()
-        cb.db.player(self.irc.network, self.channel, 'alice')
-        cb.db.save()
-        self.assertNotError('admin delete alice')
+        self._players(alice=50, bob=30)
+        self.assertEqual(self._notices('duckrename %s alice bob' % self.channel),
+                         [messages.tcl('en', 'm132', 'bob', self.channel, 'duckfusion')])
+        self.assertEqual(self._notices('duckrename %s ghost x' % self.channel),
+                         [messages.tcl('en', 'm77', 'ghost', self.channel)])
+        self.assertEqual(self._notices('duckrename %s alice Alicia' % self.channel),
+                         [messages.tcl('en', 'm133', 'alice', 'Alicia', self.channel)])
+        moved = cb.db.getPlayer(self.irc.network, self.channel, 'alicia')
+        self.assertEqual((moved['xp'], moved['display_nick']), (50, 'Alicia'))
         self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'alice') is None)
+        self.assertEqual(self._notices('duckrename %s a' % self.channel),
+                         [messages.tcl('en', 'm131', 'duckrename')])
+
+    def testDuckdelete(self):
+        cb = self._cb()
+        self._players(alice=50)
+        self.assertEqual(self._notices('duckdelete %s alice' % self.channel),
+                         [messages.tcl('en', 'm143', 'alice', self.channel)])
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'alice') is None)
+        self.assertEqual(self._notices('duckdelete %s alice' % self.channel),
+                         [messages.tcl('en', 'm142', 'alice', self.channel)])
+        self.assertEqual(self._notices('duckdelete %s' % self.channel),
+                         [messages.tcl('en', 'm141', 'duckdelete')])
+
+    def testFusionAndRenameNeedTheGameEnabledButDeleteAndListDoNot(self):
+        self._players(alice=50, bob=1)
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        m76 = [messages.tcl('en', 'm76', 'DuckHuntPro', self.channel)]
+        self.assertEqual(self._notices('duckfusion %s bob alice' % self.channel), m76)
+        self.assertEqual(self._notices('duckrename %s alice x' % self.channel), m76)
+        self.assertEqual(self._notices('ducklist ' + self.channel),
+                         [messages.tcl('en', 'm125', 2, 'alice bob')])
+        self.assertEqual(self._notices('duckdelete %s bob' % self.channel),
+                         [messages.tcl('en', 'm143', 'bob', self.channel)])
+
+    def testStaffCommandsNeedChannelOpHalfopOrAdmin(self):
+        cb = self._cb()
+        self._players(alice=50)
+        caps = []
+        real = ircdb.checkCapability
+        try:
+            ircdb.checkCapability = lambda prefix, cap, *a, **kw: cap in caps
+            for cap, allowed in ((self.channel + ',voice', False), (self.channel + ',op', True),
+                                 (self.channel + ',halfop', True), ('admin', True),
+                                 ('#other,op', False)):
+                caps[:] = [cap]
+                self.assertEqual(cb._isStaff(self.prefix, self.channel), allowed, cap)
+            caps[:] = []
+            for command in ('ducklist ' + self.channel, 'duckdelete %s alice' % self.channel,
+                            'unarm alice', 'rearm alice', 'ducklaunch ' + self.channel,
+                            'duckexport'):
+                sent = self._cmd(command)
+                self.assertFalse([x for c, _, x in sent if 'alice' in x or 'm143' in x], command)
+            self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'alice'))
+            self.assertFalse(self._key() in cb._activeDuck)
+            caps[:] = [self.channel + ',halfop']
+            self.assertEqual(self._notices('ducklist ' + self.channel),
+                             [messages.tcl('en', 'm124', 'alice')])
+            self.assertEqual(self._notices('duckexport'), [])      # global admin only
+        finally:
+            ircdb.checkCapability = real
 
     def testAdminPlanningShowsTimeList(self):
         cb = self._cb()
         chan = cb.db.channel(self.irc.network, self.channel)
         chan['planned_soarings'] = ['09:05', '03:14']   # out of order on purpose
         cb.db.save()
-        self.assertEqual(self._texts(self._cmd('admin planning'), 'NOTICE'),
+        self.assertEqual(self._texts(self._cmd('duckplanning ' + self.channel), 'NOTICE'),
                          [messages.tcl('en', 'm81', self.channel, '03:14, 09:05')])
 
     def testAdminPlanningEmpty(self):
-        self.assertEqual(self._texts(self._cmd('admin planning'), 'NOTICE'),
+        self.assertEqual(self._texts(self._cmd('duckplanning ' + self.channel), 'NOTICE'),
                          [messages.tcl('en', 'm154', self.channel)])
 
     def testAdminReplanningRebuildsSchedule(self):
         cb = self._cb()
-        sent = self._texts(self._cmd('admin replanning'), 'NOTICE')
+        sent = self._texts(self._cmd('duckreplanning ' + self.channel), 'NOTICE')
         chan = cb.db.getChannel(self.irc.network, self.channel)
         self.assertEqual(len(chan['planned_soarings']), cb.registryValue('ducksPerDay', self.channel))
         # the reply lists the new plan, sorted
@@ -2624,7 +2722,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testAdminLaunchForcesImmediateSpawn(self):
         cb = self._cb()
-        sent = self._cmd('admin launch')
+        sent = self._cmd('ducklaunch ' + self.channel)
         self.assertTrue(self._key() in cb._activeDuck)
         self.assertEqual([x for c, _, x in sent if c in ('PRIVMSG', 'NOTICE')],
                          [messages.tcl('en', 'm135')])        # just the flight announcement
@@ -2635,13 +2733,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         for arg, golden in (('', False), (' 0', False), (' 1', True)):
             cb._activeDuck.pop(self._key(), None)
             cb._rng = ScriptedRNG([0, 3])     # a golden roll would succeed with 0
-            self._cmd('admin launch' + arg)
+            self._cmd('ducklaunch ' + self.channel + arg)
             self.assertEqual(cb._activeDuck[self._key()][0]['is_golden'], golden, arg)
         cb._removeDuck(self.irc.network, self.channel)
 
     def testAdminCommandsRefuseADisabledChannel(self):
         conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
-        self.assertEqual(self._texts(self._cmd('admin launch'), 'NOTICE'),
+        self.assertEqual(self._texts(self._cmd('ducklaunch ' + self.channel), 'NOTICE'),
                          [messages.tcl('en', 'm76', 'DuckHuntPro', self.channel)])
 
     def testAdminLaunchAddsToExistingDucksInsteadOfBlocking(self):
@@ -2650,15 +2748,71 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # second one rather than being refused.
         cb = self._cb()
         self._putDuck()
-        self.assertNotError('admin launch')
+        self._cmd('ducklaunch ' + self.channel)
         self.assertEqual(len(cb._activeDuck[self._key()]), 2)
 
-    def testAdminExportWritesFile(self):
+    def _export(self, arg=''):
+        notices = self._notices(('duckexport ' + arg).strip())
+        self.assertEqual(len(notices), 1, notices)
+        path = os.path.join(str(conf.supybot.directories.data), 'DuckHuntPro', 'players_table.txt')
+        self.assertEqual(notices, [messages.tcl('en', 'm262', path)])
+        with open(path, encoding='utf-8') as f:
+            return f.read().split('\n')
+
+    def _exportPlayers(self):
         cb = self._cb()
-        cb.db.player(self.irc.network, self.channel, 'alice')['xp'] = 10
+        for nick, xp, killed in (('alice', 50, 3), ('Bob', 30, 12), ('carol', 400, 3)):
+            p = cb.db.player(self.irc.network, self.channel, nick)
+            p['xp'] = xp
+            p['stats']['killed'] = killed
+        cb.db.getPlayer(self.irc.network, self.channel, 'Bob')['stats']['best_time_ms'] = 2345
         cb.db.save()
-        m = self.assertNotError('admin export')
-        self.assertTrue('exported' in m.args[1])
+
+    def _exportNicks(self, lines):
+        start = lines.index(self.channel) + 4
+        nicks = []
+        for line in lines[start:]:
+            if not line:
+                break
+            nicks.append(line.split()[0])
+        return nicks
+
+    def testExportHasTheOriginalsLayout(self):
+        self._exportPlayers()
+        lines = self._export()
+        self.assertTrue(lines[1].startswith('|  DuckHuntPro v2.11 '))
+        self.assertIn('sorted by nick', lines[1])
+        self.assertEqual(lines[4], messages.tcl('en', 'm244') + ' ' + ' '.join(self._cb()._EXPORT_CRITERIA))
+        header = lines[lines.index(self.channel) + 2]
+        for key in range(209, 243):
+            self.assertIn(messages.tcl('en', 'm%d' % key), header)
+        bob = [l for l in lines if l.startswith('Bob ')][0]
+        for expected in ('2.345s', '100%', '30'):
+            self.assertIn(expected, bob)
+
+    def testExportSortsByNickByDefaultAndByCriteria(self):
+        self._exportPlayers()
+        self.assertEqual(self._exportNicks(self._export()), ['alice', 'Bob', 'carol'])
+        self.assertEqual(self._exportNicks(self._export('xp')), ['carol', 'alice', 'Bob'])
+        self.assertEqual(self._exportNicks(self._export('ducks')), ['Bob', 'alice', 'carol'])
+        self.assertEqual(self._exportNicks(self._export('best_time')), ['Bob', 'alice', 'carol'])
+        self.assertEqual(self._exportNicks(self._export('level')), ['carol', 'alice', 'Bob'])
+
+    def testExportRejectsABadCriterionAndExtraWords(self):
+        valid = list(self._cb()._EXPORT_CRITERIA)
+        valid.insert(len(valid) - 1, 'or')
+        self.assertEqual(self._notices('duckexport bogus'),
+                         [messages.tcl('en', 'm206', 'bogus', ' '.join(valid))])
+        self.assertEqual(self._notices('duckexport xp level'),
+                         [messages.tcl('en', 'm205', 'duckexport')])
+
+    def testExportOfAnEmptyDatabase(self):
+        lines = self._export()
+        self.assertIn(messages.tcl('en', 'm208'), lines)
+
+    def testPositionalMessagesFormat(self):
+        self.assertEqual(messages.tcl('en', 'm207', 'S', 'V', 'N', 'dd', 'mm', 'yyyy', 'time', 'xp'),
+                         'S vV (©2015-2016 Menz Agitat) - N - Report generated on mm/dd/yyyy at time - sorted by xp')
 
     # -----------------------------------------------------------------
     # Phase 3: antiflood
