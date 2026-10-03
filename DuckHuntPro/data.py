@@ -167,6 +167,16 @@ ITEM_COSTS = {
 
 MAX_BREAD_ON_CHAN = 20
 
+# Tcl shop item id (1-23) -> ITEM_COSTS key, in the order of the original's
+# catalogue (id N is SHOP_ITEMS[N - 1]).
+SHOP_ITEMS = (
+    'extra_ammo', 'extra_clip', 'ap_ammo', 'explosive_ammo', 'buyback_weapon',
+    'grease', 'sight', 'infrared_detector', 'silencer', 'four_leaf_clover',
+    'sunglasses', 'spare_clothes', 'brush', 'mirror', 'sand', 'water_bucket',
+    'sabotage', 'life_insurance', 'liability_insurance', 'decoy', 'bread',
+    'duck_detector', 'fake_duck',
+)
+
 # Kill drop table (cfg lines 404-438): per-1000 chance, keyed by drop name.
 DROP_TABLE = {
     # The order is the original's roll order (hit_a_duck): the first roll to

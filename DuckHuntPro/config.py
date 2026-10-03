@@ -123,6 +123,19 @@ conf.registerChannelValue(DuckHuntPro, 'minXpForShopping',
     after a shop purchase; a purchase that would drop them below this floor
     is refused."""))
 
+conf.registerChannelValue(DuckHuntPro, 'shopEnabled',
+    registry.Boolean(True, """Whether the shop command is available at all
+    (Duck_Hunt.tcl's shop_enabled; when off the command does nothing)."""))
+
+conf.registerChannelValue(DuckHuntPro, 'shopPreferredDisplayMode',
+    registry.Integer(0, """What `shop` without arguments shows: 0 = the
+    catalogue of items and prices, anything else = a message pointing to
+    shopUrl instead."""))
+
+conf.registerChannelValue(DuckHuntPro, 'shopUrl',
+    registry.String('', """The web page listing the shop items, shown when
+    shopPreferredDisplayMode is non-zero."""))
+
 conf.registerChannelValue(DuckHuntPro, 'dropsEnabled',
     registry.Boolean(True, """Whether killing a duck can also drop a bonus
     item/xp-book on top of the normal xp reward."""))

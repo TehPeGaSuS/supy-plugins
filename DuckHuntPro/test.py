@@ -790,238 +790,509 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     # Phase 2: shop purchase mechanics
     # -----------------------------------------------------------------
 
-    def testShopListShowsCatalog(self):
-        m = self.assertNotError('shop list')
-        self.assertTrue('grease' in m.args[1])
+    # ---- the shop command (port of ::DuckHunt::shop)
 
-    def testBuyUnknownItemFails(self):
-        self._richPlayer()
-        self.assertRegexp('shop buy nonsense', "isn't sold")
+    def _shopRun(self, text='', xp=1000, setup=None):
+        """Runs `shop <text>` for a player with `xp` xp and a full gun and
+        returns the texts the bot sent."""
+        def prep(p):
+            lvl = data.LEVELS[data.levelForXp(xp)]
+            self._tidy(p, ammo=lvl.clip_size, clips=lvl.clip_count, xp=xp)
+            if setup:
+                setup(p)
+        sent = self._cmd(('shop ' + text).strip(), setup=prep)
+        return [t for _, _, t in sent]
 
-    def testMinXpForShoppingBlocksPurchase(self):
-        # Fresh player starts at 0 xp; extra_ammo costs 7.
-        self.assertRegexp('shop buy extra_ammo', 'xp floor')
-
-    def testShopBlockedWhenGunConfiscatedExceptBuyback(self):
-        player = self._richPlayer()
-        player['gun_state'] = 'confiscated'
+    def _target(self, nick='bob', **fields):
+        """A known hunter who is in the channel."""
+        self._addOnlineNick(nick)
+        p = self._cb().db.player(self.irc.network, self.channel, nick)
+        p.update(fields)
         self._cb().db.save()
-        self.assertRegexp('shop buy grease', 'confiscated')
-        # buyback_weapon is the one exemption -- otherwise a confiscated
-        # player could never buy their way back to armed.
-        self.assertNotError('shop buy buyback_weapon')
-        player = self._cb().db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(player['gun_state'], 'armed')
+        return p
 
-    def testBuybackRequiresConfiscatedGun(self):
-        self._richPlayer()
-        self.assertRegexp('shop buy buyback_weapon', "isn't confiscated")
+    def _msg(self, key, *args, lang='en'):
+        return messages.tcl(lang, key, *args)
 
-    def testBuyExtraAmmoAddsRoundAndChargesXp(self):
-        cb = self._cb()
-        player = self._richPlayer()
-        player['clip_ammo'] = 0
-        cb.db.save()
-        self.assertNotError('shop buy extra_ammo')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(player['clip_ammo'], 1)
-        self.assertEqual(player['xp'], 100000 - data.ITEM_COSTS['extra_ammo'])
+    def _word(self, n, lang='en'):
+        return messages.plural(n, self._msg('m285', lang=lang), self._msg('m286', lang=lang))
 
-    def testBuyExtraAmmoBlockedWhenClipFull(self):
-        cb = self._cb()
-        player = self._richPlayer()
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
-        player['clip_ammo'] = lvl.clip_size
-        cb.db.save()
-        self.assertRegexp('shop buy extra_ammo', 'already full')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(player['xp'], 100000)  # not charged
+    def _okMsg(self, itemKey, mkey, *extra):
+        """The purchase message for items whose text is (nick, cost, word)."""
+        c = data.ITEM_COSTS[itemKey]
+        return self._msg(mkey, self.nick, c, self._word(c), *extra)
 
-    def testBuyExtraClipBlockedWhenAtCap(self):
-        cb = self._cb()
-        player = self._richPlayer()
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
-        player['clips_left'] = lvl.clip_count
-        cb.db.save()
-        self.assertRegexp('shop buy extra_clip', 'max number')
+    def _assertMsg(self, texts, key, *args):
+        """One message equal to the catalogue entry, where the argument
+        'WILDCARD' matches anything (a remaining-time span)."""
+        pattern = re.escape(self._msg(key, *args)).replace('WILDCARD', '.+')
+        self.assertEqual(len(texts), 1, texts)
+        self.assertRegex(texts[0], '^%s$' % pattern)
 
-    def testAmmoTypesAreMutuallyExclusive(self):
-        cb = self._cb()
-        self._richPlayer()
+    def _breadMsg(self, n):
+        c = data.ITEM_COSTS['bread']
+        return self._msg('m347', self.nick, c, self._word(c), n,
+                         messages.plural(n, self._msg('m348'), self._msg('m349')), self.channel)
+
+    def _xp(self):
+        return self._player()['xp']
+
+    def _item(self, p, key):
+        return db.itemActive(p, key, time.time())
+
+    def testShopNoArgumentListsTheCatalog(self):
+        costs = [data.ITEM_COSTS[k] for k in data.SHOP_ITEMS]
+        self.assertEqual(len(costs), 23)
+        texts = self._shopRun()
+        self.assertEqual(texts, [self._msg('m265', 'DuckHuntPro', *(costs + ['shop']))])
+        self.assertEqual(self._xp(), 1000)
+        # Listing is not a shop "activity" in Tcl (last_activity untouched).
+        self.assertTrue(self._player()['last_activity'] is None)
+
+    def testShopNoArgumentPointsToTheUrlWhenPreferred(self):
+        conf.supybot.plugins.DuckHuntPro.shopPreferredDisplayMode.setValue(1)
+        conf.supybot.plugins.DuckHuntPro.shopUrl.setValue('http://example.org/shop.html')
+        self.assertEqual(self._shopRun(), [self._msg(
+            'm263', 'DuckHuntPro', 'http://example.org/shop.html', 'shop')])
+
+    def testShopSyntaxErrors(self):
+        syntax = self._msg('m264', 'shop')
+        for text in ('0', '24', 'abc', '01', '-1', '1 bob', '5 x', '23 x', '14', '15',
+                     '16', '17', '14 a b', '1 2 3'):
+            self.assertEqual(self._shopRun(text), [syntax], text)
+        self.assertEqual(self._xp(), 1000)
+        self.assertTrue(self._player()['last_activity'] is None)
+
+    def testShopIsSilentWhenDisabled(self):
+        conf.supybot.plugins.DuckHuntPro.shopEnabled.setValue(False)
+        self.assertEqual(self._shopRun('1', setup=lambda p: p.update(clip_ammo=0)), [])
+        self.assertEqual(self._xp(), 1000)
+
+    def testShopRepliesFollowThePreferredDisplayMode(self):
+        sent = self._cmd('shop 99')
+        self.assertEqual(sent, [('PRIVMSG', self.channel, self._msg('m264', 'shop'))])
+        conf.supybot.plugins.DuckHuntPro.preferredDisplayMode.setValue(2)
+        sent = self._cmd('shop 99')
+        self.assertEqual(sent, [('NOTICE', self.nick, self._msg('m264', 'shop'))])
+        sent = self._cmd('shop 22', setup=lambda p: p.update(xp=1000))
+        self.assertEqual(sent, [('NOTICE', self.nick, self._okMsg('duck_detector', 'm350'))])
+
+    def testShopMessagesFollowTheChannelLanguage(self):
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertEqual(self._shopRun('1', xp=3, setup=lambda p: p.update(clip_ammo=0)),
+                         [self._msg('m266', self.nick, lang='fr')])
+        costs = data.ITEM_COSTS['sight']
+        texts = self._shopRun('7')
+        self.assertEqual(texts, [self._msg('m287', self.nick, costs, self._word(costs, 'fr'),
+                                           lang='fr')])
+
+    def testShopRefusesWhenTooPoorButStillCountsAsActivity(self):
+        # 3 xp - 7 < 0 (the default floor).
+        texts = self._shopRun('1', xp=3, setup=lambda p: p.update(clip_ammo=0))
+        self.assertEqual(texts, [self._msg('m266', self.nick)])
+        p = self._player()
+        self.assertEqual((p['xp'], p['clip_ammo']), (3, 0))
+        # Tcl stamps last_activity before the xp floor test.
+        self.assertTrue(p['last_activity'] is not None)
+
+    def testShopMinXpFloorIsConfigurable(self):
+        # The floor test comes first, whatever the item: with the default
+        # floor of 0, 10 xp cannot buy the 40 xp buyback even though the gun
+        # is not confiscated (which would be the next refusal).
+        self.assertEqual(self._shopRun('5', xp=10), [self._msg('m266', self.nick)])
+        conf.supybot.plugins.DuckHuntPro.minXpForShopping.setValue(5)
+        self.assertEqual(self._shopRun('5', xp=44), [self._msg('m266', self.nick)])
+        self.assertEqual(self._shopRun('5', xp=45), [self._msg('m281', self.nick)])
+        self.assertEqual(self._shopRun('1', xp=11, setup=lambda p: p.update(clip_ammo=0)),
+                         [self._msg('m266', self.nick)])
+        self.assertEqual(self._shopRun('1', xp=12, setup=lambda p: p.update(clip_ammo=0)),
+                         [self._okMsg('extra_ammo', 'm268')])
+        self.assertEqual(self._xp(), 12 - 7)
+        conf.supybot.plugins.DuckHuntPro.minXpForShopping.setValue(-20)
+        self.assertEqual(self._shopRun('1', xp=3, setup=lambda p: p.update(clip_ammo=0)),
+                         [self._okMsg('extra_ammo', 'm268')])
+        self.assertEqual(self._xp(), -4)
+
+    def testShopDoesNothingForAPermanentlyConfiscatedGun(self):
+        texts = self._shopRun('1', setup=lambda p: p.update(gun_state='confiscated_permanent',
+                                                          clip_ammo=0))
+        self.assertEqual(texts, [])
+        p = self._player()
+        self.assertEqual((p['xp'], p['clip_ammo'], p['gun_state']), (1000, 0, 'confiscated_permanent'))
+        self.assertTrue(p['last_activity'] is None)
+
+    def testShopStaysOpenForATemporarilyConfiscatedGun(self):
+        confiscated = lambda p: p.update(gun_state='confiscated')
+        # Items 1 and 2 need an armed gun...
+        self.assertEqual(self._shopRun('1', setup=confiscated), [self._msg('m5', self.nick)])
+        self.assertEqual(self._shopRun('2', setup=confiscated), [self._msg('m5', self.nick)])
+        # ...everything else works, including the buyback.
+        self.assertEqual(self._shopRun('6', setup=confiscated), [self._okMsg('grease', 'm284')])
+        self.assertEqual(self._shopRun('5', setup=confiscated), [self._okMsg('buyback_weapon', 'm282')])
+        self.assertEqual(self._player()['gun_state'], 'armed')
+
+    def testBuyExtraAmmo(self):
+        texts = self._shopRun('1', setup=lambda p: p.update(clip_ammo=0))
+        self.assertEqual(texts, [self._okMsg('extra_ammo', 'm268')])
+        p = self._player()
+        self.assertEqual(p['clip_ammo'], 1)
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['extra_ammo'])
+        self.assertTrue(p['last_activity'] is not None)
+
+    def testBuyExtraAmmoRefusedWhenClipFull(self):
+        self.assertEqual(self._shopRun('1'), [self._msg('m267', self.nick)])
+        self.assertEqual(self._xp(), 1000)
+
+    def testBuyExtraClip(self):
+        texts = self._shopRun('2', setup=lambda p: p.update(clips_left=0))
+        self.assertEqual(texts, [self._okMsg('extra_clip', 'm270')])
+        p = self._player()
+        self.assertEqual(p['clips_left'], 1)
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['extra_clip'])
+
+    def testBuyExtraClipRefusedWhenReserveFull(self):
+        self.assertEqual(self._shopRun('2'), [self._msg('m269', self.nick)])
+        self.assertEqual(self._xp(), 1000)
+
+    def testBuyApAmmoReplacesExplosiveAndRefusesToStack(self):
+        def explosive(p):
+            db.giveItem(p, 'explosive_ammo', time.time(), duration=86400)
+        self.assertEqual(self._shopRun('3', setup=explosive), [self._okMsg('ap_ammo', 'm278')])
+        p = self._player()
+        self.assertTrue(self._item(p, 'ap_ammo') is not None)
+        self.assertTrue(self._item(p, 'explosive_ammo') is None)
+        self.assertTrue(85000 < p['items']['ap_ammo']['expires_at'] - time.time() <= 86400)
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['ap_ammo'])
+        texts = self._shopRun('3', setup=lambda p: None, xp=p['xp'])
+        self._assertMsg(texts, 'm277', self.nick, 'WILDCARD')
+        self.assertEqual(self._xp(), p['xp'])
+
+    def testBuyExplosiveAmmoReplacesApAndRefusesToStack(self):
+        def ap(p):
+            db.giveItem(p, 'ap_ammo', time.time(), duration=86400)
+        self.assertEqual(self._shopRun('4', setup=ap), [self._okMsg('explosive_ammo', 'm279')])
+        p = self._player()
+        self.assertTrue(self._item(p, 'explosive_ammo') is not None)
+        self.assertTrue(self._item(p, 'ap_ammo') is None)
+        self._assertMsg(self._shopRun('4', xp=p['xp']), 'm277', self.nick, 'WILDCARD')
+
+    def testBuyBuybackNeedsAConfiscatedGun(self):
+        self.assertEqual(self._shopRun('5'), [self._msg('m281', self.nick)])
+        self.assertEqual(self._xp(), 1000)
+
+    def testBuyBuybackReturnsTheGun(self):
+        texts = self._shopRun('5', setup=lambda p: p.update(gun_state='confiscated'))
+        self.assertEqual(texts, [self._okMsg('buyback_weapon', 'm282')])
+        p = self._player()
+        self.assertEqual(p['gun_state'], 'armed')
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['buyback_weapon'])
+
+    def testBuyGrease(self):
+        self.assertEqual(self._shopRun('6'), [self._okMsg('grease', 'm284')])
+        p = self._player()
+        self.assertTrue(85000 < p['items']['grease']['expires_at'] - time.time() <= 86400)
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['grease'])
+        self._assertMsg(self._shopRun('6', xp=p['xp']), 'm283', self.nick, 'WILDCARD')
+        self.assertEqual(self._xp(), 1000 - data.ITEM_COSTS['grease'])
+
+    def testBuySight(self):
+        self.assertEqual(self._shopRun('7'), [self._okMsg('sight', 'm287')])
+        p = self._player()
+        self.assertEqual(p['items']['sight']['uses_left'], 1)
+        self.assertTrue(p['items']['sight']['expires_at'] is None)
+        self.assertEqual(self._shopRun('7', xp=p['xp']),
+                         [self._msg('m288', self.nick, 1, self._msg('m292'))])
+
+    def testBuyInfraredDetector(self):
+        self.assertEqual(self._shopRun('8'), [self._okMsg('infrared_detector', 'm289')])
+        p = self._player()
+        self.assertEqual(p['items']['infrared_detector']['uses_left'], 6)
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['infrared_detector'])
+        self._assertMsg(self._shopRun('8', xp=p['xp']), 'm295', self.nick, 'WILDCARD', 6,
+                        self._msg('m293'))
+
+    def testBuySilencer(self):
+        self.assertEqual(self._shopRun('9'), [self._okMsg('silencer', 'm291')])
+        p = self._player()
+        self.assertTrue(self._item(p, 'silencer') is not None)
+        self._assertMsg(self._shopRun('9', xp=p['xp']), 'm283', self.nick, 'WILDCARD')
+
+    def testBuyFourLeafClover(self):
+        self._cb()._rng = ScriptedRNG([7])
+        c = data.ITEM_COSTS['four_leaf_clover']
+        texts = self._shopRun('10')
+        self.assertEqual(texts, [self._msg(
+            'm294', self.nick, c, self._word(c), 7,
+            '%s %s' % (self._msg('m286'), self._msg('m425')))])
+        p = self._player()
+        self.assertEqual(p['items']['four_leaf_clover']['value'], 7)
+        self._assertMsg(self._shopRun('10', xp=p['xp']), 'm283', self.nick, 'WILDCARD')
+        # A bonus of 1 uses the singular wording.
+        self._cb()._rng = ScriptedRNG([1])
+        texts = self._shopRun('10', setup=lambda p: p['items'].clear())
+        self.assertEqual(texts, [self._msg(
+            'm294', self.nick, c, self._word(c), 1,
+            '%s %s' % (self._msg('m285'), self._msg('m424')))])
+
+    def testBuySunglasses(self):
+        self.assertEqual(self._shopRun('11'), [self._okMsg('sunglasses', 'm296')])
+        p = self._player()
+        self.assertTrue(self._item(p, 'sunglasses') is not None)
+        self._assertMsg(self._shopRun('11', xp=p['xp']), 'm283', self.nick, 'WILDCARD')
+
+    def testBuySpareClothes(self):
+        self.assertEqual(self._shopRun('12'), [self._msg('m297', self.nick)])
+        self.assertEqual(self._xp(), 1000)
+        def wet(p):
+            db.giveItem(p, 'water_bucket', time.time(), duration=3600, value='bob')
+        self.assertEqual(self._shopRun('12', setup=wet), [self._okMsg('spare_clothes', 'm298')])
+        p = self._player()
+        self.assertTrue(self._item(p, 'water_bucket') is None)
+        self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['spare_clothes'])
+
+    def testBuyBrush(self):
+        self.assertEqual(self._shopRun('13'), [self._msg('m299', self.nick)])
+        self.assertEqual(self._xp(), 1000)
         now = time.time()
-        self.assertNotError('shop buy ap_ammo')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertTrue(db.itemActive(player, 'ap_ammo', now) is not None)
-        self.assertNotError('shop buy explosive_ammo')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertTrue(db.itemActive(player, 'ap_ammo', now) is None)
-        self.assertTrue(db.itemActive(player, 'explosive_ammo', now) is not None)
+        def sand(p):
+            db.giveItem(p, 'sand', now, uses=1, value='bob')
+        def sabotage(p):
+            db.giveItem(p, 'sabotage', now, uses=1, value='bob')
+        def both(p):
+            sand(p)
+            sabotage(p)
+        for setup in (sand, sabotage, both):
+            self.assertEqual(self._shopRun('13', setup=lambda p: (p['items'].clear(), setup(p))),
+                             [self._okMsg('brush', 'm300')])
+            p = self._player()
+            self.assertEqual(p['items'], {})
+            self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['brush'])
 
-    def testBuyingActiveItemTwiceIsBlocked(self):
-        self._richPlayer()
-        self.assertNotError('shop buy grease')
-        self.assertRegexp('shop buy grease', 'already has')
-
-    def testBuyCloverStoresRandomBonus(self):
-        cb = self._cb()
-        self._richPlayer()
-        cb._rng = ScriptedRNG([7])
-        self.assertNotError('shop buy four_leaf_clover')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        item = db.itemActive(player, 'four_leaf_clover', time.time())
-        self.assertEqual(item['value'], 7)
-
-    def testBuySightGivesUsableItem(self):
-        self._richPlayer()
-        self.assertNotError('shop buy sight')
-        player = self._cb().db.getPlayer(self.irc.network, self.channel, self.nick)
-        item = db.itemActive(player, 'sight', time.time())
-        self.assertEqual(item['uses_left'], 1)
-
-    def testMirrorRequiresTarget(self):
-        self._richPlayer()
-        self.assertRegexp('shop buy mirror', 'needs a target')
-
-    def testMirrorCannotTargetSelf(self):
-        self._richPlayer()
-        self.assertRegexp('shop buy mirror %s' % self.nick, "target yourself")
-
-    def testMirrorTargetMustBeOnline(self):
-        self._richPlayer()
-        self._cb().db.player(self.irc.network, self.channel, 'ghost')
-        self.assertRegexp('shop buy mirror ghost', "isn't in the channel")
-
-    def testMirrorTargetMustHavePlayed(self):
-        self._richPlayer()
+    def testMirrorTargetChecks(self):
+        self.assertEqual(self._shopRun('14 newbie'), [self._msg('m362', self.nick)])
         self._addOnlineNick('newbie')
-        self.assertRegexp('shop buy mirror newbie', "hasn't played")
+        self.assertEqual(self._shopRun('14 newbie'), [self._msg('m362', self.nick)])
+        self._cb().db.player(self.irc.network, self.channel, 'ghost')
+        self.assertEqual(self._shopRun('14 ghost'), [self._msg('m363', self.nick, 'ghost')])
+        self._target('bob', items={'mirror_dazzle': {'expires_at': None, 'uses_left': 1,
+                                                       'value': 'x'}})
+        self.assertEqual(self._shopRun('14 bob'), [self._msg('m324', self.nick, 'bob')])
+        self.assertEqual(self._xp(), 1000)
 
-    def testMirrorAppliesDazzleToTarget(self):
-        cb = self._cb()
-        self._richPlayer()
-        self._addOnlineNick('bob')
-        cb.db.player(self.irc.network, self.channel, 'bob')
-        self.assertNotError('shop buy mirror bob')
-        target = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertTrue(db.itemActive(target, 'mirror_dazzle', time.time()) is not None)
+    def testMirrorDazzlesTheTarget(self):
+        self._target('bob')
+        c = data.ITEM_COSTS['mirror']
+        self.assertEqual(self._shopRun('14 bob'), [self._msg(
+            'm326', self.nick, c, self._word(c), 'bob')])
+        item = self._item(self._bob(), 'mirror_dazzle')
+        self.assertEqual((item['value'], item['uses_left'], item['expires_at']),
+                         (self.nick, 1, None))
+        self.assertEqual(self._xp(), 1000 - c)
 
-    def testMirrorFailsHarmlesslyAgainstSunglasses(self):
-        cb = self._cb()
-        self._richPlayer()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        db.giveItem(bob, 'sunglasses', time.time(), duration=86400)
-        cb.db.save()
-        self.assertRegexp('shop buy mirror bob', 'sunglasses')
-        # still charged even though it had no effect
-        me = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(me['xp'], 100000 - data.ITEM_COSTS['mirror'])
-        self.assertTrue(db.itemActive(bob, 'mirror_dazzle', time.time()) is None)
+    def testMirrorChecksTheBuyersSunglassesNotTheTargets(self):
+        c = data.ITEM_COSTS['mirror']
+        # Tcl quirk: the sunglasses tested are the BUYER's, though the message
+        # blames the target. The buyer pays and nothing happens.
+        self._target('bob')
+        def glasses(p):
+            db.giveItem(p, 'sunglasses', time.time(), duration=86400)
+        self.assertEqual(self._shopRun('14 bob', setup=glasses), [self._msg(
+            'm325', self.nick, 'bob', c, self._word(c))])
+        self.assertTrue(self._item(self._bob(), 'mirror_dazzle') is None)
+        self.assertEqual(self._xp(), 1000 - c)
+        # ...while a target wearing sunglasses is dazzled all the same.
+        db.giveItem(self._bob(), 'sunglasses', time.time(), duration=86400)
+        self.assertEqual(self._shopRun('14 bob', setup=lambda p: p['items'].clear()), [self._msg(
+            'm326', self.nick, c, self._word(c), 'bob')])
+        self.assertTrue(self._item(self._bob(), 'mirror_dazzle') is not None)
 
-    def testSandRequiresTargetWithGun(self):
-        cb = self._cb()
-        self._richPlayer()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        bob['gun_state'] = 'confiscated'
-        cb.db.save()
-        self.assertRegexp('shop buy sand bob', "doesn't have a weapon")
+    def testMirrorCanTargetYourself(self):
+        # Tcl has no "target yourself" refusal.
+        self._addOnlineNick(self.nick)
+        c = data.ITEM_COSTS['mirror']
+        self.assertEqual(self._shopRun('14 %s' % self.nick), [self._msg(
+            'm326', self.nick, c, self._word(c), self.nick)])
+        self.assertTrue(self._item(self._player(), 'mirror_dazzle') is not None)
 
-    def testSandAbsorbedByGrease(self):
-        cb = self._cb()
-        self._richPlayer()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
+    def testSandTargetChecks(self):
+        self.assertEqual(self._shopRun('15 newbie'), [self._msg('m362', self.nick)])
+        self._cb().db.player(self.irc.network, self.channel, 'ghost')
+        self.assertEqual(self._shopRun('15 ghost'), [self._msg('m364', self.nick, 'ghost')])
+        self._target('bob', gun_state='confiscated')
+        self.assertEqual(self._shopRun('15 bob'), [self._msg('m367', self.nick, 'bob')])
+        self._bob()['gun_state'] = 'confiscated_permanent'
+        self.assertEqual(self._shopRun('15 bob'), [self._msg('m367', self.nick, 'bob')])
+        self._bob()['gun_state'] = 'armed'
+        db.giveItem(self._bob(), 'sand', time.time(), uses=1, value='x')
+        self.assertEqual(self._shopRun('15 bob'), [self._msg('m327', self.nick, 'bob')])
+        self.assertEqual(self._xp(), 1000)
+
+    def testSandJamsTheTargetAndGreaseAbsorbsIt(self):
+        c = data.ITEM_COSTS['sand']
+        bob = self._target('bob')
+        self.assertEqual(self._shopRun('15 bob'), [self._msg(
+            'm329', self.nick, 'bob', c, self._word(c))])
+        self.assertEqual(self._item(bob, 'sand')['value'], self.nick)
+        self.assertEqual(self._xp(), 1000 - c)
+        # With grease on the target the sand has no effect (the grease goes).
+        bob['items'].clear()
         db.giveItem(bob, 'grease', time.time(), duration=86400)
-        cb.db.save()
-        self.assertRegexp('shop buy sand bob', 'greased')
-        self.assertTrue(db.itemActive(bob, 'grease', time.time()) is None)
-        self.assertTrue(db.itemActive(bob, 'sand', time.time()) is None)
+        self.assertEqual(self._shopRun('15 bob'), [self._msg(
+            'm328', self.nick, 'bob', c, self._word(c))])
+        self.assertTrue(self._item(bob, 'grease') is None)
+        self.assertTrue(self._item(bob, 'sand') is None)
+        self.assertEqual(self._xp(), 1000 - c)
+        # A target already sanded is refused even when greased too.
+        db.giveItem(bob, 'grease', time.time(), duration=86400)
+        db.giveItem(bob, 'sand', time.time(), uses=1, value='x')
+        self.assertEqual(self._shopRun('15 bob'), [self._msg('m327', self.nick, 'bob')])
+        self.assertTrue(self._item(bob, 'grease') is not None)
 
-    def testWaterBucketAppliesHourLongDebuff(self):
-        cb = self._cb()
-        self._richPlayer()
-        self._addOnlineNick('bob')
-        cb.db.player(self.irc.network, self.channel, 'bob')
-        self.assertNotError('shop buy water_bucket bob')
-        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        item = db.itemActive(bob, 'water_bucket', time.time())
-        self.assertTrue(item is not None)
+    def testWaterBucket(self):
+        self.assertEqual(self._shopRun('16 newbie'), [self._msg('m362', self.nick)])
+        self._cb().db.player(self.irc.network, self.channel, 'ghost')
+        self.assertEqual(self._shopRun('16 ghost'), [self._msg('m365', self.nick, 'ghost')])
+        c = data.ITEM_COSTS['water_bucket']
+        bob = self._target('bob')
+        self.assertEqual(self._shopRun('16 bob'), [self._msg(
+            'm331', self.nick, 'bob', c, self._word(c))])
+        item = self._item(bob, 'water_bucket')
         self.assertTrue(3500 < item['expires_at'] - time.time() <= 3600)
+        self.assertEqual(item['value'], self.nick)
+        self.assertEqual(self._xp(), 1000 - c)
+        self.assertEqual(self._shopRun('16 bob', xp=1000 - c), [self._msg('m330', self.nick, 'bob')])
+        self.assertEqual(self._xp(), 1000 - c)
 
-    def testSabotageRequiresTargetWithGun(self):
+    def testWaterBucketIgnoresTheTargetsGun(self):
+        self._target('bob', gun_state='confiscated')
+        c = data.ITEM_COSTS['water_bucket']
+        self.assertEqual(self._shopRun('16 bob'), [self._msg(
+            'm331', self.nick, 'bob', c, self._word(c))])
+
+    def testSabotage(self):
+        self.assertEqual(self._shopRun('17 newbie'), [self._msg('m362', self.nick)])
+        self._cb().db.player(self.irc.network, self.channel, 'ghost')
+        self.assertEqual(self._shopRun('17 ghost'), [self._msg('m366', self.nick, 'ghost')])
+        c = data.ITEM_COSTS['sabotage']
+        bob = self._target('bob', gun_state='confiscated')
+        self.assertEqual(self._shopRun('17 bob'), [self._msg('m368', self.nick, 'bob')])
+        bob['gun_state'] = 'armed'
+        self.assertEqual(self._shopRun('17 bob'), [self._msg(
+            'm336', self.nick, 'bob', c, self._word(c))])
+        self.assertEqual(self._item(bob, 'sabotage')['value'], self.nick)
+        self.assertEqual(self._xp(), 1000 - c)
+        self.assertEqual(self._shopRun('17 bob', xp=1000 - c), [self._msg('m335', self.nick, 'bob')])
+        self.assertEqual(self._xp(), 1000 - c)
+
+    def testTargetNameIsMatchedCaseInsensitively(self):
+        bob = self._target('bob')
+        c = data.ITEM_COSTS['sabotage']
+        self.assertEqual(self._shopRun('17 BOB'), [self._msg(
+            'm336', self.nick, 'BOB', c, self._word(c))])
+        self.assertTrue(self._item(bob, 'sabotage') is not None)
+
+    def testBuyLifeInsurance(self):
+        self.assertEqual(self._shopRun('18'), [self._okMsg('life_insurance', 'm339')])
+        p = self._player()
+        item = p['items']['life_insurance']
+        self.assertEqual(item['uses_left'], 1)
+        self.assertTrue(600000 < item['expires_at'] - time.time() <= 604800)
+        self._assertMsg(self._shopRun('18', xp=p['xp']), 'm295', self.nick, 'WILDCARD', 1,
+                        self._msg('m292'))
+
+    def testBuyLiabilityInsurance(self):
+        self.assertEqual(self._shopRun('19'), [self._okMsg('liability_insurance', 'm342')])
+        p = self._player()
+        self.assertTrue(170000 < p['items']['liability_insurance']['expires_at']
+                        - time.time() <= 172800)
+        self._assertMsg(self._shopRun('19', xp=p['xp']), 'm283', self.nick, 'WILDCARD')
+
+    def testBuyDecoySchedulesAPendingSpawn(self):
         cb = self._cb()
-        self._richPlayer()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        bob['gun_state'] = 'confiscated'
-        cb.db.save()
-        self.assertRegexp('shop buy sabotage bob', "doesn't have a weapon")
-
-    def testSpareClothesCuresWaterBucket(self):
-        cb = self._cb()
-        player = self._richPlayer()
-        db.giveItem(player, 'water_bucket', time.time(), duration=3600, value='bob')
-        cb.db.save()
-        self.assertNotError('shop buy spare_clothes')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertTrue(db.itemActive(player, 'water_bucket', time.time()) is None)
-
-    def testSpareClothesNoopWithoutWaterBucket(self):
-        self._richPlayer()
-        self.assertRegexp('shop buy spare_clothes', "doesn't need")
-
-    def testBrushCuresSandAndSabotage(self):
-        cb = self._cb()
-        player = self._richPlayer()
-        now = time.time()
-        db.giveItem(player, 'sand', now, duration=None, uses=1, value='bob')
-        db.giveItem(player, 'sabotage', now, duration=None, uses=1, value='bob')
-        cb.db.save()
-        self.assertNotError('shop buy brush')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertTrue(db.itemActive(player, 'sand', now) is None)
-        self.assertTrue(db.itemActive(player, 'sabotage', now) is None)
-
-    def testLifeAndLiabilityInsurancePurchaseOnly(self):
-        # Phase 2 doesn't implement the friendly-fire/accident mechanic yet
-        # (that's Phase 3), so these items can be bought and stored but have
-        # no bang()-time trigger point wired up yet -- this just confirms
-        # the purchase and item-storage side works.
-        cb = self._cb()
-        self._richPlayer()
-        self.assertNotError('shop buy life_insurance')
-        self.assertNotError('shop buy liability_insurance')
-        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        now = time.time()
-        self.assertTrue(db.itemActive(player, 'life_insurance', now) is not None)
-        self.assertTrue(db.itemActive(player, 'liability_insurance', now) is not None)
-
-    def testBuyDecoySchedulesPendingSpawn(self):
-        cb = self._cb()
-        self._richPlayer()
         cb._rng = ScriptedRNG([42])
-        self.assertNotError('shop buy decoy')
+        before = time.time()
+        self.assertEqual(self._shopRun('20'), [self._okMsg('decoy', 'm344')])
+        entry = cb.db.getChannel(self.irc.network, self.channel)['fake_ducks_pending'][0]
+        self.assertEqual((entry['kind'], entry['force_non_golden'], entry['buyer']),
+                         ('decoy', False, None))
+        self.assertTrue(abs(entry['fires_at'] - (before + 42)) < 5)
+        self.assertEqual(self._xp(), 1000 - data.ITEM_COSTS['decoy'])
+
+    def testDecoyCanBeKeptFromAttractingGoldenDucks(self):
+        conf.supybot.plugins.DuckHuntPro.decoysCanAttractGoldenDucks.setValue(False)
+        self._shopRun('20')
+        entry = self._cb().db.getChannel(self.irc.network, self.channel)['fake_ducks_pending'][0]
+        self.assertTrue(entry['force_non_golden'])
+
+    def _sleepNow(self):
+        conf.supybot.plugins.DuckHuntPro.duckSleepHours.setValue(
+            '%d' % datetime.fromtimestamp(time.time()).hour)
+
+    def testDecoyAndBreadRefusedWhileTheDucksSleep(self):
+        self._sleepNow()
+        self.assertEqual(self._shopRun('20'), [self._msg('m388', self.nick)])
+        self.assertEqual(self._shopRun('21'), [self._msg('m388', self.nick)])
+        self.assertEqual(self._xp(), 1000)
+        conf.supybot.plugins.DuckHuntPro.cantAttractDucksWhenSleeping.setValue(False)
+        self.assertEqual(self._shopRun('20'), [self._okMsg('decoy', 'm344')])
+        self.assertEqual(self._shopRun('21'), [self._breadMsg(1)])
+
+    def testBuyBreadStacksAndTellsTheCount(self):
+        cb = self._cb()
+        calls = []
+        cb._onBreadChanged = lambda network, channel, reason: calls.append(reason)
+        c = data.ITEM_COSTS['bread']
+        for n in (1, 2):
+            self.assertEqual(self._shopRun('21'), [self._breadMsg(n)])
+        self.assertEqual(calls, ['bread_added', 'bread_added'])
         chan = cb.db.getChannel(self.irc.network, self.channel)
-        self.assertEqual(len(chan['fake_ducks_pending']), 1)
-        self.assertEqual(chan['fake_ducks_pending'][0]['kind'], 'decoy')
+        self.assertEqual(len(chan['bread']), 2)
+        self.assertTrue(3500 < chan['bread'][0]['expires_at'] - time.time() <= 3600)
+        self.assertEqual(self._xp(), 1000 - c)
+
+    def testBreadIsRefusedAtTheCapButTheCapIsAnEqualityTest(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        conf.supybot.plugins.DuckHuntPro.maxBreadOnChan.setValue(2)
+        for _ in range(2):
+            db.addBread(chan, time.time(), data.BREAD_DURATION)
+        self.assertEqual(self._shopRun('21'), [self._msg('m387', self.nick, 2, self.channel)])
+        self.assertEqual(self._xp(), 1000)
+        self.assertEqual(len(chan['bread']), 2)
+        # Tcl quirk: the test is `==`, so with more pieces than the cap
+        # (the cap was lowered meanwhile) a purchase goes through.
+        conf.supybot.plugins.DuckHuntPro.maxBreadOnChan.setValue(1)
+        texts = self._shopRun('21')
+        self.assertEqual(len(chan['bread']), 3)
+        self.assertEqual(texts, [self._breadMsg(3)])
+
+    def testBuyDuckDetector(self):
+        self.assertEqual(self._shopRun('22'), [self._okMsg('duck_detector', 'm350')])
+        p = self._player()
+        self.assertEqual(p['items']['duck_detector']['uses_left'], 1)
+        self.assertEqual(self._shopRun('22', xp=p['xp']),
+                         [self._msg('m288', self.nick, 1, self._msg('m292'))])
+        self.assertEqual(self._xp(), 1000 - data.ITEM_COSTS['duck_detector'])
 
     def testBuyFakeDuckSchedulesFixedDelaySpawn(self):
         cb = self._cb()
-        self._richPlayer()
         before = time.time()
-        self.assertNotError('shop buy fake_duck')
-        chan = cb.db.getChannel(self.irc.network, self.channel)
-        entry = chan['fake_ducks_pending'][0]
+        self.assertEqual(self._shopRun('23'), [self._okMsg('fake_duck', 'm361')])
+        entry = cb.db.getChannel(self.irc.network, self.channel)['fake_ducks_pending'][0]
         self.assertEqual(entry['kind'], 'fake_duck')
         self.assertTrue(entry['force_non_golden'])
         self.assertEqual(entry['buyer'], self.nick)
         self.assertTrue(abs(entry['fires_at'] - (before + data.FAKE_DUCK_DELAY)) < 5)
+        self.assertEqual(self._xp(), 1000 - data.ITEM_COSTS['fake_duck'])
+
+    def testFakeDuckHasNoSleepOrGunCheck(self):
+        self._sleepNow()
+        texts = self._shopRun('23', setup=lambda p: p.update(gun_state='confiscated'))
+        self.assertEqual(texts, [self._okMsg('fake_duck', 'm361')])
 
     def testFireSpecialSpawnProducesFakeDuck(self):
         cb = self._cb()
-        self._richPlayer()
-        self.assertNotError('shop buy fake_duck')
+        self._shopRun('23')
         chan = cb.db.getChannel(self.irc.network, self.channel)
         firesAt = chan['fake_ducks_pending'][0]['fires_at']
         cb._fireSpecialSpawn(self.irc.network, self.channel, firesAt)
@@ -1030,15 +1301,29 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertFalse(duck['is_golden'])
         cb._removeDuck(self.irc.network, self.channel)
 
-    def testBreadStacksAndCapsAtMax(self):
+    def testShopPurchaseThatDemotesAddsTheLevelDownText(self):
+        # xp 272 is in level 7's range (clips of 4 x 3); 267 is level 6's.
+        self.assertEqual(data.levelForXp(272), 7)
+        self.assertEqual(data.levelForXp(267), 6)
+        texts = self._shopRun('11', xp=272, setup=lambda p: p.update(clips_left=3))
+        self.assertEqual(texts, [self._okMsg('sunglasses', 'm296') + self._msg(
+            'm280', 6, messages.lvl2rank(6, 'en'))])
+        p = self._player()
+        self.assertEqual(p['xp'], 267)
+        # The reserve is cut back to what the lower level allows.
+        self.assertEqual(p['clips_left'], data.LEVELS[6].clip_count)
+
+    def testShopRefusalNeverAddsTheLevelDownText(self):
+        texts = self._shopRun('12', xp=272)
+        self.assertEqual(texts, [self._msg('m297', self.nick)])
+
+    def testShopUseDuringADuckAddsToTheReflexTime(self):
         cb = self._cb()
-        self._richPlayer()
-        conf.supybot.plugins.DuckHuntPro.maxBreadOnChan.setValue(2)
-        self.assertNotError('shop buy bread')
-        self.assertNotError('shop buy bread')
-        self.assertRegexp('shop buy bread', 'enough bread')
-        chan = cb.db.getChannel(self.irc.network, self.channel)
-        self.assertEqual(len(chan['bread']), 2)
+        self._putDuck()
+        cb._activeDuck[self._key()][0]['spawned_at'] = time.time() - 5
+        self._shopRun()
+        self.assertTrue(5000 <= self._player()['stats']['reflex_ms'] < 9000)
+        cb._removeDuck(self.irc.network, self.channel)
 
     def testBreadBoostsEscapeTimeAndPlannedFlightCount(self):
         cb = self._cb()
@@ -1834,12 +2119,14 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._maybeHandBackOnDuckGone(self.irc.network, self.channel)
         self.assertEqual(self._bob()['gun_state'], 'confiscated_permanent')
 
-    def testBuybackRefusesPermanentConfiscation(self):
+    def testShopIgnoresAPermanentlyConfiscatedGun(self):
         cb = self._cb()
         player = self._richPlayer()
         player['gun_state'] = 'confiscated_permanent'
         cb.db.save()
-        self.assertRegexp('shop buy buyback_weapon', 'only an op')
+        # Tcl closes the shop to a permanently confiscated gun, silently.
+        self.assertEqual(self._cmd('shop 5'), [])
+        self.assertEqual(self._player()['gun_state'], 'confiscated_permanent')
 
     # -----------------------------------------------------------------
     # Phase 3: anti-highlight duck art
@@ -2141,7 +2428,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb = self._cb()
         self._putDuck(hp_total=1)
         self._richPlayer()
-        self.assertNotError('shop buy fake_duck')
+        self.assertEqual(len(self._cmd('shop 23')), 1)
         chan = cb.db.getChannel(self.irc.network, self.channel)
         firesAt = chan['fake_ducks_pending'][0]['fires_at']
         cb._fireSpecialSpawn(self.irc.network, self.channel, firesAt)

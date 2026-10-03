@@ -77,37 +77,10 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduled = set()  # event names we've scheduled, for die()
         self._httpRunning = False
         self._floodWindows = {}  # (network, channel, nick) -> [timestamps]
-        self._shopHandlers = {
-            'extra_ammo': self._buyExtraAmmo,
-            'extra_clip': self._buyExtraClip,
-            'ap_ammo': self._buyApAmmo,
-            'explosive_ammo': self._buyExplosiveAmmo,
-            'buyback_weapon': self._buyBuyback,
-            'grease': self._buyGrease,
-            'sight': self._buySight,
-            'infrared_detector': self._buyInfrared,
-            'silencer': self._buySilencer,
-            'four_leaf_clover': self._buyClover,
-            'sunglasses': self._buySunglasses,
-            'spare_clothes': self._buySpareClothes,
-            'brush': self._buyBrush,
-            'mirror': self._buyMirror,
-            'sand': self._buySand,
-            'water_bucket': self._buyWaterBucket,
-            'sabotage': self._buySabotage,
-            'life_insurance': self._buyLifeInsurance,
-            'liability_insurance': self._buyLiabilityInsurance,
-            'decoy': self._buyDecoy,
-            'bread': self._buyBread,
-            'duck_detector': self._buyDuckDetector,
-            'fake_duck': self._buyFakeDuck,
-        }
-        # The nested `shop`/`admin` command groups are instantiated by
-        # BasePlugin's __init__ (above) but have no reference to this
-        # instance -- hand them one explicitly, same as Blacklist's
-        # exempt/net groups. (Found the hard way in Phase 2: this is NOT
-        # automatic and forgetting it only fails at runtime.)
-        self.shop.plugin = self
+        # The nested `admin` command group is instantiated by BasePlugin's
+        # __init__ (above) but has no reference to this instance -- hand it
+        # one explicitly. (This is NOT automatic and forgetting it only fails
+        # at runtime.)
         self.admin.plugin = self
         self._reschedulePlannedFlights(irc)
         self._scheduleAmmoRefill()
@@ -617,6 +590,13 @@ class DuckHuntPro(callbacks.Plugin):
         name = "DuckHuntPro:special:%s:%s:%s:%r" % (network, channelName.lower(), kind, firesAt)
         self._scheduleEvent(name, firesAt, self._fireSpecialSpawn, (network, channelName, firesAt))
 
+    def _onBreadChanged(self, network, channelName, reason):
+        """Hook for the original's plan_out_flights(chan, bread_added /
+        bread_expired): the day's flights get replanned when bread is bought
+        or runs out. reason is 'bread_added' or 'bread_expired'. (Replanning
+        is implemented in the scheduling phase; until then this does nothing.)"""
+        return None
+
     def _currentEscapeTime(self, network, channelName, now):
         base = self.registryValue('escapeTime', channelName)
         chan = self.db.channel(network, channelName)
@@ -765,16 +745,6 @@ class DuckHuntPro(callbacks.Plugin):
         if player['clip_ammo'] is None:
             player['clip_ammo'] = lvl.clip_size
             player['clips_left'] = lvl.clip_count
-
-    def _formatDuration(self, seconds):
-        seconds = int(seconds)
-        if seconds < 60:
-            return "%ds" % seconds
-        minutes, seconds = divmod(seconds, 60)
-        if minutes < 60:
-            return "%dm%ds" % (minutes, seconds)
-        hours, minutes = divmod(minutes, 60)
-        return "%dh%dm" % (hours, minutes)
 
     def _ducksScaring(self, network, channel, player, now):
         """Ports Duck_Hunt.tcl's ducks_scaring: every gunshot that reaches
@@ -1500,311 +1470,280 @@ class DuckHuntPro(callbacks.Plugin):
     # Shop
     # -----------------------------------------------------------------
 
-    class shop(callbacks.Commands):
-        """Buy items with your xp -- see `shop list` for the catalog."""
+    def _onChan(self, irc, channel, nick):
+        """Tcl's `onchan`: case-insensitive membership of the channel."""
+        try:
+            users = irc.state.channels[channel].users
+        except KeyError:
+            return False
+        for u in users:
+            if ircutils.strEqual(u, nick):
+                return True
+        return False
 
-        plugin = None
-
-        def list(self, irc, msg, args, channel):
-            """[<channel>]
-            Lists everything for sale.
-            """
-            lines = ['%s (%d xp): %s' % (key, cost, data.ITEM_DESCRIPTIONS.get(key, ''))
-                      for key, cost in data.ITEM_COSTS.items()]
-            irc.reply(' | '.join(lines))
-        list = wrap(list, ['channel'])
-
-        def buy(self, irc, msg, args, channel, item, target):
-            """<item> [<target>] [<channel>]
-            Buys <item> from the shop, spending your xp. mirror/sand/
-            water_bucket/sabotage need a <target> player.
-            """
-            self.plugin._buy(irc, msg, channel, item, target)
-        buy = wrap(buy, ['channel', 'somethingWithoutSpaces', optional('somethingWithoutSpaces')])
-
-    def _buy(self, irc, msg, channel, item, target):
+    def shop(self, irc, msg, args, channel, text):
+        """[<channel>] [<id> [<target>]]
+        Without arguments lists the purchasable items, otherwise buys item
+        number <id> (1-23) with your xp. Items 14-17 (mirror, sand, water
+        bucket, sabotage) need a <target> player, the others take none.
+        """
+        # Tcl only binds the command when shop_enabled is set.
+        if not self.registryValue('shopEnabled', channel):
+            return
         network = irc.network
         nick = msg.nick
-        lang = self.registryValue('language', channel)
         self._checkPendingRename(irc, channel, nick)
         if not self._floodCheck(network, channel, nick):
-            irc.reply(messages.get(lang, 'antiflood_blocked', nick=nick))
-            return
-        item = item.lower()
-        if item not in data.ITEM_COSTS:
-            irc.reply(messages.get(lang, 'shop_unknown_item', item=item))
+            irc.reply(messages.get(self.registryValue('language', channel),
+                                   'antiflood_blocked', nick=nick))
             return
         player = self.db.player(network, channel, nick)
-        if player['gun_state'] in ('confiscated', 'confiscated_permanent') and item != 'buyback_weapon':
-            # buyback_weapon is the one item that's exempt from this gate --
-            # it's the only way out of the confiscated state. A permanently
-            # confiscated weapon still can't be bought back via the shop,
-            # though -- see _buyBuyback.
-            irc.reply(messages.get(lang, 'shop_gun_confiscated', nick=nick))
-            return
-        cost = data.ITEM_COSTS[item]
-        floor = self.registryValue('minXpForShopping', channel)
-        if player['xp'] - cost < floor:
-            irc.reply(messages.get(lang, 'shop_not_rich_enough', floor=floor))
-            return
+        try:
+            self._shop(irc, channel, nick, network, player, (text or '').split())
+        finally:
+            self.db.save()
+    shop = wrap(shop, ['channel', optional('text')])
 
+    def _shop(self, irc, channel, nick, network, player, parts):
+        """Port of Duck_Hunt.tcl's ::DuckHunt::shop, check for check."""
+        key = (network.lower(), channel.lower())
         now = time.time()
-        handler = self._shopHandlers[item]
-        ok, reply = handler(irc, channel, player, target, lang, now)
-        if not ok:
-            if reply:
-                irc.reply(reply)
+        lang = self._lang(channel)
+        t = lambda k, *a: self._t(channel, k, *a)
+        # Tcl: the shop is only closed to a PERMANENTLY confiscated gun (gun
+        # == -1), and then it does nothing at all, not even a message.
+        if player['gun_state'] == 'confiscated_permanent':
+            return
+        ducks = self._activeDuck.get(key)
+        if ducks:
+            # Tcl: any shop use during a duck session adds to the reflex time.
+            player['stats']['reflex_ms'] += int((now - ducks[0]['spawned_at']) * 1000)
+        out = lambda text: self._out(irc, channel, nick, text, 'pref')
+        costs = [data.ITEM_COSTS[k] for k in data.SHOP_ITEMS]
+        itemId = parts[0] if parts else ''
+        targetNick = parts[1] if len(parts) > 1 else ''
+        valid = [str(i) for i in range(1, 24)]
+        noTarget = [str(i) for i in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                                     18, 19, 20, 21, 22, 23)]
+        withTarget = ['14', '15', '16', '17']
+        if ((itemId in noTarget and len(parts) != 1)
+                or (itemId in withTarget and len(parts) != 2)
+                or (itemId != '' and itemId not in valid)):
+            out(t('m264', 'shop'))
+            return
+        if itemId == '':
+            if self.registryValue('shopPreferredDisplayMode', channel):
+                out(t('m263', 'DuckHuntPro', self.registryValue('shopUrl', channel), 'shop'))
+            else:
+                out(t('m265', 'DuckHuntPro', *(costs + ['shop'])))
             return
 
-        oldLevel = data.levelForXp(player['xp'])
-        player['xp'] -= cost
-        self._clampAmmo(player)
+        player['last_activity'] = now
+        itemNo = int(itemId)
+        itemKey = data.SHOP_ITEMS[itemNo - 1]
+        cost = costs[itemNo - 1]
+        plural = messages.plural(cost, t('m285'), t('m286'))
+        # Tcl: the floor test uses the price even for a purchase that is then
+        # refused for another reason, and runs before any other check.
+        if player['xp'] - cost < self.registryValue('minXpForShopping', channel):
+            out(t('m266', nick))
+            return
+        if targetNick:
+            self._checkPendingRename(irc, channel, targetNick)
+        prevLevel = data.levelForXp(player['xp'])
+        lvl = data.LEVELS[prevLevel]
+        self._ensureAmmo(player, lvl)
+        items = player['items']
+        left = lambda item: messages.adaptTimeResolution(
+            int(((item.get('expires_at') or now) - now) * 1000), False, lang)
+        usesWord = lambda n: messages.plural(n, t('m292'), t('m293'))
+        output = None
+        charged = False
+
+        def give(p, k, value=None):
+            meta = data.ITEM_META[k]
+            db.giveItem(p, k, now, duration=meta['duration'], uses=meta['uses'], value=value)
+
+        if itemNo in (1, 2):
+            # Tcl tests gun == 0 here: a temporarily confiscated player is
+            # "not armed" (a permanent one never gets this far).
+            if player['gun_state'] != 'armed':
+                out(t('m5', nick))
+            elif itemNo == 1 and player['clip_ammo'] >= lvl.clip_size:
+                out(t('m267', nick))
+            elif itemNo == 2 and player['clips_left'] >= lvl.clip_count:
+                out(t('m269', nick))
+            else:
+                if itemNo == 1:
+                    player['clip_ammo'] += 1
+                    output = t('m268', nick, cost, plural)
+                else:
+                    player['clips_left'] += 1
+                    output = t('m270', nick, cost, plural)
+                charged = True
+        elif itemNo in (3, 4):
+            other = 'explosive_ammo' if itemNo == 3 else 'ap_ammo'
+            item = db.itemActive(player, itemKey, now)
+            if item:
+                out(t('m277', nick, left(item)))
+            else:
+                # Tcl: buying one ammo type silently replaces the other.
+                db.removeItem(player, other)
+                give(player, itemKey)
+                output = t('m278' if itemNo == 3 else 'm279', nick, cost, plural)
+                charged = True
+        elif itemNo == 5:
+            if player['gun_state'] == 'armed':
+                out(t('m281', nick))
+            else:
+                player['gun_state'] = 'armed'
+                output = t('m282', nick, cost, plural)
+                charged = True
+        elif itemNo in (6, 9, 10, 11, 19):
+            item = db.itemActive(player, itemKey, now)
+            if item:
+                out(t('m283', nick, left(item)))
+            else:
+                if itemNo == 10:
+                    bonus = self._rng.randint(data.CLOVER_BONUS_MIN, data.CLOVER_BONUS_MAX)
+                    give(player, itemKey, bonus)
+                    output = t('m294', nick, cost, plural, bonus, messages.plural(
+                        bonus, '%s %s' % (t('m285'), t('m424')), '%s %s' % (t('m286'), t('m425'))))
+                else:
+                    give(player, itemKey)
+                    output = t({6: 'm284', 9: 'm291', 11: 'm296', 19: 'm342'}[itemNo],
+                               nick, cost, plural)
+                charged = True
+        elif itemNo in (7, 22):
+            item = db.itemActive(player, itemKey, now)
+            if item:
+                out(t('m288', nick, item['uses_left'], usesWord(item['uses_left'])))
+            else:
+                give(player, itemKey)
+                output = t('m287' if itemNo == 7 else 'm350', nick, cost, plural)
+                charged = True
+        elif itemNo in (8, 18):
+            item = db.itemActive(player, itemKey, now)
+            if item:
+                out(t('m295', nick, left(item), item['uses_left'], usesWord(item['uses_left'])))
+            else:
+                give(player, itemKey)
+                output = t('m289' if itemNo == 8 else 'm339', nick, cost, plural)
+                charged = True
+        elif itemNo == 12:
+            # Spare clothes only cure the water bucket (Tcl item 16).
+            if not db.itemActive(player, 'water_bucket', now):
+                out(t('m297', nick))
+            else:
+                db.removeItem(player, 'water_bucket')
+                output = t('m298', nick, cost, plural)
+                charged = True
+        elif itemNo == 13:
+            if (not db.itemActive(player, 'sand', now)
+                    and not db.itemActive(player, 'sabotage', now)):
+                out(t('m299', nick))
+            else:
+                db.removeItem(player, 'sand')
+                db.removeItem(player, 'sabotage')
+                output = t('m300', nick, cost, plural)
+                charged = True
+        elif itemNo in (14, 15, 16, 17):
+            # Tcl never refuses a target equal to the buyer.
+            targetPlayer = self.db.getPlayer(network, channel, targetNick)
+            gone = {14: 'm363', 15: 'm364', 16: 'm365', 17: 'm366'}[itemNo]
+            if targetPlayer is None:
+                out(t('m362', nick))
+            elif not self._onChan(irc, channel, targetNick):
+                out(t(gone, nick, targetNick))
+            elif itemNo == 14:
+                if db.itemActive(targetPlayer, 'mirror_dazzle', now):
+                    out(t('m324', nick, targetNick))
+                elif db.itemActive(player, 'sunglasses', now):
+                    # Tcl quirk: tests the BUYER's sunglasses, yet the message
+                    # says the target wears them; the buyer pays for nothing.
+                    output = t('m325', nick, targetNick, cost, plural)
+                    charged = True
+                else:
+                    db.giveItem(targetPlayer, 'mirror_dazzle', now, duration=None,
+                                uses=1, value=player['display_nick'])
+                    output = t('m326', nick, cost, plural, targetNick)
+                    charged = True
+            elif itemNo == 15:
+                if targetPlayer['gun_state'] != 'armed':
+                    out(t('m367', nick, targetNick))
+                elif db.itemActive(targetPlayer, 'sand', now):
+                    out(t('m327', nick, targetNick))
+                elif db.itemActive(targetPlayer, 'grease', now):
+                    # Grease is used up by the sand, which has no effect.
+                    db.removeItem(targetPlayer, 'grease')
+                    output = t('m328', nick, targetNick, cost, plural)
+                    charged = True
+                else:
+                    db.giveItem(targetPlayer, 'sand', now, duration=None, uses=1,
+                                value=player['display_nick'])
+                    output = t('m329', nick, targetNick, cost, plural)
+                    charged = True
+            elif itemNo == 16:
+                if db.itemActive(targetPlayer, 'water_bucket', now):
+                    out(t('m330', nick, targetNick))
+                else:
+                    db.giveItem(targetPlayer, 'water_bucket', now,
+                                duration=data.WATER_BUCKET_DURATION, uses=None,
+                                value=player['display_nick'])
+                    output = t('m331', nick, targetNick, cost, plural)
+                    charged = True
+            else:
+                if targetPlayer['gun_state'] != 'armed':
+                    out(t('m368', nick, targetNick))
+                elif db.itemActive(targetPlayer, 'sabotage', now):
+                    out(t('m335', nick, targetNick))
+                else:
+                    db.giveItem(targetPlayer, 'sabotage', now, duration=None, uses=1,
+                                value=player['display_nick'])
+                    output = t('m336', nick, targetNick, cost, plural)
+                    charged = True
+        elif itemNo in (20, 21):
+            if (self.registryValue('cantAttractDucksWhenSleeping', channel)
+                    and datetime.fromtimestamp(now).hour in self._sleepHours(channel)):
+                out(t('m388', nick))
+            elif itemNo == 20:
+                # Tcl: utimer int(rand()*600)+1 seconds.
+                delay = self._rng.randint(data.DECOY_MIN_DELAY, data.DECOY_MAX_DELAY)
+                forceNonGolden = not self.registryValue('decoysCanAttractGoldenDucks', channel)
+                self._scheduleSpecialSpawn(network, channel, now + delay, 'decoy',
+                                           forceNonGolden, None)
+                output = t('m344', nick, cost, plural)
+                charged = True
+            else:
+                chan = self.db.channel(network, channel)
+                maxBread = self.registryValue('maxBreadOnChan', channel)
+                # Tcl quirk: the cap test is `==`, so lowering maxBreadOnChan
+                # below the current count lets purchases through again.
+                if db.activeBreadCount(chan, now) == maxBread:
+                    out(t('m387', nick, maxBread, channel))
+                else:
+                    db.addBread(chan, now, data.BREAD_DURATION)
+                    self._onBreadChanged(network, channel, 'bread_added')
+                    count = len(chan['bread'])
+                    output = t('m347', nick, cost, plural, count,
+                               messages.plural(count, t('m348'), t('m349')), channel)
+                    charged = True
+        else:
+            # 23: Tcl has no sleeping-hours or other check for the fake duck.
+            self._scheduleSpecialSpawn(network, channel, now + data.FAKE_DUCK_DELAY,
+                                       'fake_duck', True, player['display_nick'])
+            output = t('m361', nick, cost, plural)
+            charged = True
+
+        if charged:
+            player['xp'] -= cost
+            self._clampAmmo(player)
         newLevel = data.levelForXp(player['xp'])
-        self.db.save()
-        irc.reply(reply or messages.get(lang, 'shop_bought', nick=nick, item=item, cost=cost))
-        if newLevel < oldLevel:
-            irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                lang, 'level_down', nick=nick, level=newLevel)))
-
-    def _alreadyHaveMsg(self, player, key, lang, now):
-        item = player['items'].get(key)
-        remaining = (self._formatDuration(item['expires_at'] - now)
-                     if item and item.get('expires_at') else 'a while')
-        return messages.get(lang, 'shop_already_have', nick=player['display_nick'],
-                             item='%s (%s left)' % (key, remaining))
-
-    def _resolveTarget(self, irc, channel, network, target, lang, buyerNick):
-        if not target:
-            return None, messages.get(lang, 'shop_target_required')
-        if ircutils.strEqual(target, buyerNick):
-            return None, messages.get(lang, 'shop_target_self')
-        if target not in irc.state.channels[channel].users:
-            return None, messages.get(lang, 'shop_target_offline', target=target)
-        targetPlayer = self.db.getPlayer(network, channel, target)
-        if not targetPlayer:
-            return None, messages.get(lang, 'shop_target_unknown', target=target)
-        return targetPlayer, None
-
-    # --- item purchase handlers: each returns (ok, message_or_None). A
-    # False `ok` means the buyer isn't charged; the returned message (if
-    # any) is the failure reason. A True `ok` means _buy() deducts the
-    # item's cost regardless of whether the handler's own message
-    # describes a success or a "paid but no effect" outcome (grease
-    # absorbing sand, sunglasses blocking a mirror) -- matching
-    # Duck_Hunt.tcl, which always charges once the purchase is validated.
-
-    def _buyExtraAmmo(self, irc, channel, player, target, lang, now):
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
-        self._ensureAmmo(player, lvl)
-        if player['clip_ammo'] >= lvl.clip_size:
-            return False, messages.get(lang, 'clip_already_full', nick=player['display_nick'])
-        player['clip_ammo'] += 1
-        return True, None
-
-    def _buyExtraClip(self, irc, channel, player, target, lang, now):
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
-        self._ensureAmmo(player, lvl)
-        if player['clips_left'] >= lvl.clip_count:
-            return False, messages.get(lang, 'clips_already_full', nick=player['display_nick'])
-        player['clips_left'] += 1
-        return True, None
-
-    def _buyAmmoType(self, player, key, otherKey, lang, now):
-        if db.itemActive(player, key, now):
-            return False, self._alreadyHaveMsg(player, key, lang, now)
-        db.removeItem(player, otherKey)
-        meta = data.ITEM_META[key]
-        db.giveItem(player, key, now, duration=meta['duration'], uses=meta['uses'])
-        return True, None
-
-    def _buyApAmmo(self, irc, channel, player, target, lang, now):
-        return self._buyAmmoType(player, 'ap_ammo', 'explosive_ammo', lang, now)
-
-    def _buyExplosiveAmmo(self, irc, channel, player, target, lang, now):
-        return self._buyAmmoType(player, 'explosive_ammo', 'ap_ammo', lang, now)
-
-    def _buyBuyback(self, irc, channel, player, target, lang, now):
-        if player['gun_state'] == 'confiscated_permanent':
-            return False, messages.get(lang, 'buyback_permanent', nick=player['display_nick'])
-        if player['gun_state'] != 'confiscated':
-            return False, messages.get(lang, 'buyback_not_confiscated', nick=player['display_nick'])
-        player['gun_state'] = 'armed'
-        return True, messages.get(lang, 'buyback_ok', nick=player['display_nick'])
-
-    def _buyGrease(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'grease', now):
-            return False, self._alreadyHaveMsg(player, 'grease', lang, now)
-        meta = data.ITEM_META['grease']
-        db.giveItem(player, 'grease', now, duration=meta['duration'], uses=meta['uses'])
-        return True, None
-
-    def _buySight(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'sight', now):
-            return False, self._alreadyHaveMsg(player, 'sight', lang, now)
-        meta = data.ITEM_META['sight']
-        db.giveItem(player, 'sight', now, duration=meta['duration'], uses=meta['uses'])
-        return True, messages.get(lang, 'sight_ok', nick=player['display_nick'])
-
-    def _buyInfrared(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'infrared_detector', now):
-            return False, self._alreadyHaveMsg(player, 'infrared_detector', lang, now)
-        meta = data.ITEM_META['infrared_detector']
-        db.giveItem(player, 'infrared_detector', now, duration=meta['duration'], uses=meta['uses'])
-        return True, None
-
-    def _buySilencer(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'silencer', now):
-            return False, self._alreadyHaveMsg(player, 'silencer', lang, now)
-        meta = data.ITEM_META['silencer']
-        db.giveItem(player, 'silencer', now, duration=meta['duration'], uses=meta['uses'])
-        return True, None
-
-    def _buyClover(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'four_leaf_clover', now):
-            return False, self._alreadyHaveMsg(player, 'four_leaf_clover', lang, now)
-        bonus = self._rng.randint(data.CLOVER_BONUS_MIN, data.CLOVER_BONUS_MAX)
-        meta = data.ITEM_META['four_leaf_clover']
-        db.giveItem(player, 'four_leaf_clover', now, duration=meta['duration'],
-                    uses=meta['uses'], value=bonus)
-        return True, None
-
-    def _buySunglasses(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'sunglasses', now):
-            return False, self._alreadyHaveMsg(player, 'sunglasses', lang, now)
-        meta = data.ITEM_META['sunglasses']
-        db.giveItem(player, 'sunglasses', now, duration=meta['duration'], uses=meta['uses'])
-        return True, None
-
-    def _buySpareClothes(self, irc, channel, player, target, lang, now):
-        if not db.itemActive(player, 'water_bucket', now):
-            return False, messages.get(lang, 'spare_clothes_noop', nick=player['display_nick'])
-        db.removeItem(player, 'water_bucket')
-        return True, messages.get(lang, 'spare_clothes_ok', nick=player['display_nick'])
-
-    def _buyBrush(self, irc, channel, player, target, lang, now):
-        had = False
-        if db.itemActive(player, 'sand', now):
-            db.removeItem(player, 'sand')
-            had = True
-        if db.itemActive(player, 'sabotage', now):
-            db.removeItem(player, 'sabotage')
-            had = True
-        if not had:
-            return False, messages.get(lang, 'brush_noop', nick=player['display_nick'])
-        return True, messages.get(lang, 'brush_ok', nick=player['display_nick'])
-
-    def _buyMirror(self, irc, channel, player, target, lang, now):
-        network = irc.network
-        targetPlayer, err = self._resolveTarget(irc, channel, network, target, lang,
-                                                 player['display_nick'])
-        if err:
-            return False, err
-        if db.itemActive(targetPlayer, 'mirror_dazzle', now):
-            return False, messages.get(lang, 'shop_already_have', nick=player['display_nick'],
-                                        item='mirror on %s' % targetPlayer['display_nick'])
-        if db.itemActive(targetPlayer, 'sunglasses', now):
-            return True, messages.get(lang, 'mirror_no_effect_sunglasses',
-                                       nick=player['display_nick'], target=targetPlayer['display_nick'])
-        db.giveItem(targetPlayer, 'mirror_dazzle', now, duration=None, uses=1,
-                    value=player['display_nick'])
-        return True, messages.get(lang, 'mirror_ok', nick=player['display_nick'],
-                                   target=targetPlayer['display_nick'])
-
-    def _buySand(self, irc, channel, player, target, lang, now):
-        network = irc.network
-        targetPlayer, err = self._resolveTarget(irc, channel, network, target, lang,
-                                                 player['display_nick'])
-        if err:
-            return False, err
-        if targetPlayer['gun_state'] != 'armed':
-            return False, messages.get(lang, 'sand_no_gun', target=targetPlayer['display_nick'])
-        if db.itemActive(targetPlayer, 'sand', now):
-            return False, messages.get(lang, 'shop_already_have', nick=player['display_nick'],
-                                        item='sand on %s' % targetPlayer['display_nick'])
-        if db.itemActive(targetPlayer, 'grease', now):
-            db.removeItem(targetPlayer, 'grease')
-            return True, messages.get(lang, 'sand_absorbed_by_grease', nick=player['display_nick'],
-                                       target=targetPlayer['display_nick'])
-        db.giveItem(targetPlayer, 'sand', now, duration=None, uses=1, value=player['display_nick'])
-        return True, messages.get(lang, 'sand_ok', nick=player['display_nick'],
-                                   target=targetPlayer['display_nick'])
-
-    def _buyWaterBucket(self, irc, channel, player, target, lang, now):
-        network = irc.network
-        targetPlayer, err = self._resolveTarget(irc, channel, network, target, lang,
-                                                 player['display_nick'])
-        if err:
-            return False, err
-        if db.itemActive(targetPlayer, 'water_bucket', now):
-            return False, messages.get(lang, 'shop_already_have', nick=player['display_nick'],
-                                        item='water_bucket on %s' % targetPlayer['display_nick'])
-        db.giveItem(targetPlayer, 'water_bucket', now, duration=data.WATER_BUCKET_DURATION,
-                    uses=None, value=player['display_nick'])
-        return True, messages.get(lang, 'water_bucket_ok', nick=player['display_nick'],
-                                   target=targetPlayer['display_nick'])
-
-    def _buySabotage(self, irc, channel, player, target, lang, now):
-        network = irc.network
-        targetPlayer, err = self._resolveTarget(irc, channel, network, target, lang,
-                                                 player['display_nick'])
-        if err:
-            return False, err
-        if targetPlayer['gun_state'] != 'armed':
-            return False, messages.get(lang, 'sabotage_no_gun', target=targetPlayer['display_nick'])
-        if db.itemActive(targetPlayer, 'sabotage', now):
-            return False, messages.get(lang, 'shop_already_have', nick=player['display_nick'],
-                                        item='sabotage on %s' % targetPlayer['display_nick'])
-        db.giveItem(targetPlayer, 'sabotage', now, duration=None, uses=1, value=player['display_nick'])
-        return True, messages.get(lang, 'sabotage_ok', nick=player['display_nick'],
-                                   target=targetPlayer['display_nick'])
-
-    def _buyLifeInsurance(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'life_insurance', now):
-            return False, self._alreadyHaveMsg(player, 'life_insurance', lang, now)
-        meta = data.ITEM_META['life_insurance']
-        db.giveItem(player, 'life_insurance', now, duration=meta['duration'], uses=meta['uses'])
-        return True, messages.get(lang, 'life_insurance_ok', nick=player['display_nick'])
-
-    def _buyLiabilityInsurance(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'liability_insurance', now):
-            return False, self._alreadyHaveMsg(player, 'liability_insurance', lang, now)
-        meta = data.ITEM_META['liability_insurance']
-        db.giveItem(player, 'liability_insurance', now, duration=meta['duration'], uses=meta['uses'])
-        return True, messages.get(lang, 'liability_insurance_ok', nick=player['display_nick'])
-
-    def _buyDecoy(self, irc, channel, player, target, lang, now):
-        if (self.registryValue('cantAttractDucksWhenSleeping', channel)
-                and datetime.fromtimestamp(now).hour in self._sleepHours(channel)):
-            return False, messages.get(lang, 'decoy_blocked_sleep')
-        delay = self._rng.uniform(data.DECOY_MIN_DELAY, data.DECOY_MAX_DELAY)
-        forceNonGolden = not self.registryValue('decoysCanAttractGoldenDucks', channel)
-        self._scheduleSpecialSpawn(irc.network, channel, now + delay, 'decoy', forceNonGolden, None)
-        return True, messages.get(lang, 'decoy_ok', nick=player['display_nick'])
-
-    def _buyFakeDuck(self, irc, channel, player, target, lang, now):
-        self._scheduleSpecialSpawn(irc.network, channel, now + data.FAKE_DUCK_DELAY,
-                                    'fake_duck', True, player['display_nick'])
-        return True, messages.get(lang, 'fake_duck_ok', nick=player['display_nick'])
-
-    def _buyBread(self, irc, channel, player, target, lang, now):
-        if (self.registryValue('cantAttractDucksWhenSleeping', channel)
-                and datetime.fromtimestamp(now).hour in self._sleepHours(channel)):
-            return False, messages.get(lang, 'bread_blocked_sleep')
-        chan = self.db.channel(irc.network, channel)
-        maxBread = self.registryValue('maxBreadOnChan', channel)
-        count = db.activeBreadCount(chan, now)
-        if count >= maxBread:
-            return False, messages.get(lang, 'bread_full', max=maxBread)
-        db.addBread(chan, now, data.BREAD_DURATION)
-        return True, messages.get(lang, 'bread_ok', nick=player['display_nick'],
-                                   count=count + 1, max=maxBread)
-
-    def _buyDuckDetector(self, irc, channel, player, target, lang, now):
-        if db.itemActive(player, 'duck_detector', now):
-            return False, self._alreadyHaveMsg(player, 'duck_detector', lang, now)
-        meta = data.ITEM_META['duck_detector']
-        db.giveItem(player, 'duck_detector', now, duration=meta['duration'], uses=meta['uses'])
-        return True, messages.get(lang, 'duck_detector_ok', nick=player['display_nick'])
+        if prevLevel > newLevel and output is not None:
+            # Tcl appends m280 (not the m2 channel announcement) to the reply.
+            output += t('m280', newLevel, messages.lvl2rank(newLevel, lang))
+        if output is not None:
+            out(output)
 
     # -----------------------------------------------------------------
     # Weapon confiscation admin commands
