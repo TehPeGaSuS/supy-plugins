@@ -139,7 +139,7 @@ MESSAGES = {
         'lastduck_killer': 'It was shot by {nick}.',
         'lastduck_flying': 'It is still in the air.',
         'lastduck_escaped': 'Tired of waiting, it flew away after {duration}.',
-        'lastduck_fled': 'Frightened by the gunfire, it flew away after {duration}.',
+        'lastduck_fled': 'Frightened by so much noise, it fled after {duration}.',
         'quarterly_reset': ("A new hunting season begins! Standings have been "
                              "archived -- see 'duckchampions' for last season's "
                              "top shooters."),
@@ -218,7 +218,7 @@ MESSAGES = {
         'lastduck_killer': 'Il a été abattu par {nick}.',
         'lastduck_flying': 'Il est toujours là.',
         'lastduck_escaped': "Las d'attendre, il s'est enfui après {duration}.",
-        'lastduck_fled': "Effrayé par les coups de feu, il s'est enfui après {duration}.",
+        'lastduck_fled': "Effrayé par tout ce bruit, il s'est enfui après {duration}.",
         'shooters_header': 'Meilleurs chasseurs :',
         'shooters_line': '#{rank} {nick} -- niveau {level}, {xp} xp, {killed} tué(s)',
         'shooters_empty': "Personne n'a encore abattu de canard ici.",

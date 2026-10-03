@@ -1855,7 +1855,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def testLastduckSaysTheDuckFlewAwayAndAfterHowLong(self):
         cb = self._cb()
         for how, text in (('escape', 'Tired of waiting, it flew away after 5 minutes.'),
-                          ('frightened', 'Frightened by the gunfire, it flew away after 5 minutes.')):
+                          ('frightened', 'Frightened by so much noise, it fled after 5 minutes.')):
             self._putDuck()
             duck = cb._activeDuck[self._key()][0]
             duck['spawned_at'] = time.time() - 300
@@ -1871,7 +1871,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             self.assertTrue(said[0].endswith(' ' + text), (how, said))
         conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
         self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(
-            " Effrayé par les coups de feu, il s'est enfui après 5 minutes."))
+            " Effrayé par tout ce bruit, il s'est enfui après 5 minutes."))
 
     def testTimeCanSkipAZeroSecondsTail(self):
         f = messages.adaptTimeResolution
