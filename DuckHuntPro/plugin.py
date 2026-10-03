@@ -1178,6 +1178,7 @@ class DuckHuntPro(callbacks.Plugin):
             chan = self.db.getChannel(network, channelName)
             if chan and chan.get('last_duck_at') == duck['spawned_at']:
                 chan['last_duck_outcome'] = outcome
+                chan['last_duck_flight_s'] = int(round(time.time() - duck['spawned_at']))
         return duck
 
     def _setVoice(self, irc, channel, nick, voice):
@@ -1970,7 +1971,8 @@ class DuckHuntPro(callbacks.Plugin):
         if outcome == 'shot' and chan.get('last_duck_killer'):
             return ' ' + messages.get(lang, 'lastduck_killer', nick=chan['last_duck_killer'])
         if outcome in ('escaped', 'fled'):
-            return ' ' + messages.get(lang, 'lastduck_gone')
+            return ' ' + messages.get(lang, 'lastduck_' + outcome, duration=messages.adaptTimeResolution(
+                (chan.get('last_duck_flight_s') or 0) * 1000, False, lang, skipZeroSeconds=True))
         return ''
 
     def lastduck(self, irc, msg, args, channel):

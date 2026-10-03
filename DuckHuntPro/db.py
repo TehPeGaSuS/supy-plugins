@@ -59,6 +59,7 @@ def _newChannel():
         'last_duck_at': None,
         'last_duck_killer': None,
         'last_duck_outcome': None,
+        'last_duck_flight_s': None,
         'archives': [],
     }
 

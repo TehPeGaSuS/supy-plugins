@@ -1852,23 +1852,33 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
         self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(' Il est toujours là.'))
 
-    def testLastduckSaysTheDuckFlewAway(self):
+    def testLastduckSaysTheDuckFlewAwayAndAfterHowLong(self):
         cb = self._cb()
-        for how in ('escape', 'frightened'):
+        for how, text in (('escape', 'Tired of waiting, it flew away after 5 minutes.'),
+                          ('frightened', 'Frightened by the gunfire, it flew away after 5 minutes.')):
             self._putDuck()
             duck = cb._activeDuck[self._key()][0]
+            duck['spawned_at'] = time.time() - 300
             chan = cb.db.channel(self.irc.network, self.channel)
             chan['last_duck_at'] = duck['spawned_at']
             chan['last_duck_killer'] = chan['last_duck_outcome'] = None
             if how == 'escape':
                 cb._duckEscapes(self.irc.network, self.channel, duck['spawned_at'])
             else:
-                cb._removeDuck(self.irc.network, self.channel, outcome='fled')
+                cb._removeDuck(self.irc.network, self.channel, spawnedAt=duck['spawned_at'], outcome='fled')
             self._sent()
             said = self._texts(self._cmd('lastduck'))
-            self.assertTrue(said[0].endswith(' It flew away.'), (how, said))
+            self.assertTrue(said[0].endswith(' ' + text), (how, said))
         conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
-        self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(" Il s'est envolé."))
+        self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(
+            " Effrayé par les coups de feu, il s'est enfui après 5 minutes."))
+
+    def testTimeCanSkipAZeroSecondsTail(self):
+        f = messages.adaptTimeResolution
+        self.assertEqual(f(300000, False, 'fr', skipZeroSeconds=True), '5 minutes')
+        self.assertEqual(f(301000, False, 'fr', skipZeroSeconds=True), '5 minutes et 1 seconde')
+        self.assertEqual(f(0, False, 'en', skipZeroSeconds=True), '0 second')
+        self.assertEqual(f(300000, False, 'en'), '5 minutes and 0 second')
 
     def testLastduckSaysNothingMoreForAnUnknownOutcome(self):
         cb = self._cb()

@@ -51,12 +51,13 @@ def lvl2rank(level, lang='en'):
     return tclList(lang, 'm134')[level]
 
 
-def adaptTimeResolution(milliseconds, short=False, lang='en'):
+def adaptTimeResolution(milliseconds, short=False, lang='en', skipZeroSeconds=False):
     """Duck_Hunt.tcl's adapt_time_resolution: a duration in milliseconds as
     '1 hour 5 minutes and 3.5 seconds' (or '1h5mn3.5s' when `short`). Zero
     units are skipped except seconds, which always show. (The original reads
     the last three characters of the number as the milliseconds, which
-    mangles durations under 100 ms; this pads them properly.)"""
+    mangles durations under 100 ms; this pads them properly.) With
+    `skipZeroSeconds`, '5 minutes' instead of '5 minutes and 0 seconds'."""
     t = lambda key: tcl(lang, key)
     seconds_total, milli = divmod(abs(int(milliseconds)), 1000)
     days = seconds_total // 86400
@@ -68,6 +69,8 @@ def adaptTimeResolution(milliseconds, short=False, lang='en'):
     valid = 0
     for counter, unit in enumerate((days, hours, minutes, seconds), 1):
         if unit <= 0 and counter != 4:
+            continue
+        if counter == 4 and skipZeroSeconds and valid and not unit and not milli:
             continue
         if counter == 1:
             out.append('%d%s' % (unit, t('m112')) if short else
@@ -135,7 +138,8 @@ MESSAGES = {
         'champions_empty': 'No quarterly reset has happened here yet.',
         'lastduck_killer': 'It was shot by {nick}.',
         'lastduck_flying': 'It is still in the air.',
-        'lastduck_gone': 'It flew away.',
+        'lastduck_escaped': 'Tired of waiting, it flew away after {duration}.',
+        'lastduck_fled': 'Frightened by the gunfire, it flew away after {duration}.',
         'quarterly_reset': ("A new hunting season begins! Standings have been "
                              "archived -- see 'duckchampions' for last season's "
                              "top shooters."),
@@ -213,7 +217,8 @@ MESSAGES = {
     'fr': {
         'lastduck_killer': 'Il a été abattu par {nick}.',
         'lastduck_flying': 'Il est toujours là.',
-        'lastduck_gone': "Il s'est envolé.",
+        'lastduck_escaped': "Las d'attendre, il s'est enfui après {duration}.",
+        'lastduck_fled': "Effrayé par les coups de feu, il s'est enfui après {duration}.",
         'shooters_header': 'Meilleurs chasseurs :',
         'shooters_line': '#{rank} {nick} -- niveau {level}, {xp} xp, {killed} tué(s)',
         'shooters_empty': "Personne n'a encore abattu de canard ici.",
