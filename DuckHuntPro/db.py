@@ -278,35 +278,65 @@ class Database:
         return True
 
     def mergeStats(self, network, channelName, dstNick, srcNick):
-        """Merges srcNick's profile into dstNick's (xp/stats summed, ammo
-        left as dstNick's, gun_state/jammed the more restrictive of the
-        two, items unioned, best_time_ms the minimum of the two), then
-        deletes srcNick. Returns False if srcNick had no profile to merge
-        (a no-op, matching Duck_Hunt.tcl's silent no-merge for a fresh
-        nick). Ammo counts are NOT proportionally recalculated the way the
-        original's merge_stats attempts to -- dstNick's ammo state is kept
-        as-is, a deliberate simplification of a minor edge case."""
+        """Port of Duck_Hunt.tcl's merge_stats: merges srcNick's profile into
+        dstNick's and deletes srcNick's. xp and every counter are summed;
+        the weapon is the more restrictive of the two and jammed if either
+        is; the best time is the smaller; items are united (for the same
+        item the later expiry wins); last_activity is the later. Ammo is
+        recomputed from what each side had spent: the ammo used since the
+        last refill (both sides assumed to have started full) is taken off the
+        merged profile's level capacity. Returns False when srcNick has no
+        profile (nothing to merge)."""
         chan = self.channel(network, channelName)
         srcKey, dstKey = srcNick.lower(), dstNick.lower()
         with self.lock:
             src = chan['players'].get(srcKey)
             if not src:
                 return False
-            dst = chan['players'].setdefault(dstKey, _newPlayer(dstNick))
+            dst = chan['players'].get(dstKey)
+            if dst is None:
+                dst = chan['players'][dstKey] = _newPlayer(dstNick)
+            srcLvl = data.LEVELS[data.levelForXp(src['xp'])]
+            dstLvl = data.LEVELS[data.levelForXp(dst['xp'])]
+
+            def ammo(p, lvl):      # a profile that never fired has a full set
+                inGun = lvl.clip_size if p['clip_ammo'] is None else p['clip_ammo']
+                clips = lvl.clip_count if p['clips_left'] is None else p['clips_left']
+                return inGun, clips
+
+            srcGun, srcClips = ammo(src, srcLvl)
+            dstGun, dstClips = ammo(dst, dstLvl)
+            mergedFull = (srcLvl.clip_size * srcLvl.clip_count + srcLvl.clip_size
+                          + dstLvl.clip_size * dstLvl.clip_count + dstLvl.clip_size)
+            used = (mergedFull - srcClips * srcLvl.clip_size - srcGun
+                    - dstClips * dstLvl.clip_size - dstGun)
+
             dst['xp'] += src['xp']
             for key in data.FUSION_SUMMED_STATS:
                 dst['stats'][key] = dst['stats'].get(key, 0) + src['stats'].get(key, 0)
+            dst['stats']['reflex_ms'] = dst['stats'].get('reflex_ms', 0) + src['stats'].get('reflex_ms', 0)
             times = [t for t in (dst['stats'].get('best_time_ms'), src['stats'].get('best_time_ms'))
                      if t is not None]
             dst['stats']['best_time_ms'] = min(times) if times else None
             dst['gun_state'] = max(dst['gun_state'], src['gun_state'],
                                     key=lambda s: _GUN_STATE_ORDER.get(s, 0))
-            dst['jammed'] = dst['jammed'] or src['jammed']
+            dst['jammed'] = bool(dst['jammed'] or src['jammed'])
+            resulting = data.LEVELS[data.levelForXp(dst['xp'])]
+            dst['clip_ammo'] = resulting.clip_size - (used % resulting.clip_size)
+            dst['clips_left'] = resulting.clip_count - int(used / float(resulting.clip_size))
+            if dst['clips_left'] < 0:
+                dst['clips_left'] = dst['clip_ammo'] = 0
+            items = dict(dst.get('items', {}))
             for key, item in src.get('items', {}).items():
-                dst.setdefault('items', {}).setdefault(key, item)
-            srcActivity = src.get('last_activity')
-            if srcActivity and (not dst.get('last_activity') or srcActivity > dst['last_activity']):
-                dst['last_activity'] = srcActivity
+                mine = items.get(key)
+                theirs = item.get('expires_at')
+                if mine is None or (theirs if theirs is not None else float('-inf')) \
+                        > (mine.get('expires_at') if mine.get('expires_at') is not None
+                           else float('-inf')):
+                    items[key] = item
+            dst['items'] = items
+            activity = [a for a in (dst.get('last_activity'), src.get('last_activity')) if a]
+            dst['last_activity'] = max(activity) if activity else None
             if srcKey != dstKey:
                 del chan['players'][srcKey]
         self.save()
@@ -341,14 +371,39 @@ class Database:
             self.data['pending_transfers'][key] = {
                 'old_nick': oldNick, 'new_nick': newNick, 'created_at': time.time(),
             }
+            self.data['pending_transfers_at'] = time.time()
         self.save()
+
+    def getPendingTransfer(self, network, channelName, nick):
+        """The pending transfer whose NEW nick is `nick`, without removing it."""
+        with self.lock:
+            return self.data['pending_transfers'].get(
+                self._transferKey(network, channelName, nick))
 
     def popPendingTransfer(self, network, channelName, nick):
         """Returns and removes the pending transfer for `nick` on this
         channel, or None if there isn't one."""
         key = self._transferKey(network, channelName, nick)
         with self.lock:
-            return self.data['pending_transfers'].pop(key, None)
+            entry = self.data['pending_transfers'].pop(key, None)
+            if entry is not None:
+                self.data['pending_transfers_at'] = time.time()
+        return entry
+
+    def dropStalePendingTransfers(self, maxAge):
+        """The original only reloads its pending-transfer file if it was
+        updated within the last `maxAge` seconds: if the whole list is older
+        than that, forget it. Returns whether anything was dropped."""
+        with self.lock:
+            stamp = self.data.get('pending_transfers_at')
+            if self.data['pending_transfers'] and (stamp is None or time.time() - stamp > maxAge):
+                self.data['pending_transfers'] = {}
+                dropped = True
+            else:
+                dropped = False
+        if dropped:
+            self.save()
+        return dropped
 
     def discardPendingTransfer(self, network, channelName, nick):
         """Drops a pending transfer without merging -- used when the
@@ -356,5 +411,7 @@ class Database:
         key = self._transferKey(network, channelName, nick)
         with self.lock:
             existed = self.data['pending_transfers'].pop(key, None) is not None
+            if existed:
+                self.data['pending_transfers_at'] = time.time()
         if existed:
             self.save()

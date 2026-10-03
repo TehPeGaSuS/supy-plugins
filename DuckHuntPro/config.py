@@ -219,6 +219,25 @@ conf.registerGlobalValue(DuckHuntPro, 'autoRefillAmmoTime',
     clips are refilled to their level's count each day (the original script's
     auto_refill_ammo_time)."""))
 
+conf.registerGlobalValue(DuckHuntPro, 'anonymPrefix',
+    registry.String('', """The prefix your network gives to users who don't
+    identify in time ("Anonyme" for nicks like Anonyme54720). Stats are never
+    transferred automatically to such a nick. Case-sensitive; empty = off."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'warnOnRename',
+    registry.Boolean(False, """Log a notice when a player who changed nick
+    already has stats under the new nick."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'warnOnTakeover',
+    registry.Boolean(True, """Log what happened (and the stats involved) when a
+    nick change makes two profiles merge, one replace the other, or a profile
+    get claimed."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'pendingTransfersMaxAge',
+    registry.PositiveInteger(3600, """Seconds. When the plugin starts, nick-change
+    transfers still waiting are forgotten if nothing about them changed for
+    longer than this."""))
+
 conf.registerChannelValue(DuckHuntPro, 'confiscationEnforcementOnFusion',
     registry.Boolean(False, """When a renamed player's stats would be merged
     into their new nick (see nick-change stat fusion), whether a disarmed

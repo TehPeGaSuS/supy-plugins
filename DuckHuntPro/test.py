@@ -2218,6 +2218,165 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(newP['xp'], 0)
         self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'oldnick') is None)
 
+    # ---- parity with Duck_Hunt.tcl's nick tracking and merge_stats --------
+
+    def _profile(self, nick, **fields):
+        cb = self._cb()
+        p = cb.db.player(self.irc.network, self.channel, nick)
+        stats = fields.pop('stats', {})
+        p.update(fields)
+        p['stats'].update(stats)
+        cb.db.save()
+        return p
+
+    def _pending(self, nick):
+        return self._cb().db.getPendingTransfer(self.irc.network, self.channel, nick)
+
+    def _renamed(self, old, new):
+        self._addOnlineNick(new)
+        self._cb()._trackNickChange(self.irc, self.channel, old, new)
+
+    def testMergeRecomputesAmmoFromWhatBothSidesSpent(self):
+        cb = self._cb()
+        self._profile('old', xp=30, clip_ammo=4, clips_left=1)
+        self._profile('new', xp=25, clip_ammo=6, clips_left=2)
+        cb.db.mergeStats(self.irc.network, self.channel, 'new', 'old')
+        merged = cb.db.getPlayer(self.irc.network, self.channel, 'new')
+        # full = (6*2+6)*2 = 36; used = 36 - 6 - 4 - 12 - 6 = 8; level 3: 6 per clip, 2 clips
+        self.assertEqual((merged['xp'], merged['clip_ammo'], merged['clips_left']), (55, 4, 1))
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'old') is None)
+
+    def testMergeNeverLeavesNegativeClips(self):
+        cb = self._cb()
+        self._profile('old', xp=0, clip_ammo=0, clips_left=0)
+        self._profile('new', xp=0, clip_ammo=0, clips_left=0)
+        cb.db.mergeStats(self.irc.network, self.channel, 'new', 'old')
+        merged = cb.db.getPlayer(self.irc.network, self.channel, 'new')
+        self.assertEqual((merged['clip_ammo'], merged['clips_left']), (0, 0))
+
+    def testMergeCombinesTheRest(self):
+        cb = self._cb()
+        now = time.time()
+        old = self._profile('old', xp=10, gun_state='confiscated', jammed=True,
+                            last_activity=500, stats={'killed': 2, 'best_time_ms': 3000,
+                                                      'reflex_ms': 400})
+        db.giveItem(old, 'grease', now, duration=86400)
+        db.giveItem(old, 'silencer', now, duration=100)
+        new = self._profile('new', xp=5, gun_state='armed', jammed=False, last_activity=900,
+                            stats={'killed': 3, 'best_time_ms': 2000, 'reflex_ms': 100})
+        db.giveItem(new, 'silencer', now, duration=5000)
+        cb.db.mergeStats(self.irc.network, self.channel, 'new', 'old')
+        m = cb.db.getPlayer(self.irc.network, self.channel, 'new')
+        self.assertEqual((m['gun_state'], m['jammed'], m['last_activity']), ('confiscated', True, 900))
+        self.assertEqual((m['stats']['killed'], m['stats']['best_time_ms'], m['stats']['reflex_ms']),
+                         (5, 2000, 500))
+        self.assertTrue(db.itemActive(m, 'grease', now))
+        self.assertAlmostEqual(m['items']['silencer']['expires_at'], now + 5000, delta=2)
+
+    def testMergeKeepsTheOnlyBestTimeThereIs(self):
+        cb = self._cb()
+        self._profile('old', stats={'best_time_ms': None})
+        self._profile('new', stats={'best_time_ms': 1500})
+        cb.db.mergeStats(self.irc.network, self.channel, 'new', 'old')
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'new')['stats']['best_time_ms'], 1500)
+
+    def testNickChangeToANickWithStatsIsPendingNotMerged(self):
+        self._profile('old', xp=40)
+        self._profile('new', xp=10)
+        self._renamed('old', 'new')
+        self.assertEqual(self._pending('new')['old_nick'], 'old')
+        self.assertTrue(self._cb().db.getPlayer(self.irc.network, self.channel, 'old'))   # untouched
+
+    def testNickChangeFromAProfileToAFreshNickIsPending(self):
+        self._profile('old', xp=40)
+        self._renamed('old', 'fresh')
+        self.assertEqual(self._pending('fresh')['old_nick'], 'old')
+
+    def testNickChangeWithNoStatsAnywhereIsIgnored(self):
+        self._profile('someone')
+        self._renamed('ghost', 'phantom')
+        self.assertTrue(self._pending('phantom') is None)
+
+    def testRenamingBackCancelsThePendingTransfer(self):
+        self._profile('a', xp=40)
+        self._profile('b', xp=10)
+        self._renamed('a', 'b')
+        self.assertTrue(self._pending('b'))
+        self._renamed('b', 'a')
+        self.assertTrue(self._pending('b') is None)
+        self.assertTrue(self._pending('a') is None)
+
+    def testChainedRenamesAreFactoredIntoOneTransfer(self):
+        self._profile('a', xp=40)
+        self._profile('c', xp=10)
+        self._renamed('a', 'b')            # b has no stats: pending b <- a
+        self.assertEqual(self._pending('b')['old_nick'], 'a')
+        self._renamed('b', 'c')            # c has stats: pending c <- a, b's entry is gone
+        self.assertEqual(self._pending('c')['old_nick'], 'a')
+        self.assertTrue(self._pending('b') is None)
+
+    def testAnonymousPrefixNicksNeverReceiveStats(self):
+        conf.supybot.plugins.DuckHuntPro.anonymPrefix.setValue('Guest')
+        self._profile('old', xp=40)
+        self._renamed('old', 'Guest12345')
+        self.assertTrue(self._pending('Guest12345') is None)
+        self._renamed('Guest12345', 'old2')            # leaving the anonymous nick is fine
+        self._profile('Guest99999', xp=1)
+        self._renamed('Guest99999', 'Guest11111')       # anonymous -> anonymous too
+        self.assertTrue(self._pending('Guest11111'))
+
+    def testStalePendingTransfersAreForgotten(self):
+        cb = self._cb()
+        self._profile('old', xp=40)
+        self._renamed('old', 'fresh')
+        self.assertFalse(cb.db.dropStalePendingTransfers(3600))
+        cb.db.data['pending_transfers_at'] = time.time() - 7200
+        self.assertTrue(cb.db.dropStalePendingTransfers(3600))
+        self.assertTrue(self._pending('fresh') is None)
+
+    def testBothDisarmedKeepsOnlyTheRicherProfile(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.confiscationEnforcementOnFusion.setValue(True)
+        self._profile('old', xp=300, gun_state='confiscated')
+        self._profile('new', xp=20, gun_state='confiscated')
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb._checkPendingRename(self.irc, self.channel, 'new')
+        survivor = cb.db.getPlayer(self.irc.network, self.channel, 'new')
+        self.assertEqual((survivor['xp'], survivor['display_nick']), (300, 'new'))
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'old') is None)
+
+    def testBothDisarmedNewProfileWinsWhenItHasAtLeastTheXp(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.confiscationEnforcementOnFusion.setValue(True)
+        self._profile('old', xp=20, gun_state='confiscated_permanent')
+        self._profile('new', xp=20, gun_state='confiscated')
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb._checkPendingRename(self.irc, self.channel, 'new')
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'new')['gun_state'], 'confiscated')
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'old') is None)
+
+    def testPendingRenameLogsTheTakeoverLine(self):
+        cb = self._cb()
+        lines = []
+        cb._logLine = lambda channel, key, *args: lines.append((key, args))
+        self._profile('old', xp=20)
+        self._profile('new', xp=10)
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb._checkPendingRename(self.irc, self.channel, 'new')
+        self.assertEqual([k for k, _ in lines], ['m102'])
+        # fresh nick, but the new nick already has stats (re-assignment): m127
+        lines.clear()
+        self._profile('x', xp=5)
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'gone', 'x')
+        cb._checkPendingRename(self.irc, self.channel, 'x')
+        self.assertEqual([k for k, _ in lines], ['m127'])
+        conf.supybot.plugins.DuckHuntPro.warnOnTakeover.setValue(False)
+        lines.clear()
+        self._profile('y', xp=5)
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'gone', 'y')
+        cb._checkPendingRename(self.irc, self.channel, 'y')
+        self.assertEqual(lines, [])
+
     # -----------------------------------------------------------------
     # Phase 3: admin toolbox
     # -----------------------------------------------------------------

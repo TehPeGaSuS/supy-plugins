@@ -1,6 +1,7 @@
 import html
 import os
 import random
+import re
 import time
 import urllib.parse
 from datetime import datetime, timedelta
@@ -84,6 +85,7 @@ class DuckHuntPro(callbacks.Plugin):
         # one explicitly. (This is NOT automatic and forgetting it only fails
         # at runtime.)
         self.admin.plugin = self
+        self.db.dropStalePendingTransfers(self.registryValue('pendingTransfersMaxAge'))
         self._scheduleEvent("DuckHuntPro:postinit",
                             time.time() + self.registryValue('postInitDelay'),
                             self._setPostInitDone, ())
@@ -382,23 +384,79 @@ class DuckHuntPro(callbacks.Plugin):
     # -----------------------------------------------------------------
 
     def doNick(self, irc, msg):
-        """Records a pending stat-transfer when a player renames. The
-        actual merge is deferred to the renamed nick's next in-game action
-        (_checkPendingRename), matching Duck_Hunt.tcl's deliberate delay
-        "to reduce the risk of stat theft"."""
+        """Nick-change tracking (Duck_Hunt.tcl's nickchange_tracking): notes
+        that a profile may belong to a player's new nick. The transfer itself
+        is deferred to the renamed nick's next in-game action
+        (_checkPendingRename), "to reduce the risk of stat theft"."""
         oldNick = msg.nick
         newNick = msg.args[0]
-        if ircutils.strEqual(oldNick, newNick):
+        if oldNick.lower() == newNick.lower():
             return
-        network = irc.network
         for cname in list(irc.state.channels.keys()):
-            if not self.registryValue('enabled', cname):
-                continue
-            if newNick not in irc.state.channels[cname].users:
-                continue
-            if not self.db.getPlayer(network, cname, oldNick):
-                continue
-            self.db.recordPendingTransfer(network, cname, oldNick, newNick)
+            if (self.registryValue('enabled', cname)
+                    and newNick in irc.state.channels[cname].users):
+                self._trackNickChange(irc, cname, oldNick, newNick)
+
+    def _logLine(self, channel, key, *args):
+        """The original's 'loglev' output: a line in the bot's log."""
+        self.log.info(ircutils.stripFormatting(self._t(channel, key, *args)))
+
+    @staticmethod
+    def _gunValue(player):
+        return {'armed': 1, 'confiscated': 0}.get(player['gun_state'], -1)
+
+    def _statsText(self, p):
+        """A profile's numbers in the order the original prints them."""
+        st = p['stats']
+        best = -1 if st['best_time_ms'] is None else '%.3f' % (st['best_time_ms'] / 1000.0)
+        return '{%s}' % ' '.join(str(x) for x in (
+            self._gunValue(p), int(bool(p['jammed'])), p['clip_ammo'], p['clips_left'], p['xp'],
+            st['killed'], st['missed'], st['empty_shots'], st['humans_shot'], st['wild_shots'],
+            st['bullets_received'], st['deflected'], st['deaths'], st['confiscations'],
+            st['jams'], best, st['reflex_ms']))
+
+    def _hostOf(self, irc, nick):
+        try:
+            return irc.state.nickToHostmask(nick).split('!', 1)[1]
+        except (KeyError, IndexError):
+            return '?'
+
+    def _trackNickChange(self, irc, channel, oldNick, newNick):
+        network = irc.network
+        lowOld, lowNew = oldNick.lower(), newNick.lower()
+        prefix = self.registryValue('anonymPrefix')
+        if prefix:
+            anonymous = re.compile('^%s[0-9]+$' % re.escape(prefix), re.I)
+            # Never hand stats to the nick a server gave an unidentified user.
+            if not anonymous.match(oldNick) and anonymous.match(newNick):
+                return
+        chan = self.db.getChannel(network, channel)
+        if not chan:
+            return
+        players = chan['players']
+        # A transfer filed under `oldNick` means somebody earlier renamed TO it.
+        pending = self.db.getPendingTransfer(network, channel, oldNick)
+        warn = self.registryValue('warnOnRename')
+        if lowNew in players:
+            # The new nick already has stats: note it, merge later. A reverse
+            # entry cancels out; two entries chain into one.
+            if pending and pending['old_nick'].lower() == lowNew:
+                self.db.popPendingTransfer(network, channel, oldNick)
+            elif pending:
+                self.db.popPendingTransfer(network, channel, oldNick)
+                self.db.recordPendingTransfer(network, channel, pending['old_nick'], newNick)
+                if warn:
+                    self._logLine(channel, 'm139', 'DuckHuntPro', oldNick,
+                                  self._hostOf(irc, newNick), newNick, channel)
+            else:
+                self.db.recordPendingTransfer(network, channel, oldNick, newNick)
+                if warn:
+                    self._logLine(channel, 'm139', 'DuckHuntPro', oldNick,
+                                  self._hostOf(irc, newNick), newNick, channel)
+        elif lowOld in players and not pending:
+            self.db.recordPendingTransfer(network, channel, oldNick, newNick)
+        elif pending and pending['old_nick'].lower() == lowNew:
+            self.db.popPendingTransfer(network, channel, oldNick)
 
     def doPart(self, irc, msg):
         channel = msg.args[0]
@@ -412,35 +470,49 @@ class DuckHuntPro(callbacks.Plugin):
                 self.db.discardPendingTransfer(network, cname, msg.nick)
 
     def _checkPendingRename(self, irc, channel, nick):
+        """Duck_Hunt.tcl's ckeck_for_pending_rename: if `nick` just took over
+        a nick that had stats, move or merge them now that the new nick is
+        playing. With confiscationEnforcementOnFusion, a disarmed new nick
+        can't escape its confiscation by inheriting an armed profile."""
         network = irc.network
         entry = self.db.popPendingTransfer(network, channel, nick)
         if not entry:
             return
         oldNick = entry['old_nick']
-        oldPlayer = self.db.getPlayer(network, channel, oldNick)
-        if not oldPlayer:
-            return
-        lang = self.registryValue('language', channel)
-        if self.registryValue('confiscationEnforcementOnFusion', channel):
-            newPlayer = self.db.getPlayer(network, channel, nick)
-            oldArmed = oldPlayer['gun_state'] == 'armed'
-            newArmed = (not newPlayer) or newPlayer['gun_state'] == 'armed'
-            if oldArmed and not newArmed:
-                # Anti-confiscation-dodge: the disarmed new identity
-                # doesn't get to inherit the old, still-armed one's stats.
+        oldP = self.db.getPlayer(network, channel, oldNick)
+        newP = self.db.getPlayer(network, channel, nick)
+        warn = self.registryValue('warnOnTakeover')
+        host = self._hostOf(irc, nick)
+        script = 'DuckHuntPro'
+        log = lambda key, *args: warn and self._logLine(channel, key, script, oldNick, host, nick, *args)
+        if oldP is not None:
+            enforce = self.registryValue('confiscationEnforcementOnFusion', channel)
+            newGun = 1 if newP is None else self._gunValue(newP)
+            oldGun = self._gunValue(oldP)
+            if enforce and newGun < 1 and oldGun == 1:
+                # the old profile was armed, the new one is not: the old stats are dropped
+                log('m245', nick, oldNick, oldNick, self._statsText(oldP))
                 self.db.deletePlayer(network, channel, oldNick)
-                return
-            if not oldArmed and not newArmed:
-                # Both disarmed: only the higher-xp profile survives.
-                if newPlayer and newPlayer['xp'] >= oldPlayer['xp']:
+            elif enforce and newGun < 1 and oldGun < 1:
+                # neither is armed: only the profile with more xp survives
+                if newP['xp'] >= oldP['xp']:
+                    log('m246', oldNick, self._statsText(oldP))
                     self.db.deletePlayer(network, channel, oldNick)
                 else:
+                    log('m246', nick, self._statsText(newP))
                     self.db.deletePlayer(network, channel, nick)
                     self.db.renamePlayer(network, channel, oldNick, nick)
-                return
-        if self.db.mergeStats(network, channel, nick, oldNick):
-            irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                lang, 'fusion_merged', old=oldNick, new=nick)))
+            else:
+                log('m102', oldNick, self._statsText(oldP), nick,
+                    self._statsText(newP) if newP is not None else '{}')
+                self.db.mergeStats(network, channel, nick, oldNick)
+            survivor = self.db.getPlayer(network, channel, nick)
+            if survivor is not None:
+                self._clampAmmo(survivor)
+            self.db.save()
+        elif newP is not None:
+            # No stats under the old nick: just flag the (re)assignment.
+            log('m127', nick, oldNick, nick, self._statsText(newP))
 
     # -----------------------------------------------------------------
     # Antiflood
