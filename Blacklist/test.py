@@ -42,6 +42,8 @@ class BlacklistTestCase(ChannelPluginTestCase):
     def setUp(self):
         super().setUp()
         conf.supybot.plugins.Blacklist.enabled.setValue(True)
+        # Off by default; most tests exercise the network list, so turn it on.
+        conf.supybot.plugins.Blacklist.enforceGlobal.setValue(True)
         # A real JOIN (not just addUser) is needed so irc.state.nickToHostmask
         # can resolve 'foo' the way _createMask does.
         self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
@@ -261,6 +263,26 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self._drain()
         self.assertResponse('blacklist net exemptlist', 'Mimi: *!*@b.host')
         self.assertError('blacklist net exemptlist nobody')
+
+    def testEnforceGlobalIsOffByDefault(self):
+        self.assertFalse(conf.supybot.plugins.Blacklist.enforceGlobal._default)
+
+    def testNetBlacklistIgnoredWhereEnforceGlobalIsOff(self):
+        self.assertNotError('blacklist net add bar!bar@bar.host netreason')
+        self._drain()
+        conf.supybot.plugins.Blacklist.enforceGlobal.setValue(False)
+        try:
+            self.irc.feedMsg(ircmsgs.join(self.channel, prefix='bar!bar@bar.host'))
+            self.assertEqual(self._takeAll(), [],
+                              'A channel with enforceGlobal off must ignore the net list.')
+            self.irc.feedMsg(ircmsgs.nick('barbar', prefix='bar!bar@bar.host'))
+            self.assertEqual(self._takeAll(), [])
+            msgs = self._takeAll(self.assertNotError(
+                'blacklist net add foo!*@* netreason2'))
+            self.assertEqual(self._kicked(msgs), [],
+                              '`net add` must not ban or kick where it is off.')
+        finally:
+            conf.supybot.plugins.Blacklist.enforceGlobal.setValue(True)
 
     def testNetExempt(self):
         self.assertNotError('blacklist net exemptadd foo!*@*')

@@ -88,7 +88,7 @@ conf.registerChannelValue(Blacklist, 'kickOnSelfBanReason',
         or admin on the bot are not kicked; the bot says this in the channel instead."""))
 
 conf.registerChannelValue(Blacklist, 'enforceGlobal',
-        registry.Boolean(True, """Sets whether this channel enforces the network-wide (net) blacklist:
+        registry.Boolean(False, """Sets whether this channel enforces the network-wide (net) blacklist:
         entries added with "net add"/"net timer" will be banned/kicked here, and joins are checked
         against the network blacklist in addition to this channel's own list."""))
 

@@ -228,10 +228,15 @@ supybot.plugins.Blacklist.kickOnSelfBanReason: Nice try. The ban hammer doesn't 
 ###
 # Sets whether this channel enforces the network-wide (net) blacklist.
 #
-# Default value: True
+# Default value: False
 ###
-supybot.plugins.Blacklist.enforceGlobal: True
+supybot.plugins.Blacklist.enforceGlobal: False
 ```
+Off by default: the network list does nothing in a channel until you turn this
+on for it (`config channel #chan plugins.Blacklist.enforceGlobal True`). When
+on, that channel checks the network list and then its own list on every join
+and nick change, `net add`/`net timer` ban and kick there, and the resync after
+the bot is opped re-applies network bans there.
 
 ```
 ###
