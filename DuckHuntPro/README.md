@@ -117,7 +117,8 @@ the rest are global:
   `chanServKickLine`, `CS KICK {channel} {nick} :{reason}` by default (needs a
   `CS` alias for ChanServ, as DALnet's has). For networks without it set e.g.
   `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`, or Undernet's
-  `PRIVMSG X@channels.undernet.org :<its command>`;
+  `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`
+  (Undernet's X: `kick <#channel> <nick | *!*userid@host> [reason]`);
   `strayBulletExemptCapability` (its `exempted_flags`: users with that
   capability never take a stray bullet)
 - the original's numbers: `xpPerDuck`, `xpPerGoldenDuckHp`, `xpLuckyShot`,

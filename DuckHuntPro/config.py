@@ -298,7 +298,7 @@ conf.registerNetworkValue(DuckHuntPro, 'chanServKickLine',
     filled in. The default is the original's `CS kick` (the network needs a CS
     alias for ChanServ, as DALnet's has). Without an alias, for example:
     `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`; on Undernet the
-    service is X: `PRIVMSG X@channels.undernet.org :<its command>`."""))
+    service is X: `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'strayBulletExemptCapability',
     registry.String('', """A capability (for example "duckhuntpro.exempt"):
