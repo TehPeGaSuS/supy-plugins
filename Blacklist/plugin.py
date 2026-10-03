@@ -648,7 +648,9 @@ class Blacklist(callbacks.Plugin):
         no_op = [c for c, has_op in reached if not has_op]
         if opped:
             parts.append(f"Banned in {capped(opped)}.")
-        if no_op:
+        if no_op and not opped:
+            parts.append("I'm not op in any channel, so it won't be applied anywhere.")
+        elif no_op:
             parts.append(f"I'm not op in {capped(no_op)}, so it won't be applied there.")
         if skipped:
             n = len(skipped)

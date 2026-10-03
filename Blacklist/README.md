@@ -138,8 +138,9 @@ The reply says where the ban actually landed, for example `Added to the
 network blacklist. Banned in #a, #d. I'm not op in #c, #e, so it won't be applied there.
 enforceGlobal is off in 5 other channels.` Where the bot has no op the ban is
 queued but the server will refuse it, so those channels get their own
-sentence. If no channel has `enforceGlobal` on, it says `Not enforced anywhere
-yet`.
+sentence. If the bot has no op in any channel the ban applies to, it just says
+`I'm not op in any channel, so it won't be applied anywhere.` If no channel has
+`enforceGlobal` on, it says `Not enforced anywhere yet`.
 
 ## Enforcement (Eggdrop-style)
 

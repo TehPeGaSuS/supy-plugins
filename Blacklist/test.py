@@ -302,8 +302,8 @@ class BlacklistTestCase(ChannelPluginTestCase):
         conf.supybot.plugins.Blacklist.enforceGlobal.get(other).setValue(False)
         self.assertRegex(
             self._replyTo('blacklist net add foo r1'),
-            r'Added to the network blacklist\. I\'m not op in #test, so it won\'t be '
-            r'applied there\. enforceGlobal is off in 1 other channel\.')
+            r'Added to the network blacklist\. I\'m not op in any channel, so it '
+            r'won\'t be applied anywhere\. enforceGlobal is off in 1 other channel\.')
         self.assertNotError('blacklist net delete 1')
         self._drain()
         self._botIsOpped()
@@ -325,8 +325,9 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self.assertEqual(
             text, "Banned in #a, #d. I'm not op in #c, #e, so it won't be applied there. "
                   "enforceGlobal is off in 1 other channel.")
-        self.assertEqual(self._cb()._netReachText([('#c', False)], []),
-                         "I'm not op in #c, so it won't be applied there.")
+        self.assertEqual(
+            self._cb()._netReachText([('#c', False), ('#e', False)], []),
+            "I'm not op in any channel, so it won't be applied anywhere.")
         self.assertEqual(self._cb()._netReachText([], []),
                          "Not enforced anywhere yet.")
 
