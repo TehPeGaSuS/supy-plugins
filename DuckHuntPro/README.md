@@ -29,7 +29,7 @@ needed in private):
 | `bang` | Shoot at the current duck. |
 | `duckreload` | Reload, or unjam your weapon (named so to avoid the Owner plugin's `reload`). |
 | `duckstats [<nick>]` | Hunting stats (a NOTICE). |
-| `lastduck` | How long ago the last duck flew. In private it needs channel op/halfop. |
+| `lastduck` | How long ago the last duck flew, and what became of it: still in the air, shot by whom, or flown away (an addition from the original's beta). In private it needs channel op/halfop. |
 | `shop [<id> [<target>]]` | The catalogue, or buy item 1-23 (14-17 need a target). |
 | `duckshooters`, `duckchampions` | Top shooters of the season / of the last reset. |
 

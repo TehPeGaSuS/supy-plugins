@@ -57,6 +57,8 @@ def _newChannel():
         'planned_flights': [],
         'fake_ducks_pending': [],
         'last_duck_at': None,
+        'last_duck_killer': None,
+        'last_duck_outcome': None,
         'archives': [],
     }
 

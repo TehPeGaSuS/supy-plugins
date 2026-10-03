@@ -1830,6 +1830,62 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn('Meilleurs', messages.get('fr', 'shooters_header'))
         self.assertNotEqual(messages.get('fr', 'quarterly_reset'), messages.get('en', 'quarterly_reset'))
 
+    def testLastduckSaysWhoShotTheLastDuck(self):
+        cb = self._cb()
+        self._putDuck()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = cb._activeDuck[self._key()][0]['spawned_at']
+        self._shot()                                         # self.nick kills it
+        said = self._texts(self._cmd('lastduck'))
+        self.assertEqual(len(said), 1)
+        self.assertTrue(said[0].endswith(' It was shot by %s.' % self.nick), said)
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(' Il a été abattu par %s.' % self.nick))
+
+    def testLastduckSaysTheDuckIsStillThere(self):
+        cb = self._cb()
+        self._putDuck()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = cb._activeDuck[self._key()][0]['spawned_at']
+        said = self._texts(self._cmd('lastduck'))
+        self.assertTrue(said[0].endswith(' It is still in the air.'), said)
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(' Il est toujours là.'))
+
+    def testLastduckSaysTheDuckFlewAway(self):
+        cb = self._cb()
+        for how in ('escape', 'frightened'):
+            self._putDuck()
+            duck = cb._activeDuck[self._key()][0]
+            chan = cb.db.channel(self.irc.network, self.channel)
+            chan['last_duck_at'] = duck['spawned_at']
+            chan['last_duck_killer'] = chan['last_duck_outcome'] = None
+            if how == 'escape':
+                cb._duckEscapes(self.irc.network, self.channel, duck['spawned_at'])
+            else:
+                cb._removeDuck(self.irc.network, self.channel, outcome='fled')
+            self._sent()
+            said = self._texts(self._cmd('lastduck'))
+            self.assertTrue(said[0].endswith(' It flew away.'), (how, said))
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertTrue(self._texts(self._cmd('lastduck'))[0].endswith(" Il s'est envolé."))
+
+    def testLastduckSaysNothingMoreForAnUnknownOutcome(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = time.time() - 100
+        chan['last_duck_killer'] = chan['last_duck_outcome'] = None
+        self.assertEqual(self._texts(self._cmd('lastduck')),
+                         [messages.tcl('en', 'm144', messages.adaptTimeResolution(100000, False, 'en'))])
+
+    def testAnOlderDucksKillDoesNotBecomeTheLastDucksKiller(self):
+        cb = self._cb()
+        self._putDuck()                                      # older, killed first
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['last_duck_at'] = time.time() + 5               # a newer duck is the last one
+        self._shot()
+        self.assertTrue(chan.get('last_duck_killer') is None)
+
     def testKillingOneOfSeveralDucksSaysOneOfTheDucks(self):
         self._putDuck()
         self._putDuck()
@@ -3106,7 +3162,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         files = os.listdir(directory)
         self.assertEqual(len(files), 1, files)
         with open(os.path.join(directory, files[0]), encoding='utf-8') as f:
-            return f.read().split('\n')
+            # Every clock reads 12:00:00: calls made a second apart must not differ.
+            return re.sub(r'\[\d\d:\d\d:\d\d\]', '[12:00:00]', f.read()).split('\n')
 
     CLOCK = r'\[(\d\d:\d\d:\d\d)\]'
 

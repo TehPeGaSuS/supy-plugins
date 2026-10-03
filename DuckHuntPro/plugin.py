@@ -1109,6 +1109,8 @@ class DuckHuntPro(callbacks.Plugin):
         chan = self.db.channel(irc.network, channelName)
         with self.db.lock:
             chan['last_duck_at'] = now
+            chan['last_duck_killer'] = None
+            chan['last_duck_outcome'] = None
         self.db.save()
         if logSoaring:      # (a manual launch has its own entry)
             self._huntLog(channelName, 'golden_duck_soaring' if isGolden else
@@ -1132,7 +1134,7 @@ class DuckHuntPro(callbacks.Plugin):
         # through its own scheduled event.
         key = (network.lower(), channelName.lower())
         others = len(self._activeDuck.get(key) or []) > 1
-        duck = self._removeDuck(network, channelName, spawnedAt=spawnedAt)
+        duck = self._removeDuck(network, channelName, spawnedAt=spawnedAt, outcome='escaped')
         if duck is None:
             return  # already killed or fled
         self._huntLog(channelName, 'golden_duck_escaped' if duck['is_golden'] else
@@ -1146,12 +1148,14 @@ class DuckHuntPro(callbacks.Plugin):
             self._out(irc, channelName, None, self._t(channelName, mkey), 'public')
         self._maybeHandBackOnDuckGone(network, channelName)
 
-    def _removeDuck(self, network, channelName, spawnedAt=None):
+    def _removeDuck(self, network, channelName, spawnedAt=None, outcome=None):
         """Removes one duck from the channel's in-flight list and
         unschedules its escape timer. With no `spawnedAt`, removes the
         oldest (list head) -- the one `bang()`/accidents always target,
         matching Duck_Hunt.tcl's FIFO rule. Returns the removed duck dict,
-        or None if there was nothing to remove (already gone)."""
+        or None if there was nothing to remove (already gone). `outcome`
+        ('shot', 'escaped' or 'fled') is remembered for `lastduck` when this
+        was the channel's last duck."""
         key = (network.lower(), channelName.lower())
         ducks = self._activeDuck.get(key)
         if not ducks:
@@ -1170,6 +1174,10 @@ class DuckHuntPro(callbacks.Plugin):
             del self._activeDuck[key]
         name = "DuckHuntPro:escape:%s:%s:%r" % (network, channelName.lower(), duck['spawned_at'])
         self._unschedule(name)
+        if outcome:
+            chan = self.db.getChannel(network, channelName)
+            if chan and chan.get('last_duck_at') == duck['spawned_at']:
+                chan['last_duck_outcome'] = outcome
         return duck
 
     def _setVoice(self, irc, channel, nick, voice):
@@ -1205,7 +1213,7 @@ class DuckHuntPro(callbacks.Plugin):
             duck['shots_fired'] += 1
             if (duck['shots_fired'] == fleeAfter
                     and not duck['is_golden'] and not duck.get('is_fake', False)):
-                self._removeDuck(network, channel, spawnedAt=duck['spawned_at'])
+                self._removeDuck(network, channel, spawnedAt=duck['spawned_at'], outcome='fled')
                 fled += 1
                 self._huntLog(channel, 'frightened', now=now)
         return fled
@@ -1601,7 +1609,10 @@ class DuckHuntPro(callbacks.Plugin):
             cloverMsg = t('m369')
 
         elapsedMs = int((now - duck['spawned_at']) * 1000)
-        self._removeDuck(network, channel)
+        self._removeDuck(network, channel, outcome='shot')
+        chan = self.db.getChannel(network, channel)
+        if chan and chan.get('last_duck_at') == duck['spawned_at']:
+            chan['last_duck_killer'] = player['display_nick']   # for `lastduck`
         st = player['stats']
         if duck['is_golden']:
             st['golden_killed'] += 1
@@ -1946,6 +1957,22 @@ class DuckHuntPro(callbacks.Plugin):
                                     xp=s['xp'], killed=s['killed']))
     duckchampions = wrap(duckchampions, ['channel'])
 
+    def _lastDuckSuffix(self, network, channel, chan, lang):
+        """What became of the last duck, after the time: still in the air,
+        shot by someone (as in the original's beta), or flown away."""
+        if not chan or not chan.get('last_duck_at'):
+            return ''
+        # (a loop: supybot.commands shadows the builtin any())
+        for d in self._activeDuck.get((network.lower(), channel.lower()), ()):
+            if d['spawned_at'] == chan['last_duck_at']:
+                return ' ' + messages.get(lang, 'lastduck_flying')
+        outcome = chan.get('last_duck_outcome')
+        if outcome == 'shot' and chan.get('last_duck_killer'):
+            return ' ' + messages.get(lang, 'lastduck_killer', nick=chan['last_duck_killer'])
+        if outcome in ('escaped', 'fled'):
+            return ' ' + messages.get(lang, 'lastduck_gone')
+        return ''
+
     def lastduck(self, irc, msg, args, channel):
         """[<channel>]
         Shows how long ago the last duck flew on <channel>. In the channel it
@@ -1962,7 +1989,7 @@ class DuckHuntPro(callbacks.Plugin):
                 self._out(irc, channel, msg.nick, self._t(channel, 'm146', channel))
             else:
                 self._out(irc, channel, msg.nick, self._t(channel, 'm144', messages.adaptTimeResolution(
-                    (int(time.time()) - int(lastAt)) * 1000, False, lang)))
+                    (int(time.time()) - int(lastAt)) * 1000, False, lang)) + self._lastDuckSuffix(irc.network, channel, chan, lang))
             return
         notice = lambda text: self._out(irc, channel, msg.nick, text, 'notice')
         if not self._isStaff(msg.prefix, channel):
@@ -1975,7 +2002,7 @@ class DuckHuntPro(callbacks.Plugin):
             notice(self._t(channel, 'm146', channel))
         else:
             notice(self._t(channel, 'm147', channel, messages.adaptTimeResolution(
-                (int(time.time()) - int(lastAt)) * 1000, False, lang)))
+                (int(time.time()) - int(lastAt)) * 1000, False, lang)) + self._lastDuckSuffix(irc.network, channel, chan, lang))
     lastduck = wrap(lastduck, ['channel'])
 
     # -----------------------------------------------------------------

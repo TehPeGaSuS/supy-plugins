@@ -133,6 +133,9 @@ MESSAGES = {
         'champions_header': 'Champions of the season ending {when}:',
         'champions_line': '#{rank} {nick} -- {xp} xp, {killed} killed',
         'champions_empty': 'No quarterly reset has happened here yet.',
+        'lastduck_killer': 'It was shot by {nick}.',
+        'lastduck_flying': 'It is still in the air.',
+        'lastduck_gone': 'It flew away.',
         'quarterly_reset': ("A new hunting season begins! Standings have been "
                              "archived -- see 'duckchampions' for last season's "
                              "top shooters."),
@@ -208,6 +211,9 @@ MESSAGES = {
     # The plugin's own additions to the original (the season features); the
     # original's messages themselves are in tclmessages.py, in both languages.
     'fr': {
+        'lastduck_killer': 'Il a été abattu par {nick}.',
+        'lastduck_flying': 'Il est toujours là.',
+        'lastduck_gone': "Il s'est envolé.",
         'shooters_header': 'Meilleurs chasseurs :',
         'shooters_line': '#{rank} {nick} -- niveau {level}, {xp} xp, {killed} tué(s)',
         'shooters_empty': "Personne n'a encore abattu de canard ici.",
