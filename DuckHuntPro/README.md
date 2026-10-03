@@ -35,7 +35,8 @@ needed in private):
 
 Staff commands need `#channel,op`, `#channel,halfop` or the global `admin`
 capability (the original's `mno|mnol` commands), for example
-`user capability add <user> #channel,op`.
+`capability add <user> #channel,op` (Admin plugin; you can only grant a
+capability you hold yourself).
 
 | Command | |
 |---|---|
@@ -110,7 +111,9 @@ the rest are global:
 - `method`, `postInitDelay`, `autoRefillAmmoTime`, `backupTime`,
   `quarterlyResetEnabled`, `huntingLogs`, `huntingLogDirectory`,
   `anonymPrefix`, `warnOnRename`, `warnOnTakeover`, `pendingTransfersMaxAge`
-- `kickViaChanServ` (the original's `kick_method 1`) and
+- `kickViaChanServ` (the original's `kick_method 1`: sends the raw line
+  `CS KICK <channel> <nick> :<reason>`, so the network needs a `CS` alias for
+  ChanServ, as DALnet's does) and
   `strayBulletExemptCapability` (its `exempted_flags`: users with that
   capability never take a stray bullet)
 - the original's numbers: `xpPerDuck`, `xpPerGoldenDuckHp`, `xpLuckyShot`,
