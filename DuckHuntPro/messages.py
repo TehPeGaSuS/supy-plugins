@@ -9,6 +9,83 @@ adding another language later is just adding a sibling dict with the same
 keys -- `get()` below falls back to English for anything missing.
 """
 
+from . import tclmessages
+
+
+def _tclTable(lang):
+    return tclmessages.FR if lang == 'fr' else tclmessages.EN
+
+
+def tcl(lang, key, *args):
+    """Original Duck Hunt v2.11 message `key` (m0..m4xx) in `lang` ('fr' or
+    anything else for English), formatted with Tcl-style positional args like
+    msgcat::mc does (a message without args is returned as is)."""
+    text = _tclTable(lang)[key]
+    return text % args if args else text
+
+
+def tclList(lang, key):
+    """The original's list-valued messages (m134 rank names, m137 glyphs,
+    m138 cries, m394 junk items)."""
+    return _tclTable(lang) and (tclmessages.FR_LISTS if lang == 'fr' else tclmessages.EN_LISTS)[key]
+
+
+def plural(value, singular, plural_):
+    """Duck_Hunt.tcl's plural: the plural form from |2| up."""
+    return plural_ if value >= 2 or value <= -2 else singular
+
+
+def colorizeValue(value):
+    """Duck_Hunt.tcl's colorize_value: red when <= 0."""
+    return '\x0304%s\x03' % value if value <= 0 else str(value)
+
+
+def lvl2rank(level, lang='en'):
+    return tclList(lang, 'm134')[level]
+
+
+def adaptTimeResolution(milliseconds, short=False, lang='en'):
+    """Duck_Hunt.tcl's adapt_time_resolution: a duration in milliseconds as
+    '1 hour 5 minutes and 3.5 seconds' (or '1h5mn3.5s' when `short`). Zero
+    units are skipped except seconds, which always show. (The original reads
+    the last three characters of the number as the milliseconds, which
+    mangles durations under 100 ms; this pads them properly.)"""
+    t = lambda key: tcl(lang, key)
+    seconds_total, milli = divmod(abs(int(milliseconds)), 1000)
+    days = seconds_total // 86400
+    hours = (seconds_total % 86400) // 3600
+    minutes = (seconds_total % 3600) // 60
+    seconds = seconds_total % 60
+    milli = ('%03d' % milli).rstrip('0')
+    out = []
+    valid = 0
+    for counter, unit in enumerate((days, hours, minutes, seconds), 1):
+        if unit <= 0 and counter != 4:
+            continue
+        if counter == 1:
+            out.append('%d%s' % (unit, t('m112')) if short else
+                       '%d %s' % (unit, plural(unit, t('m110'), t('m111'))))
+        elif counter == 2:
+            out.append('%d%s' % (unit, t('m115')) if short else
+                       '%d %s' % (unit, plural(unit, t('m113'), t('m114'))))
+        elif counter == 3:
+            out.append('%d%s' % (unit, t('m118')) if short else
+                       '%d %s' % (unit, plural(unit, t('m116'), t('m117'))))
+        elif milli:
+            out.append('%d.%s%s' % (unit, milli, t('m119')) if short else
+                       '%d.%s %s' % (unit, milli, plural(int('%d%s' % (unit, milli)),
+                                                          t('m106'), t('m107'))))
+        else:
+            out.append('%d%s' % (unit, t('m119')) if short else
+                       '%d %s' % (unit, plural(unit, t('m106'), t('m107'))))
+        valid += 1
+    if short:
+        return ''.join(out)
+    if valid > 1:
+        out.insert(len(out) - 1, t('m120'))
+    return ' '.join(out)
+
+
 MESSAGES = {
     'en': {
         'duck_flies': '\\_o< Quack!',

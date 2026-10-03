@@ -177,6 +177,20 @@ conf.registerChannelValue(DuckHuntPro, 'autoGunHandBackTime',
     registry.String('00:00', """Local time (HH:MM) weapons are auto-returned
     each day, when gunHandBackMode is 1."""))
 
+conf.registerChannelValue(DuckHuntPro, 'preferredDisplayMode',
+    registry.Integer(1, """Where the game's per-player replies go: 1 = PRIVMSG to
+    the channel, anything else = NOTICE to the player (the original's
+    preferred_display_mode). Duck flights, kills and accidents are always
+    public."""))
+
+conf.registerChannelValue(DuckHuntPro, 'monochrome',
+    registry.Boolean(False, """Strip colours and other formatting from every
+    message the game sends (it is always stripped on channels with mode +c)."""))
+
+conf.registerChannelValue(DuckHuntPro, 'kickOnWildFire',
+    registry.Boolean(False, """Kick players who shoot when there is no duck
+    (the original's kick_on_wild_fire)."""))
+
 conf.registerGlobalValue(DuckHuntPro, 'autoRefillAmmoTime',
     registry.String('00:00', """Local time (HH:MM) at which every player's
     clips are refilled to their level's count each day (the original script's

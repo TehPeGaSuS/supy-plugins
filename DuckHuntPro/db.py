@@ -41,6 +41,7 @@ def _newPlayer(nick):
             'bullets_received': 0, 'deflected': 0, 'absorbed': 0,
             'confiscations': 0, 'jams': 0, 'deaths': 0,
             'best_time_ms': None, 'total_time_ms': 0, 'timed_shots': 0,
+            'reflex_ms': 0,
         },
         'items': {},
         'last_activity': None,
@@ -193,6 +194,7 @@ class Database:
         with self.lock:
             p = chan['players'].setdefault(n, _newPlayer(nick))
             p['display_nick'] = nick
+            p['stats'].setdefault('reflex_ms', 0)
             return p
 
     def getPlayer(self, network, channelName, nick):

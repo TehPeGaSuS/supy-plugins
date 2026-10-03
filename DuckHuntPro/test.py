@@ -61,8 +61,20 @@ class ScriptedRNG:
 class DuckHuntProTestCase(ChannelPluginTestCase):
     plugins = ('DuckHuntPro',)
 
+    def _resetConfig(self):
+        """Conf values are process-global and survive from one test method to
+        the next, so a test that flips an option (and forgets to flip it
+        back) silently changes every test that runs after it. Start each test
+        from the registry defaults instead."""
+        for name, value in conf.supybot.plugins.DuckHuntPro.getValues(getChildren=True):
+            if '.web.' in name:       # its callbacks start/stop the HTTP server
+                continue
+            if hasattr(value, '_default') and hasattr(value, 'setValue'):
+                value.setValue(value._default)
+
     def setUp(self):
         super().setUp()
+        self._resetConfig()
         conf.supybot.plugins.DuckHuntPro.enabled.setValue(True)
         # Drops are rolled per-key with a bottomless RNG queue in most
         # tests; leaving this on would let an exhausted ScriptedRNG queue
@@ -117,6 +129,27 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def _addOnlineNick(self, nick):
         self.irc.state.channels[self.channel].addUser(nick)
+
+    def _addHunter(self, nick, xp=0):
+        """A channel member who has fired before, so accidents can hit them."""
+        self._addOnlineNick(nick)
+        p = self._cb().db.player(self.irc.network, self.channel, nick)
+        p['xp'] = xp
+        p['stats']['missed'] = 1
+        self._cb().db.save()
+        return p
+
+    def _botOpped(self):
+        self.irc.state.channels[self.channel].ops.add(self.irc.nick)
+
+    def _sent(self):
+        """Every message the bot queued so far, as (command, target, text)."""
+        out = []
+        while True:
+            m = self.irc.takeMsg()
+            if m is None:
+                return out
+            out.append((m.command, m.args[0], m.args[-1]))
 
     def _assertRendersNotFound(self, cb, path):
         # plugin.py's `_WebNotFound` gets a fresh class object each time the
@@ -230,7 +263,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._rng = ScriptedRNG([100, 100])  # no jam, miss
         self.assertNotError('bang')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(player['xp'], 0)  # -1 penalty clamped to 0
+        # xp isn't floored at 0: a new player's miss takes them to -1
+        self.assertEqual(player['xp'], data.LEVELS[1].xp_missed_shot)
         self.assertEqual(player['stats']['missed'], 1)
         self.assertEqual(cb._activeDuck[key][0]['shots_fired'], 1)
 
@@ -257,7 +291,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(player['xp'], data.BASE_XP_GOLDEN_DUCK * 2)
         self.assertEqual(player['stats']['golden_killed'], 1)
 
-    def testJamBlocksShotAndStillConsumesAmmo(self):
+    def testJamBlocksShotAndDoesNotConsumeAmmo(self):
         cb = self._cb()
         cb._rng = ScriptedRNG([0])  # jam roll succeeds
         self.assertNotError('bang')
@@ -265,7 +299,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertTrue(player['jammed'])
         self.assertEqual(player['stats']['jams'], 1)
         lvl = data.LEVELS[data.levelForXp(player['xp'])]
-        self.assertEqual(player['clip_ammo'], lvl.clip_size - 1)
+        # the jam is rolled before the bullet is spent, as in the original
+        self.assertEqual(player['clip_ammo'], lvl.clip_size)
 
     def testReloadClearsJam(self):
         cb = self._cb()
@@ -294,7 +329,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         player['clip_ammo'] = 0
         player['clips_left'] = 0
         cb.db.save()
-        self.assertRegexp('bang', 'empty')
+        cb._rng = ScriptedRNG([100])   # the gun doesn't jam first
+        self.assertRegexp('bang', 'EMPTY MAGAZINE')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
         self.assertEqual(player['stats']['empty_shots'], 1)
 
@@ -311,7 +347,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         player['gun_state'] = 'confiscated'
         cb.db.save()
-        self.assertRegexp('bang', "doesn't have a gun")
+        self.assertRegexp('bang', 'not armed')
 
     def testDuckstatsAndLastduck(self):
         cb = self._putDuck()
@@ -827,39 +863,33 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testSabotageForcesJamAndKicks(self):
         cb = self._cb()
+        self._botOpped()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         db.giveItem(player, 'sabotage', time.time(), duration=None, uses=1, value='bob')
         cb.db.save()
         self._putDuck()
-        # No jam-roll rng call at all: forcedJam short-circuits it. Only the
-        # ammo/level lookups need no rng, so the queue can stay empty.
+        # No jam-roll rng call at all: a sabotaged gun jams without rolling.
         cb._rng = ScriptedRNG([])
-        # Not assertNotError() here: KICK is a high-priority IRC command in
-        # Limnoria's outgoing queue (see IrcMsgQueue._high in irclib.py), so
-        # it jumps ahead of the plain PRIVMSG queued just before it --
-        # assertNotError's single takeMsg() would grab the KICK and leave
-        # the drain loop below with nothing to find. getMsg() still waits
-        # (via its internal poll loop) for the threaded command to finish,
-        # unlike a bare feedMsg().
+        # KICK is a high-priority IRC command in Limnoria's outgoing queue,
+        # so it can jump ahead of the PRIVMSG queued before it: getMsg()
+        # waits for the threaded command to finish, then scan everything.
         m = self.getMsg('bang')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
         self.assertTrue(player['jammed'])
-        kicked = m is not None and m.command == 'KICK'
-        m = self.irc.takeMsg()
-        while m is not None:
-            if m.command == 'KICK':
-                kicked = True
-            m = self.irc.takeMsg()
-        self.assertTrue(kicked)
+        sent = [(m.command, m.args[0], m.args[-1])] if m else []
+        sent += self._sent()
+        self.assertTrue(any(c == 'KICK' and 'sabotage' in text for c, _, text in sent), sent)
+        self.assertTrue(any('sabotage by bob' in text for c, _, text in sent), sent)
 
     def testInfraredBlocksWildShotWithoutConsumingAmmo(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         db.giveItem(player, 'infrared_detector', time.time(), duration=86400, uses=6)
         cb.db.save()
-        self.assertRegexp('bang', 'locked')
+        cb._rng = ScriptedRNG([100])   # no jam
+        self.assertRegexp('bang', 'Trigger locked')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertTrue(player['clip_ammo'] is None)  # ammo system never even ran
+        self.assertEqual(player['clip_ammo'], data.LEVELS[1].clip_size)  # not spent
         item = db.itemActive(player, 'infrared_detector', time.time())
         self.assertEqual(item['uses_left'], 5)
 
@@ -916,15 +946,216 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(player['stats']['missed'], 1)  # missed thanks to the halving
         self.assertTrue(db.itemActive(player, 'mirror_dazzle', time.time()) is None)
 
+    # ---- parity with Duck_Hunt.tcl's shoot -----------------------------
+
+    def _bangSent(self):
+        first = self.getMsg('bang')
+        time.sleep(0.1)       # the command's thread may still be queueing
+        sent = [(first.command, first.args[0], first.args[-1])] if first else []
+        return sent + self._sent()
+
+    def _texts(self, sent, command='PRIVMSG'):
+        return [text for c, _, text in sent if c == command]
+
+    def testJammedGunStillEatsSandAndSabotage(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        player['jammed'] = True
+        db.giveItem(player, 'sand', time.time(), duration=None, uses=1, value='bob')
+        db.giveItem(player, 'sabotage', time.time(), duration=None, uses=1, value='bob')
+        cb.db.save()
+        sent = self._bangSent()
+        self.assertTrue(any('JAMMED GUN' in x for x in self._texts(sent)), sent)
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        self.assertTrue(db.itemActive(player, 'sand', time.time()) is None)
+        self.assertTrue(db.itemActive(player, 'sabotage', time.time()) is None)
+
+    def testWildFireCostsTheMissAndTheWildFirePenalty(self):
+        cb = self._cb()
+        cb._rng = ScriptedRNG([100])    # no jam; nobody to hit afterwards
+        sent = self._bangSent()
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        lvl = data.LEVELS[1]
+        self.assertEqual(player['xp'], lvl.xp_missed_shot + lvl.xp_wild_shot)
+        self.assertEqual(player['stats']['missed'], 1)
+        self.assertEqual(player['stats']['wild_shots'], 1)
+        self.assertTrue(any('Luckily you missed' in x and '[missed: -1 xp]' in x
+                            and '[wild fire: -1 xp]' in x for x in self._texts(sent)), sent)
+
+    def _levelOneHit(self, roll, items):
+        """Shoots a level-1 player (55 accuracy) holding `items` with the
+        accuracy roll `roll`; returns whether the duck was killed."""
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        for key in items:
+            db.giveItem(player, key, time.time(), duration=None, uses=1, value='bob')
+        cb.db.save()
+        self._putDuck()
+        cb._rng = ScriptedRNG([100, roll])
+        self.assertNotError('bang')
+        return self._key() not in cb._activeDuck
+
+    def testMirrorHalvesAccuracyBeforeTheSightAddsItsThird(self):
+        # 55 -> int(55/2) = 27, then + int((100 - 55) / 3) = 15  ->  42
+        # (sight first and halving after would give 35)
+        self.assertTrue(self._levelOneHit(41.9, ['mirror_dazzle', 'sight']))
+
+    def testMirrorAndSightBoundary(self):
+        self.assertFalse(self._levelOneHit(42, ['mirror_dazzle', 'sight']))
+
+    def testSightAndMirrorAreSpentEvenOnAWildShot(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        for key in ('sight', 'mirror_dazzle'):
+            db.giveItem(player, key, time.time(), duration=None, uses=1, value='bob')
+        cb.db.save()
+        cb._rng = ScriptedRNG([100])
+        self.assertNotError('bang')       # no duck: wild fire
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        self.assertTrue(db.itemActive(player, 'sight', time.time()) is None)
+        self.assertTrue(db.itemActive(player, 'mirror_dazzle', time.time()) is None)
+
+    def _jamLevel(self, jam):
+        for i, lvl in enumerate(data.LEVELS[:-1]):
+            if lvl.jam_pct == jam:
+                return lvl, (data.LEVELS[i - 1].xp_threshold if i else 0)
+
+    def testGreaseHalvesJamWithIntegerDivision(self):
+        cb = self._cb()
+        lvl, xp = self._jamLevel(1)
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        player['xp'] = xp
+        db.giveItem(player, 'grease', time.time(), duration=86400)
+        cb.db.save()
+        cb._rng = ScriptedRNG([0, 100])   # a 1% gun would jam on 0; int(1/2) = 0 can't
+        self.assertNotError('bang')
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        self.assertFalse(player['jammed'])
+
+    def testSandDoublesTheJamChance(self):
+        for roll, jams in ((29.9, True), (30, False)):
+            cb = self._cb()
+            player = cb.db.player(self.irc.network, self.channel, self.nick)
+            player.update(jammed=False, xp=0, clip_ammo=None, clips_left=None)
+            player['items'].clear()
+            db.giveItem(player, 'sand', time.time(), duration=None, uses=1, value='bob')
+            cb.db.save()
+            cb._rng = ScriptedRNG([roll, 100])     # level 1 jams 15% -> 30% with sand
+            self.assertNotError('bang')
+            self._drain()
+            self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel,
+                                             self.nick)['jammed'], jams, roll)
+
+    def _flee(self, golden=0, count=2, shots=2):
+        cb = self._cb()
+        for i in range(count):
+            self._putDuck(is_golden=i < golden)
+            cb._activeDuck[self._key()][-1]['shots_fired'] = shots
+        cb._rng = ScriptedRNG([100, 100])    # no jam, miss
+        return self._texts(self._bangSent())
+
+    def testAllDucksFleeAnnouncement(self):
+        self.assertTrue(any('all ducks fled' in x for x in self._flee(count=2)))
+
+    def testSomeDucksFleeAnnouncements(self):
+        sent = self._flee(golden=1, count=3)       # the golden duck can't flee
+        self.assertTrue(any('2 ducks fled' in x for x in sent), sent)
+
+    def testOneOfSeveralDucksFleeAnnouncement(self):
+        sent = self._flee(golden=1, count=2)
+        self.assertTrue(any('a duck fled' in x for x in sent), sent)
+
+    def testTheOnlyDuckFleeAnnouncement(self):
+        sent = self._flee(count=1)
+        self.assertTrue(any('the duck fled' in x for x in sent), sent)
+
+    def testMissingIntoALowerLevelAnnouncesTheDemotion(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        player['xp'] = data.LEVELS[1].xp_threshold          # level 2, one xp over
+        cb.db.save()
+        self._putDuck()
+        cb._rng = ScriptedRNG([100, 100])
+        sent = self._bangSent()
+        self.assertTrue(any('is demoted to level 1' in x for x in self._texts(sent)), sent)
+
+    def testMissIsANoticeWhenPreferredDisplayModeIsTwo(self):
+        self._putDuck()
+        self._cb()._rng = ScriptedRNG([100, 100])
+        conf.supybot.plugins.DuckHuntPro.preferredDisplayMode.setValue(2)
+        try:
+            sent = self._bangSent()
+        finally:
+            conf.supybot.plugins.DuckHuntPro.preferredDisplayMode.setValue(1)
+        self.assertTrue(any(c == 'NOTICE' and 'Missed.' in x for c, _, x in sent), sent)
+
+    def testMonochromeStripsTheFormatting(self):
+        self._putDuck()
+        self._cb()._rng = ScriptedRNG([100, 100])
+        conf.supybot.plugins.DuckHuntPro.monochrome.setValue(True)
+        try:
+            sent = self._bangSent()
+        finally:
+            conf.supybot.plugins.DuckHuntPro.monochrome.setValue(False)
+        text = [x for x in self._texts(sent) if 'Missed.' in x]
+        self.assertTrue(text and '\x03' not in text[0] and '\x02' not in text[0], sent)
+
+    def testReactionTimeAccumulatesWhileADuckFlies(self):
+        cb = self._putDuck()
+        cb._activeDuck[self._key()][0]['spawned_at'] -= 2.0
+        cb._rng = ScriptedRNG([100, 100])
+        self.assertNotError('bang')
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        self.assertTrue(1900 <= player['stats']['reflex_ms'] <= 2500, player['stats'])
+
+    def testKickOnWildFireIsOptIn(self):
+        cb = self._cb()
+        self._botOpped()
+        cb._rng = ScriptedRNG([100])
+        sent = self._bangSent()
+        self.assertEqual(self._texts(sent, 'KICK'), [])
+        conf.supybot.plugins.DuckHuntPro.kickOnWildFire.setValue(True)
+        try:
+            cb._rng = ScriptedRNG([100])
+            sent = self._bangSent()
+        finally:
+            conf.supybot.plugins.DuckHuntPro.kickOnWildFire.setValue(False)
+        self.assertTrue(any('Who are you aiming at' in x for x in self._texts(sent, 'KICK')), sent)
+
+    def testWildFireConfiscationAddsItsTag(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.gunConfiscationOnWildFire.setValue(True)
+        try:
+            cb._rng = ScriptedRNG([100])
+            sent = self._bangSent()
+        finally:
+            conf.supybot.plugins.DuckHuntPro.gunConfiscationOnWildFire.setValue(False)
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        self.assertEqual(player['gun_state'], 'confiscated')
+        self.assertTrue(any('GUN CONFISCATED: wild fire' in x for x in self._texts(sent)), sent)
+
+    def testAccidentMessageCarriesThePenaltiesOnce(self):
+        cb = self._cb()
+        self._addHunter('bob')
+        self._putDuck()
+        cb._rng = ScriptedRNG([100, 100, 0, 0, 100, 100])   # ...victim hit outright
+        sent = self._bangSent()
+        shot = [x for x in self._texts(sent) if 'just get shot by accident by' in x]
+        self.assertEqual(len(shot), 1, sent)
+        self.assertIn('[missed: -1 xp]', shot[0])
+        self.assertIn('[accident: -4 xp]', shot[0])
+
     def testWaterBucketBlocksShootingEntirely(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         db.giveItem(player, 'water_bucket', time.time(), duration=3600, value='bob')
         cb.db.save()
         self._putDuck()
-        self.assertRegexp('bang', 'wet')
+        self.assertRegexp('bang', 'soggy')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(player['clip_ammo'], None)  # never even got to ammo check
+        # the bucket stops the shot before any jam roll or ammo use
+        self.assertEqual(player['clip_ammo'], data.LEVELS[1].clip_size)
+        self.assertFalse(player['jammed'])
 
     def testApAmmoDoublesDamageAgainstGoldenDuck(self):
         cb = self._cb()
@@ -1015,10 +1246,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testAccidentHitsBystanderAndConfiscatesGun(self):
         cb = self._cb()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        bob['last_activity'] = time.time()
-        cb.db.save()
+        self._addHunter('bob')
         self._putDuck()
         # jam(no), accuracy(miss), accident-chance(hit), victim-pick(bob),
         # deflect(fail), defense(fail) -> victim hit/kicked
@@ -1033,11 +1261,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testAccidentVictimDefenseAbsorbsNoHarm(self):
         cb = self._cb()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        bob['xp'] = 200
-        bob['last_activity'] = time.time()
-        cb.db.save()
+        self._addHunter('bob', xp=200)
         self._putDuck()
         cb._rng = ScriptedRNG([100, 100, 0, 0, 100, 0])  # deflect fails, defense succeeds
         self.assertNotError('bang')
@@ -1047,26 +1271,23 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testAccidentRicochetIntoDuckKillsItWithLuckyBonus(self):
         cb = self._cb()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        bob['xp'] = 1000  # a level with deflection > 0
-        bob['last_activity'] = time.time()
-        cb.db.save()
+        self._addHunter('bob', xp=1000)   # a level with deflection > 0
         self._putDuck()
         # jam(no), accuracy(miss), accident-chance(hit), victim-pick(bob),
         # deflect(succeed), ricochet-towards-duck(succeed)
         cb._rng = ScriptedRNG([100, 100, 0, 0, 0, 0])
         self.assertNotError('bang')
         shooter = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertEqual(shooter['xp'], data.XP_PER_DUCK + data.XP_LUCKY_SHOT)
+        lvl = data.LEVELS[data.levelForXp(0)]
+        # the miss and the accident both cost xp (no floor at 0) before the
+        # lucky kill pays out
+        self.assertEqual(shooter['xp'], lvl.xp_missed_shot + lvl.xp_accident
+                         + data.XP_PER_DUCK + data.XP_LUCKY_SHOT)
         self.assertTrue(self._key() not in cb._activeDuck)
 
     def testAccidentLifeInsurancePaysOutRegardlessOfOutcome(self):
         cb = self._cb()
-        self._addOnlineNick('bob')
-        bob = cb.db.player(self.irc.network, self.channel, 'bob')
-        bob['xp'] = 100
-        bob['last_activity'] = time.time()
+        bob = self._addHunter('bob', xp=100)
         db.giveItem(bob, 'life_insurance', time.time(), duration=604800, uses=1)
         cb.db.save()
         self._putDuck()
@@ -1078,8 +1299,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testAccidentLiabilityInsuranceReducesShooterPenalty(self):
         cb = self._cb()
-        self._addOnlineNick('bob')
-        cb.db.player(self.irc.network, self.channel, 'bob')['last_activity'] = time.time()
+        self._addHunter('bob')
         shooter = cb.db.player(self.irc.network, self.channel, self.nick)
         shooter['xp'] = 500
         lvl = data.LEVELS[data.levelForXp(500)]
@@ -1089,7 +1309,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._rng = ScriptedRNG([100, 100, 0, 0, 100, 100])
         self.assertNotError('bang')
         shooter = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        expected = max(0, 500 + lvl.xp_missed_shot + int(lvl.xp_accident / 3))
+        # Tcl's int(x / 3) floors a negative: -6 becomes -2, -10 becomes -4.
+        expected = 500 + lvl.xp_missed_shot + lvl.xp_accident // 3
         self.assertEqual(shooter['xp'], expected)
 
     def testOnlyHuntersCanBeShotExcludesNonPlayers(self):

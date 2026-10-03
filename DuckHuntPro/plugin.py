@@ -752,31 +752,82 @@ class DuckHuntPro(callbacks.Plugin):
         hours, minutes = divmod(minutes, 60)
         return "%dh%dm" % (hours, minutes)
 
-    def _ducksScaring(self, irc, channel, network, lang):
+    def _ducksScaring(self, network, channel, player, now):
         """Ports Duck_Hunt.tcl's ducks_scaring: every gunshot that reaches
         this point (a miss always; a successful hit only if
         successfulShotsAlsoScareDucks is on) bumps EVERY duck currently in
         flight on this channel's scare counter by one -- not just the one
-        that was aimed at. Any duck whose counter reaches
-        shotsBeforeDuckFlee flees immediately, except golden and fake/
-        mechanical ducks, which are always immune (matches the original's
-        explicit exemptions)."""
+        that was aimed at. A duck whose counter reaches exactly
+        shotsBeforeDuckFlee flees at once, except golden and fake/mechanical
+        ducks, which are immune (but still counted). A silencer on the
+        shooter's gun makes the shot unheard. Returns how many ducks fled;
+        the caller words the announcement (m21-m24)."""
         key = (network.lower(), channel.lower())
         ducks = self._activeDuck.get(key)
-        if not ducks:
+        if not ducks or db.itemActive(player, 'silencer', now):
             return 0
         fleeAfter = self.registryValue('shotsBeforeDuckFlee', channel)
         fled = 0
         for duck in list(ducks):
             duck['shots_fired'] += 1
-            if (fleeAfter >= 0 and duck['shots_fired'] >= fleeAfter
+            if (duck['shots_fired'] == fleeAfter
                     and not duck['is_golden'] and not duck.get('is_fake', False)):
                 self._removeDuck(network, channel, spawnedAt=duck['spawned_at'])
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(lang, 'duck_fled')))
                 fled += 1
-        if fled:
-            self._maybeHandBackOnDuckGone(network, channel)
         return fled
+
+    # -----------------------------------------------------------------
+    # Output (Duck_Hunt.tcl's display_output) and message helpers
+    # -----------------------------------------------------------------
+
+    def _lang(self, channel):
+        return 'fr' if self.registryValue('language', channel) == 'fr' else 'en'
+
+    def _t(self, channel, key, *args):
+        """An original Duck Hunt message (m-key) in the channel's language."""
+        return messages.tcl(self._lang(channel), key, *args)
+
+    def _out(self, irc, channel, nick, text, kind='pref'):
+        """Sends `text` (several lines if it contains newlines). kind
+        'pref' follows preferredDisplayMode (1 = PRIVMSG to the channel,
+        otherwise NOTICE to the player); 'public' is always the channel.
+        Formatting is stripped when monochrome is on or the channel is +c."""
+        mono = self.registryValue('monochrome', channel)
+        if not mono:
+            try:
+                mono = 'c' in irc.state.channels[channel].modes
+            except (KeyError, AttributeError):
+                mono = False
+        if mono:
+            text = ircutils.stripFormatting(text)
+        toChannel = kind == 'public' or (
+            kind == 'pref' and self.registryValue('preferredDisplayMode', channel) == 1)
+        for line in text.split('\n'):
+            if line:
+                irc.queueMsg(ircmsgs.privmsg(channel, line) if toChannel
+                             else ircmsgs.notice(nick, line))
+
+    def _kickIfOpped(self, irc, channel, nick, reason):
+        """Kicks `nick`, or logs the original's m140 complaint if the bot has
+        neither op nor halfop."""
+        try:
+            state = irc.state.channels[channel]
+        except KeyError:
+            return
+        if state.isOp(irc.nick) or state.isHalfop(irc.nick):
+            irc.queueMsg(ircmsgs.kick(channel, nick, reason))
+        else:
+            self.log.warning(messages.tcl('en', 'm140', 'DuckHuntPro', nick, channel))
+
+    def _displayAmmo(self, player, lvl, channel):
+        if self.registryValue('unlimitedAmmoPerClip', channel):
+            return self._t(channel, 'm65')
+        return '%s/%s' % (messages.colorizeValue(player['clip_ammo']), lvl.clip_size)
+
+    def _displayClips(self, player, lvl, channel):
+        if self.registryValue('unlimitedAmmoClips', channel):
+            return self._t(channel, 'm65')
+        return '%s/%s' % (messages.colorizeValue(player['clips_left']), lvl.clip_count)
 
     # -----------------------------------------------------------------
     # Commands
@@ -787,139 +838,249 @@ class DuckHuntPro(callbacks.Plugin):
         Shoots at the current duck.
         """
         network = irc.network
-        key = (network.lower(), channel.lower())
-        lang = self.registryValue('language', channel)
         self._checkPendingRename(irc, channel, msg.nick)
         if not self._floodCheck(network, channel, msg.nick):
-            irc.reply(messages.get(lang, 'antiflood_blocked', nick=msg.nick))
+            irc.reply(messages.get(self.registryValue('language', channel),
+                                   'antiflood_blocked', nick=msg.nick))
             return
-        now = time.time()
         player = self.db.player(network, channel, msg.nick)
-        lvl = data.LEVELS[data.levelForXp(player['xp'])]
+        try:
+            self._shoot(irc, msg.nick, channel, network, player)
+        finally:
+            self._clampAmmo(player)
+            self.db.save()
+    bang = wrap(bang, ['channel'])
 
-        if player['gun_state'] in ('confiscated', 'confiscated_permanent'):
-            irc.reply(messages.get(lang, 'gun_not_armed', nick=msg.nick))
-            return
-        if player['jammed']:
-            irc.reply(messages.get(lang, 'gun_jammed', nick=msg.nick))
-            return
-
-        bucket = db.itemActive(player, 'water_bucket', now)
-        if bucket:
-            remaining = self._formatDuration(bucket['expires_at'] - now)
-            irc.reply(messages.get(lang, 'water_bucket_blocked', nick=msg.nick,
-                                    attacker=bucket.get('value') or '?', remaining=remaining))
-            return
+    def _shoot(self, irc, nick, channel, network, player):
+        """Port of Duck_Hunt.tcl's shoot, step for step: the order of the
+        checks (not armed, water bucket, sand/grease/sabotage/liability,
+        jammed, new jam roll, empty clip, infrared, ammo, dazzle/sight) and
+        what each one consumes matches the original."""
+        key = (network.lower(), channel.lower())
+        now = time.time()
+        stats = player['stats']
+        t = lambda k, *a: self._t(channel, k, *a)
+        out = lambda text, kind='pref': self._out(irc, channel, nick, text, kind)
 
         ducks = self._activeDuck.get(key)
-        duck = ducks[0] if ducks else None  # oldest duck always the target,
-        # matching Duck_Hunt.tcl's hit_a_duck (always operates on the
-        # duck-session list head, since new ducks are always appended --
-        # a "shotgun spread" or "closest to escaping" model was never a
-        # thing in the original: it's strictly first-spawned-first-shot).
-        if duck is None and db.itemActive(player, 'infrared_detector', now):
-            db.consumeItemUse(player, 'infrared_detector')
-            self.db.save()
-            irc.reply(messages.get(lang, 'infrared_blocked', nick=msg.nick))
+        duckPresent = bool(ducks)
+        numDucks = len(ducks) if ducks else 0
+        if duckPresent:
+            stats['reflex_ms'] += int((now - ducks[0]['spawned_at']) * 1000)
+        player['last_activity'] = now
+        lvl = data.LEVELS[data.levelForXp(player['xp'])]
+        self._ensureAmmo(player, lvl)
+
+        if player['gun_state'] != 'armed':
+            out(t('m5', nick))
+            return
+        bucket = db.itemActive(player, 'water_bucket', now)
+        if bucket:
+            out(t('m332', nick, bucket.get('value') or '?', messages.adaptTimeResolution(
+                (bucket['expires_at'] - now) * 1000, False, self._lang(channel))))
             return
 
-        self._ensureAmmo(player, lvl)
+        xpAccident = lvl.xp_accident
+        jam = lvl.jam_pct
+        sandMsg = sabotageMsg = dazzleMsg = liabilityMsg = ''
+        sand = db.itemActive(player, 'sand', now)
+        if sand:
+            jam *= 2
+            db.removeItem(player, 'sand')
+            sandMsg = t('m333', sand.get('value') or '?')
+        if db.itemActive(player, 'grease', now):
+            jam = int(jam / 2)
+        sabotage = db.itemActive(player, 'sabotage', now)
+        if sabotage:
+            db.removeItem(player, 'sabotage')
+            sabotageMsg = t('m337', sabotage.get('value') or '?')
+        if db.itemActive(player, 'liability_insurance', now):
+            xpAccident = xpAccident // 3      # Tcl's int(x / 3) floors negatives
+            liabilityMsg = t('m343')
+
+        if player['jammed']:
+            out(t('m7', nick))
+            return
+        if sabotage or self._rng.uniform(0, 100) < jam:
+            player['jammed'] = True
+            stats['jams'] += 1
+            out(t('m8', nick, self._displayAmmo(player, lvl, channel),
+                  self._displayClips(player, lvl, channel)) + sabotageMsg + sandMsg)
+            if sabotage and self.registryValue('kickWhenSabotaged', channel):
+                self._kickIfOpped(irc, channel, nick, t('m338', sabotage.get('value') or '?'))
+            return
+
         unlimitedClip = self.registryValue('unlimitedAmmoPerClip', channel)
         if player['clip_ammo'] <= 0 and not unlimitedClip:
-            player['stats']['empty_shots'] += 1
-            self.db.save()
-            irc.reply(messages.get(lang, 'empty_clip', nick=msg.nick))
+            stats['empty_shots'] += 1
+            out(t('m6', nick, self._displayAmmo(player, lvl, channel),
+                  self._displayClips(player, lvl, channel)))
+            return
+        if not duckPresent and db.itemActive(player, 'infrared_detector', now):
+            out(t('m290', nick))
+            db.consumeItemUse(player, 'infrared_detector')
             return
         if not unlimitedClip:
             player['clip_ammo'] -= 1
-        player['last_activity'] = now
-
-        jamPct = lvl.jam_pct
-        forcedJam = False
-        sabotage = db.itemActive(player, 'sabotage', now)
-        if sabotage:
-            forcedJam = True
-            db.removeItem(player, 'sabotage')
-        if db.itemActive(player, 'sand', now):
-            jamPct *= 2
-            db.removeItem(player, 'sand')
-        if db.itemActive(player, 'grease', now):
-            jamPct = jamPct / 2.0
-
-        if forcedJam or self._rng.uniform(0, 100) < jamPct:
-            player['jammed'] = True
-            player['stats']['jams'] += 1
-            self.db.save()
-            if forcedJam:
-                attacker = sabotage.get('value') or '?'
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                    lang, 'sabotage_fires', nick=msg.nick, attacker=attacker)))
-                if self.registryValue('kickWhenSabotaged', channel):
-                    irc.queueMsg(ircmsgs.kick(channel, msg.nick, 'sabotage'))
-            else:
-                irc.reply(messages.get(lang, 'gun_jammed', nick=msg.nick))
-            return
-
-        sight = db.itemActive(player, 'sight', now)
-        if sight:
-            db.consumeItemUse(player, 'sight')
-
-        if duck is None:
-            player['xp'] = max(0, player['xp'] + lvl.xp_wild_shot)
-            self._clampAmmo(player)
-            player['stats']['wild_shots'] += 1
-            if (player['gun_state'] == 'armed'
-                    and self.registryValue('gunConfiscationOnWildFire', channel)):
-                player['gun_state'] = 'confiscated'
-                player['stats']['confiscations'] += 1
-            self.db.save()
-            irc.reply(messages.get(lang, 'no_duck_wild_shot', nick=msg.nick,
-                                    xp=lvl.xp_wild_shot))
-            if self.registryValue('devoiceOnWildFire', channel):
-                self._setVoice(irc, channel, msg.nick, False)
-            self._resolveAccident(irc, channel, network, msg.nick, False, lang)
-            return
 
         accuracy = lvl.accuracy
-        if sight:
-            accuracy += int((100 - lvl.accuracy) / 3)
         mirror = db.itemActive(player, 'mirror_dazzle', now)
         if mirror:
-            accuracy = accuracy / 2.0
+            accuracy = int(accuracy / 2)
             db.removeItem(player, 'mirror_dazzle')
-            irc.reply(messages.get(lang, 'mirror_hit', nick=msg.nick,
-                                    attacker=mirror.get('value') or '?'))
+            dazzleMsg = t('m334', mirror.get('value') or '?')
+        if db.itemActive(player, 'sight', now):
+            accuracy += int((100 - lvl.accuracy) / 3)
+            db.removeItem(player, 'sight')
 
-        if self._rng.uniform(0, 100) >= accuracy:
-            player['xp'] = max(0, player['xp'] + lvl.xp_missed_shot)
-            self._clampAmmo(player)
-            player['stats']['missed'] += 1
-            self.db.save()
-            irc.reply(messages.get(lang, 'miss', nick=msg.nick, xp=lvl.xp_missed_shot))
-            if self.registryValue('devoiceOnMiss', channel):
-                self._setVoice(irc, channel, msg.nick, False)
-            # A miss always risks scaring every duck currently in flight
-            # (not just the one aimed at) -- matches Duck_Hunt.tcl's
-            # ducks_scaring, unconditionally called on every missed shot.
-            if not db.itemActive(player, 'silencer', now):
-                self._ducksScaring(irc, channel, network, lang)
-            self._resolveAccident(irc, channel, network, msg.nick, True, lang)
-            return
+        fled = 0
+        if not duckPresent or self._rng.uniform(0, 100) >= accuracy:
+            fled = self._shotMissed(irc, channel, network, nick, player, lvl, duckPresent,
+                                    xpAccident, dazzleMsg, liabilityMsg, now)
+        else:
+            damage = data.NORMAL_DAMAGE
+            for ammoKey, dmg in data.AMMO_TYPE_DAMAGE.items():
+                if db.itemActive(player, ammoKey, now):
+                    damage = dmg
+                    break
+            self._resolveDuckHit(irc, channel, network, nick,
+                                 self.registryValue('language', channel), damage)
+            numDucks -= 1       # (even for a golden duck that only got hurt,
+            #                     as in the original)
+            if self.registryValue('successfulShotsAlsoScareDucks', channel):
+                fled += self._ducksScaring(network, channel, player, now)
 
-        # Hit.
-        damage = data.NORMAL_DAMAGE
-        for ammoKey, dmg in data.AMMO_TYPE_DAMAGE.items():
-            if db.itemActive(player, ammoKey, now):
-                damage = dmg
+        if fled > 1:
+            out(t('m21') if fled == numDucks else t('m22', fled), 'public')
+        elif fled == 1:
+            out(t('m23') if numDucks == 1 else t('m24'), 'public')
+
+    def _shotMissed(self, irc, channel, network, nick, player, lvl, duckPresent,
+                    xpAccident, dazzleMsg, liabilityMsg, now):
+        """The miss/wild-fire half of Duck_Hunt.tcl's shoot: xp penalties,
+        scaring the ducks, the hunting-accident ricochet chain, wild-fire
+        confiscation and the demotion notice. Returns how many ducks the
+        noise scared off."""
+        stats = player['stats']
+        t = lambda k, *a: self._t(channel, k, *a)
+        out = lambda text, kind='pref': self._out(irc, channel, nick, text, kind)
+        key = (network.lower(), channel.lower())
+        xpMiss, xpWild = lvl.xp_missed_shot, lvl.xp_wild_shot
+
+        stats['missed'] += 1
+        previousXp = player['xp']
+        player['xp'] += xpMiss
+        if self.registryValue('devoiceOnMiss', channel):
+            self._setVoice(irc, channel, nick, False)
+        fled = 0
+        wildMsg = ''
+        if duckPresent:
+            fled = self._ducksScaring(network, channel, player, now)
+        else:
+            wildMsg = t('m9', xpWild)
+
+        try:
+            population = len(irc.state.channels[channel].users)
+        except KeyError:
+            population = 1
+        chance = data.accidentChance(population, duckPresent)
+        someoneHit = confiscationSent = penaltySent = False
+        ricochets = 0
+        source = nick
+        while self._rng.uniform(0, 100) < chance and ricochets < data.MAX_RICOCHETS:
+            victim = self._pickAccidentVictim(irc, channel, network, source)
+            if victim is None:
                 break
-        self._resolveDuckHit(irc, channel, network, msg.nick, lang, damage)
-        # A successful hit only scares the OTHER ducks still in flight if
-        # successfulShotsAlsoScareDucks is on (default on, matches the
-        # original's default) -- unlike a miss, which always scares.
-        if (not db.itemActive(player, 'silencer', now)
-                and self.registryValue('successfulShotsAlsoScareDucks', channel)):
-            self._ducksScaring(irc, channel, network, lang)
-    bang = wrap(bang, ['channel'])
+            someoneHit = True
+            source = victim
+            self._checkPendingRename(irc, channel, victim)
+            stats['humans_shot'] += 1
+            if self.registryValue('devoiceOnAccident', channel):
+                self._setVoice(irc, channel, nick, False)
+            player['xp'] += xpAccident
+            victimPlayer = self.db.player(network, channel, victim)
+            victimPlayer['stats']['bullets_received'] += 1
+
+            conf1 = conf2 = ''
+            if (self.registryValue('gunConfiscationWhenShootingSomeone', channel)
+                    and not confiscationSent):
+                player['gun_state'] = 'confiscated'
+                stats['confiscations'] += 1
+                conf1, conf2 = t('m10'), t('m11')
+            if not penaltySent:
+                if duckPresent:
+                    penaltyMsg = t('m12', xpMiss)
+                    lostXp = abs(xpMiss) + abs(xpAccident)
+                else:
+                    penaltyMsg = t('m12', xpMiss) + wildMsg
+                    lostXp = abs(xpMiss) + abs(xpWild) + abs(xpAccident)
+            else:
+                penaltyMsg = ''
+                lostXp = abs(xpAccident)
+
+            lifeMsg = lifeMsg2 = ''
+            if db.itemActive(victimPlayer, 'life_insurance', now):
+                db.consumeItemUse(victimPlayer, 'life_insurance')
+                bonus = data.LIFE_INSURANCE_LEVEL_MULTIPLIER * data.levelForXp(victimPlayer['xp'])
+                victimPlayer['xp'] += bonus
+                lifeMsg, lifeMsg2 = t('m340', bonus, victim), t('m341', bonus)
+            victimLvl = data.LEVELS[data.levelForXp(victimPlayer['xp'])]
+            tail = conf1 + dazzleMsg + liabilityMsg + lifeMsg
+
+            if self._rng.uniform(0, 100) < victimLvl.deflection:
+                victimPlayer['stats']['deflected'] += 1
+                ricochets += 1
+                confiscationSent = penaltySent = True
+                out(t('m13', nick, victim, victimLvl.deflection, penaltyMsg, xpAccident)
+                    + tail, 'public')
+                if (duckPresent and self._activeDuck.get(key)
+                        and self._rng.uniform(0, 100) < data.CHANCE_RICOCHET_TOWARDS_DUCK):
+                    damage = data.NORMAL_DAMAGE
+                    for ammoKey, dmg in data.AMMO_TYPE_DAMAGE.items():
+                        if db.itemActive(player, ammoKey, now):
+                            damage = dmg
+                            break
+                    self._resolveDuckHit(irc, channel, network, nick,
+                                         self.registryValue('language', channel),
+                                         damage, isLucky=True)
+                    break
+            elif self._rng.uniform(0, 100) < victimLvl.defense:
+                victimPlayer['stats']['absorbed'] += 1
+                confiscationSent = penaltySent = True
+                out(t('m14', victim, nick, victimLvl.defense, penaltyMsg, xpAccident)
+                    + tail, 'public')
+                break
+            else:
+                victimPlayer['stats']['deaths'] += 1
+                confiscationSent = penaltySent = True
+                if self.registryValue('kickWhenShot', channel):
+                    self._kickIfOpped(irc, channel, victim,
+                                      t('m15', nick, lostXp) + conf2 + lifeMsg2)
+                out(t('m16', victim, nick, penaltyMsg, xpAccident) + tail, 'public')
+                break
+
+        if not duckPresent:
+            stats['wild_shots'] += 1
+            player['xp'] += xpWild
+            if self.registryValue('devoiceOnWildFire', channel):
+                self._setVoice(irc, channel, nick, False)
+            confiscationMsg = ''
+            if (self.registryValue('gunConfiscationOnWildFire', channel)
+                    and player['gun_state'] == 'armed'):
+                player['gun_state'] = 'confiscated'
+                stats['confiscations'] += 1
+                confiscationMsg = t('m17')
+            if not someoneHit:
+                out(t('m18', nick, xpMiss, xpWild) + confiscationMsg)
+        elif not someoneHit:
+            out(t('m19', nick, xpMiss) + dazzleMsg)
+        if not duckPresent and self.registryValue('kickOnWildFire', channel):
+            self._kickIfOpped(irc, channel, nick, t('m20', xpMiss, xpWild))
+        newLevel = data.levelForXp(player['xp'])
+        if data.levelForXp(previousXp) > newLevel:
+            out(t('m2', nick, newLevel, messages.lvl2rank(newLevel, self._lang(channel))),
+                'public')
+        return fled
 
     def _resolveDuckHit(self, irc, channel, network, shooterNick, lang, damage, isLucky=False):
         """Resolves a confirmed hit on the channel's current duck: a
@@ -989,12 +1150,10 @@ class DuckHuntPro(callbacks.Plugin):
         self._maybeHandBackOnDuckGone(network, channel)
 
     def _pickAccidentVictim(self, irc, channel, network, excludeNick):
-        """Picks a random channel occupant to be an accidental-hit victim,
-        excluding the bot and `excludeNick` (the current shooter/ricochet
-        source). If onlyHuntersCanBeShot, further restricted to nicks with
-        a recorded player profile that has actually fired a shot before
-        (proxied by last_activity being set) -- matches Duck_Hunt.tcl's
-        default of only_hunters_can_be_shot=1."""
+        """Duck_Hunt.tcl's random_user: a random channel occupant other than
+        the bot and `excludeNick` (the current shooter, or the previous
+        victim after a ricochet). With onlyHuntersCanBeShot, only players
+        who have shot a duck or missed at least once qualify."""
         try:
             users = list(irc.state.channels[channel].users)
         except KeyError:
@@ -1003,108 +1162,14 @@ class DuckHuntPro(callbacks.Plugin):
                       and not ircutils.strEqual(u, excludeNick)]
         if self.registryValue('onlyHuntersCanBeShot', channel):
             chan = self.db.getChannel(network, channel)
-            hunted = set()
+            hunters = set()
             if chan:
-                hunted = {p['display_nick'].lower() for p in chan['players'].values()
-                          if p.get('last_activity')}
-            candidates = [u for u in candidates if u.lower() in hunted]
+                hunters = {k for k, p in chan['players'].items()
+                           if p['stats']['killed'] + p['stats']['missed'] > 0}
+            candidates = [u for u in candidates if u.lower() in hunters]
         if not candidates:
             return None
         return candidates[self._rng.randint(0, len(candidates) - 1)]
-
-    def _resolveAccident(self, irc, channel, network, shooterNick, duckPresent, lang):
-        """Friendly-fire/ricochet chain, rolled after every miss (wild shot
-        or a genuine miss with a duck present). Ported from Duck_Hunt.tcl's
-        shoot/hit_a_duck accident-resolution block: a missed shot has a
-        population- and duck-presence-tiered chance of hitting a random
-        other channel occupant, who then deflects (chance of the bullet
-        continuing on to another victim, or -- if a duck is in flight --
-        ricocheting into a "lucky shot" kill), is defended by armor (no
-        effect), or is hit outright (kicked, unless insured)."""
-        now = time.time()
-        shooterPlayer = self.db.player(network, channel, shooterNick)
-        shooterLvl = data.LEVELS[data.levelForXp(shooterPlayer['xp'])]
-        xpAccident = shooterLvl.xp_accident
-        if db.itemActive(shooterPlayer, 'liability_insurance', now):
-            xpAccident = int(xpAccident / 3)
-
-        try:
-            population = len(irc.state.channels[channel].users)
-        except KeyError:
-            population = 1
-        chance = data.accidentChance(population, duckPresent)
-
-        confiscatedThisShot = False
-        ricochets = 0
-        sourceNick = shooterNick
-        key = (network.lower(), channel.lower())
-
-        while ricochets <= data.MAX_RICOCHETS and self._rng.uniform(0, 100) < chance:
-            victimNick = self._pickAccidentVictim(irc, channel, network, sourceNick)
-            if victimNick is None:
-                break
-            victimPlayer = self.db.player(network, channel, victimNick)
-            shooterPlayer['stats']['humans_shot'] += 1
-            victimPlayer['stats']['bullets_received'] += 1
-            shooterPlayer['xp'] = max(0, shooterPlayer['xp'] + xpAccident)
-            self._clampAmmo(shooterPlayer)
-            irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                lang, 'accident_hit', shooter=shooterNick, victim=victimNick, xp=xpAccident)))
-
-            if not confiscatedThisShot and self.registryValue(
-                    'gunConfiscationWhenShootingSomeone', channel):
-                if shooterPlayer['gun_state'] == 'armed':
-                    shooterPlayer['gun_state'] = 'confiscated'
-                    shooterPlayer['stats']['confiscations'] += 1
-                    irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                        lang, 'accident_gun_confiscated', shooter=shooterNick)))
-                confiscatedThisShot = True
-            if self.registryValue('devoiceOnAccident', channel):
-                self._setVoice(irc, channel, shooterNick, False)
-
-            life = db.itemActive(victimPlayer, 'life_insurance', now)
-            if life:
-                db.consumeItemUse(victimPlayer, 'life_insurance')
-                bonus = data.LIFE_INSURANCE_LEVEL_MULTIPLIER * data.levelForXp(victimPlayer['xp'])
-                victimPlayer['xp'] += bonus
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                    lang, 'life_insurance_payout', nick=victimNick, xp=bonus)))
-
-            victimLvl = data.LEVELS[data.levelForXp(victimPlayer['xp'])]
-            if self._rng.uniform(0, 100) < victimLvl.deflection:
-                victimPlayer['stats']['deflected'] += 1
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                    lang, 'accident_deflected', victim=victimNick)))
-                ricochets += 1
-                if (self._activeDuck.get(key)
-                        and self._rng.uniform(0, 100) < data.CHANCE_RICOCHET_TOWARDS_DUCK):
-                    irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                        lang, 'ricochet_towards_duck')))
-                    duckDamage = data.NORMAL_DAMAGE
-                    for ammoKey, dmg in data.AMMO_TYPE_DAMAGE.items():
-                        if db.itemActive(shooterPlayer, ammoKey, now):
-                            duckDamage = dmg
-                            break
-                    self._resolveDuckHit(irc, channel, network, shooterNick, lang,
-                                         duckDamage, isLucky=True)
-                    self.db.save()
-                    return
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(lang, 'ricochet_falls')))
-                sourceNick = victimNick
-                continue
-            elif self._rng.uniform(0, 100) < victimLvl.defense:
-                victimPlayer['stats']['absorbed'] += 1
-                irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                    lang, 'accident_absorbed', victim=victimNick)))
-                break
-            else:
-                victimPlayer['stats']['deaths'] += 1
-                if self.registryValue('kickWhenShot', channel):
-                    irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                        lang, 'accident_kicked', victim=victimNick)))
-                    irc.queueMsg(ircmsgs.kick(channel, victimNick, 'accident'))
-                break
-        self.db.save()
 
     def _rollAndApplyDrop(self, player, lang, now):
         """Rolls the kill drop table and applies the winning drop (or
