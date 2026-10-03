@@ -219,6 +219,11 @@ conf.registerGlobalValue(DuckHuntPro, 'autoRefillAmmoTime',
     clips are refilled to their level's count each day (the original script's
     auto_refill_ammo_time)."""))
 
+conf.registerGlobalValue(DuckHuntPro, 'backupTime',
+    registry.String('00:03', """Local time (HH:MM) at which the database file is
+    copied to a .bak file next to it each day (the original script's
+    backup_time)."""))
+
 conf.registerGlobalValue(DuckHuntPro, 'anonymPrefix',
     registry.String('', """The prefix your network gives to users who don't
     identify in time ("Anonyme" for nicks like Anonyme54720). Stats are never

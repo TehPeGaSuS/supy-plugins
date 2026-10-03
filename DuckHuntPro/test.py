@@ -247,6 +247,35 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:refill:')]:
                 cb._unschedule(name)
 
+    def testBackupIsScheduledDailyAtTheConfiguredTime(self):
+        cb = self._cb()
+        self.assertEqual(cb.registryValue('backupTime'), '00:03')
+        for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:backup:')]:
+            cb._unschedule(name)
+        conf.supybot.plugins.DuckHuntPro.backupTime.setValue('05:15')
+        cb._scheduleBackup()
+        names = [n for n in cb._scheduled if n.startswith('DuckHuntPro:backup:')]
+        self.assertEqual(len(names), 1)
+        dt = datetime.fromtimestamp(float(names[0].rsplit(':', 1)[1]))
+        self.assertEqual((dt.hour, dt.minute), (5, 15))
+        cb._unschedule(names[0])
+
+    def testBackupCopiesTheDatabaseFile(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, 'alice')['xp'] = 77
+        cb.db.save()
+        for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:backup:')]:
+            cb._unschedule(name)
+        try:
+            os.unlink(cb.db.path + '.bak')
+        except OSError:
+            pass
+        cb._fireBackup()
+        with open(cb.db.path + '.bak') as f, open(cb.db.path) as g:
+            self.assertEqual(f.read(), g.read())
+        self.assertIn('"xp": 77', open(cb.db.path + '.bak').read())
+        self.assertEqual(len([n for n in cb._scheduled if n.startswith('DuckHuntPro:backup:')]), 1)
+
     def testAmmoIsClampedWhenXpDropsToALowerLevel(self):
         cb = self._cb()
         p = cb.db.player(self.irc.network, self.channel, 'foo')

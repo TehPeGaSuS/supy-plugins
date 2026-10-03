@@ -13,6 +13,7 @@ coincidence of name.
 import json
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -140,6 +141,15 @@ class Database:
                 self.data = {}
             self.data.setdefault('networks', {})
             self.data.setdefault('pending_transfers', {})
+
+    def backup(self):
+        """Copies the database file to `<file>.bak` (the original's daily
+        backup_db). Returns whether there was a file to copy."""
+        with self.lock:
+            if not os.path.exists(self.path):
+                return False
+            shutil.copy2(self.path, self.path + '.bak')
+            return True
 
     def save(self):
         with self.lock:

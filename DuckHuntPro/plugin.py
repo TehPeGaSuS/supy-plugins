@@ -88,6 +88,7 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduleMidnight()
         self._scheduleMinuteTick()
         self._scheduleAmmoRefill()
+        self._scheduleBackup()
         if self.registryValue('quarterlyResetEnabled'):
             self._scheduleQuarterlyReset()
         conf.supybot.plugins.DuckHuntPro.web.enable.addCallback(self._doWebConf)
@@ -610,6 +611,18 @@ class DuckHuntPro(callbacks.Plugin):
     # -----------------------------------------------------------------
     # Daily clip refill (Duck_Hunt.tcl refill_ammo / auto_refill_ammo_time)
     # -----------------------------------------------------------------
+
+    def _scheduleBackup(self):
+        at = self._nextDailyTime(self.registryValue('backupTime'))
+        self._scheduleEvent("DuckHuntPro:backup:%r" % at, at, self._fireBackup, ())
+
+    def _fireBackup(self):
+        self.log.info(ircutils.stripFormatting(messages.tcl('en', 'm121', 'DuckHuntPro')))
+        try:
+            self.db.backup()
+        except OSError as e:
+            self.log.error('DuckHuntPro: the database backup failed: %s', e)
+        self._scheduleBackup()
 
     def _scheduleAmmoRefill(self):
         at = self._nextDailyTime(self.registryValue('autoRefillAmmoTime'))
