@@ -284,6 +284,46 @@ class BlacklistTestCase(ChannelPluginTestCase):
         finally:
             conf.supybot.plugins.Blacklist.enforceGlobal.setValue(True)
 
+    def _joinOtherChannel(self, name='#other'):
+        self.irc.feedMsg(ircmsgs.join(name, prefix=self.irc.prefix))
+        self._drain()
+        return name
+
+    def _replyTo(self, command):
+        """The text the bot answered with. A net add queues its MODE/KICK
+        before replying, so assertRegexp would see those first."""
+        msgs = self._takeAll(self.assertNotError(command))
+        replies = [m.args[1] for m in msgs if m.command == 'PRIVMSG']
+        self.assertTrue(replies, 'No reply to %r' % command)
+        return replies[-1]
+
+    def testNetAddReportsTheChannelsItReached(self):
+        other = self._joinOtherChannel()
+        conf.supybot.plugins.Blacklist.enforceGlobal.get(other).setValue(False)
+        self.assertRegex(
+            self._replyTo('blacklist net add foo r1'),
+            r'Added to the network blacklist\. Banned in #test \(no ops\); '
+            r'enforceGlobal is off in 1 other channel\.')
+        self.assertNotError('blacklist net delete 1')
+        self._drain()
+        self._botIsOpped()
+        self.assertRegex(
+            self._replyTo('blacklist net timer foo 5 r2'),
+            r'for 5 minutes\. Banned in #test; enforceGlobal is off in 1 other channel\.')
+
+    def testNetAddSaysWhenNoChannelEnforcesIt(self):
+        other = self._joinOtherChannel()
+        for chan in (self.channel, other):
+            conf.supybot.plugins.Blacklist.enforceGlobal.get(chan).setValue(False)
+        self.assertRegex(
+            self._replyTo('blacklist net add foo r1'),
+            r'Not enforced anywhere yet: enforceGlobal is off in 2 channels\.')
+
+    def testNetReachTextCapsALongChannelList(self):
+        cb = self._cb()
+        text = cb._netReachText([('#c%d' % i, True) for i in range(11)], [])
+        self.assertEqual(text, 'Banned in #c0, #c1, #c2, #c3, #c4, #c5, #c6, #c7 and 3 more.')
+
     def testNetExempt(self):
         self.assertNotError('blacklist net exemptadd foo!*@*')
         self.assertError('blacklist net add foo nope')

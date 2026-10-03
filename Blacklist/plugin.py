@@ -622,12 +622,37 @@ class Blacklist(callbacks.Plugin):
 
     def _enforceNet(self, irc, mask, reason):
         """Applies a network-blacklist mask across every channel that has
-        enforceGlobal on, banning it and kicking every matching member."""
+        enforceGlobal on, banning it and kicking every matching member.
+        Returns (reached, skipped): [(channel, bot_has_ops)] for the channels
+        it was applied in, and the channels with enforceGlobal off."""
+        reached, skipped = [], []
         for chan in list(irc.state.channels.keys()):
             if not self.registryValue('enforceGlobal', chan):
+                skipped.append(chan)
                 continue
             irc.queueMsg(ircmsgs.ban(chan, mask))
             self._kickMatching(irc, chan, mask, reason, self._isExemptNet)
+            state = irc.state.channels[chan]
+            reached.append((chan, state.isOp(irc.nick) or state.isHalfop(irc.nick)))
+        return reached, skipped
+
+    def _netReachText(self, reached, skipped, limit=8):
+        """One line saying which channels a network ban reached."""
+        def capped(names):
+            text = ", ".join(names[:limit])
+            return text + (f" and {len(names) - limit} more" if len(names) > limit else "")
+        if reached:
+            text = "Banned in " + capped(
+                [c if opped else f"{c} (no ops)" for c, opped in reached])
+            other = " other"
+        else:
+            text = "Not enforced anywhere yet"
+            other = ""
+        if skipped:
+            n = len(skipped)
+            text += (f"{'; ' if reached else ': '}enforceGlobal is off in "
+                     f"{n}{other} channel{'s' if n != 1 else ''}")
+        return text + "."
 
     def _resyncBans(self, irc, channel):
         """Re-applies stored bans that are missing from the channel's ban
@@ -1002,8 +1027,9 @@ class Blacklist(callbacks.Plugin):
                 return
             reason = reason or "Network-wide ban."
             p._net_add(mask, msg.nick, reason)
-            p._enforceNet(irc, mask, reason)
-            irc.replySuccess()
+            reached, skipped = p._enforceNet(irc, mask, reason)
+            irc.reply("Added to the network blacklist. " +
+                      p._netReachText(reached, skipped))
         add = wrap(add, ['admin', 'somethingWithoutSpaces', optional('text')])
 
         def delete(self, irc, msg, args, target):
@@ -1055,9 +1081,10 @@ class Blacklist(callbacks.Plugin):
             reason = reason or "Temporary network-wide ban."
             expire_at = time.time() + (minutes * 60)
             entry_id = p._net_add(mask, msg.nick, reason, expire_at=expire_at, expire_mode='full')
-            p._enforceNet(irc, mask, reason)
+            reached, skipped = p._enforceNet(irc, mask, reason)
             p._schedule_expiry(irc.network, 'net', None, entry_id, expire_at, 'full')
-            irc.replySuccess()
+            irc.reply(f"Added to the network blacklist for {minutes} minutes. " +
+                      p._netReachText(reached, skipped))
         timer = wrap(timer, ['admin', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
 
         def list(self, irc, msg, args):

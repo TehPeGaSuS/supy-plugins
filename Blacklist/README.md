@@ -134,6 +134,12 @@ blacklist net exemptlist [<nick>]
 enforcing channel; `net timer` is the temporary version. Joins are checked
 against the network blacklist before the channel's own list.
 
+The reply says where the ban actually landed, for example `Added to the
+network blacklist. Banned in #a, #c (no ops); enforceGlobal is off in 5 other
+channels.` A channel the bot has no ops in is marked `(no ops)`: the ban is
+queued there but the server will refuse it. If no channel has `enforceGlobal`
+on, it says `Not enforced anywhere yet`.
+
 ## Enforcement (Eggdrop-style)
 
 - **A ban kicks everyone it matches.** `add`, `timer`, `net add` and `net
