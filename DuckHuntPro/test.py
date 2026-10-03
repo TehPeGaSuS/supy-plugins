@@ -76,9 +76,14 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
                 continue     # the web group's callbacks start/stop the HTTP server
             if hasattr(value, '_default') and hasattr(value, 'setValue'):
                 value.setValue(value._default)
-                for child in list(getattr(value, '_children', {}).values()):
-                    if hasattr(child, '_setValue'):
-                        child._setValue(value.value, inherited=True)
+
+                def inheritAgain(node):
+                    # every per-network / per-channel descendant follows the base again
+                    for child in list(getattr(node, '_children', {}).values()):
+                        if hasattr(child, '_setValue'):
+                            child._setValue(value.value, inherited=True)
+                            inheritAgain(child)
+                inheritAgain(value)
 
     def setUp(self):
         super().setUp()
@@ -90,6 +95,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # start without one.
         self._cb()._cancelFlights(self.irc.network, self.channel)
         self._cb().db.channel(self.irc.network, self.channel)['planned_soarings'] = []
+        self._sent()         # the on/off announcements that setting `enabled` just caused
         # Drops are rolled per-key with a bottomless RNG queue in most
         # tests; leaving this on would let an exhausted ScriptedRNG queue
         # (which falls back to returning its lower bound, 1) silently
@@ -529,6 +535,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(sent, [('NOTICE', self.nick, messages.tcl(
             'en', 'm147', self.channel, '1 minute and 5 seconds'))])
         conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        self._sent()                          # (the "disabled" announcement)
         sent = self._cmd('lastduck %s' % self.channel, private=True)
         self.assertEqual(sent, [('NOTICE', self.nick, messages.tcl(
             'en', 'm76', 'DuckHuntPro', self.channel))])
@@ -2917,6 +2924,55 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         finally:
             value.setValue(True)
             cb._cancelFlights(self.irc.network, self.channel)
+
+    def testSwitchingTheGameOnAndOffIsAnnounced(self):
+        cb = self._cb()
+        value = cb.registryValue('enabled', self.channel, value=False)
+        try:
+            value.setValue(False)
+            self._sent()
+            value.setValue(True)
+            self.assertEqual(self._sent(), [('PRIVMSG', self.channel,
+                'Duck Hunt was just enabled on %s. Get ready and... Happy Hunting!' % self.channel)])
+            value.setValue(True)                    # no change: nothing to announce
+            self.assertEqual(self._sent(), [])
+            value.setValue(False)
+            self.assertEqual(self._sent(), [('PRIVMSG', self.channel,
+                'Duck Hunt has been disabled on %s. The ducks are safe... for now.' % self.channel)])
+            conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+            value.setValue(True)
+            self.assertEqual(self._sent(), [('PRIVMSG', self.channel,
+                "Duck Hunt vient d'être activé sur %s. Préparez-vous et... Bonne chasse !" % self.channel)])
+        finally:
+            value.setValue(True)
+            self._sent()
+            cb._cancelFlights(self.irc.network, self.channel)
+
+    def testSettingsMadeThroughConfigChannelAndConfigNetworkAreHonoured(self):
+        # `config channel` stores a value for the network AND channel, `config
+        # network` one for the network: both must reach the plugin's reads.
+        cb = self._cb()
+        setting = conf.supybot.plugins.DuckHuntPro.ducksPerDay
+        netChan = setting.get(':' + self.irc.network).get(self.channel)
+        net = setting.get(':' + self.irc.network)
+        self.assertEqual(cb.registryValue('ducksPerDay', self.channel), 18)
+        net.setValue(30)
+        self.assertEqual(cb.registryValue('ducksPerDay', self.channel), 30)
+        netChan.setValue(7)
+        self.assertEqual(cb.registryValue('ducksPerDay', self.channel), 7)
+        self.assertEqual(cb.registryValue('ducksPerDay', '#elsewhere', self.irc.network), 30)
+
+    def testTheNetworkIsKnownInsideCommandsAndScheduledEvents(self):
+        cb = self._cb()
+        setting = conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee
+        setting.get(':' + self.irc.network).get(self.channel).setValue(9)
+        seen = []
+        cb._scheduleEvent('DuckHuntPro:test-network', time.time() + 3600,
+                          lambda network, channel: seen.append(
+                              cb.registryValue('shotsBeforeDuckFlee', channel)), (self.irc.network, self.channel))
+        with cb._network(self.irc.network):
+            self.assertEqual(cb.registryValue('shotsBeforeDuckFlee', self.channel), 9)
+        cb._unschedule('DuckHuntPro:test-network')
 
     def testAdminLaunchForcesImmediateSpawn(self):
         cb = self._cb()

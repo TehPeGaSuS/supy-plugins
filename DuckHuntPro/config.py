@@ -45,7 +45,7 @@ def configure(advanced):
 DuckHuntPro = conf.registerPlugin('DuckHuntPro')
 
 conf.registerChannelValue(DuckHuntPro, 'enabled',
-    registry.Boolean(False, """Enables the duck hunt game in this channel."""))
+    registry.Boolean(False, """Enables the duck hunt game in this channel. The channel is told when it is switched on or off."""))
 
 conf.registerChannelValue(DuckHuntPro, 'language',
     registry.String('en', """Language used for this channel's game messages:

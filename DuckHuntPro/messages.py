@@ -136,6 +136,8 @@ MESSAGES = {
         'champions_header': 'Champions of the season ending {when}:',
         'champions_line': '#{rank} {nick} -- {xp} xp, {killed} killed',
         'champions_empty': 'No quarterly reset has happened here yet.',
+        'enabled_on': 'Duck Hunt was just enabled on {channel}. Get ready and... Happy Hunting!',
+        'enabled_off': 'Duck Hunt has been disabled on {channel}. The ducks are safe... for now.',
         'lastduck_killer': 'It was shot by {nick}.',
         'lastduck_flying': 'It is still in the air.',
         'lastduck_escaped': 'Tired of waiting, it flew away after {duration}.',
@@ -215,6 +217,8 @@ MESSAGES = {
     # The plugin's own additions to the original (the season features); the
     # original's messages themselves are in tclmessages.py, in both languages.
     'fr': {
+        'enabled_on': "Duck Hunt vient d'être activé sur {channel}. Préparez-vous et... Bonne chasse !",
+        'enabled_off': "Duck Hunt a été désactivé sur {channel}. Les canards sont saufs... pour l'instant.",
         'lastduck_killer': 'Il a été abattu par {nick}.',
         'lastduck_flying': 'Il est toujours là.',
         'lastduck_escaped': "Las d'attendre, il s'est enfui après {duration}.",

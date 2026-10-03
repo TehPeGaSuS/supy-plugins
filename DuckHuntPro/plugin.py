@@ -1,7 +1,9 @@
+import contextlib
 import html
 import os
 import random
 import re
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timedelta
@@ -57,6 +59,15 @@ class DuckHuntProWebCallback(httpserver.SupyHTTPServerCallback):
         self.doGetOrHead(handler, path, False)
 
 
+def _viaIrc(handler):
+    """An IRC event handler that reads per-channel settings for its network."""
+    def wrapper(self, irc, *args, **kwargs):
+        with self._network(irc.network):
+            return handler(self, irc, *args, **kwargs)
+    wrapper.__name__, wrapper.__doc__ = handler.__name__, handler.__doc__
+    return wrapper
+
+
 class DuckHuntPro(callbacks.Plugin):
     """A full-featured duck-hunting game, ported from the eggdrop TCL
     "Duck Hunt" v2.11 script: core spawn/shoot/level loop, the full 23-item
@@ -69,6 +80,7 @@ class DuckHuntPro(callbacks.Plugin):
 
     def __init__(self, irc):
         super().__init__(irc)
+        self._tl = threading.local()     # the network a handler is working for
         self._rng = random.Random()
         dbPath = os.path.join(str(conf.supybot.directories.data),
                                'DuckHuntPro', 'duckhuntpro.json')
@@ -236,9 +248,10 @@ class DuckHuntPro(callbacks.Plugin):
             irc = self._getIrc(network)
             for cname in self.db.channels(network):
                 self.db.archiveAndReset(network, cname)
-                if irc and cname in irc.state.channels and self.registryValue('enabled', cname):
-                    lang = self.registryValue('language', cname)
-                    irc.queueMsg(ircmsgs.privmsg(cname, messages.get(lang, 'quarterly_reset')))
+                with self._network(network):
+                    if irc and cname in irc.state.channels and self.registryValue('enabled', cname):
+                        lang = self._lang(cname)
+                        irc.queueMsg(ircmsgs.privmsg(cname, messages.get(lang, 'quarterly_reset')))
         if self.registryValue('quarterlyResetEnabled'):
             self._scheduleQuarterlyReset()
 
@@ -249,7 +262,9 @@ class DuckHuntPro(callbacks.Plugin):
     def _scheduleEvent(self, name, at, func, args):
         def run(*a):
             self._scheduled.discard(name)    # it has fired: nothing left to cancel
-            return func(*a)
+            network = a[0] if a and isinstance(a[0], str) and world.getIrc(a[0]) else None
+            with self._network(network):
+                return func(*a)
         try:
             schedule.addEvent(run, at, name=name, args=args)
             self._scheduled.add(name)
@@ -263,6 +278,40 @@ class DuckHuntPro(callbacks.Plugin):
             schedule.removeEvent(name)
         except KeyError:
             pass
+
+    @contextlib.contextmanager
+    def _network(self, network):
+        """Tells registryValue which network the code inside works for, so
+        per-channel settings are read for that network (see registryValue)."""
+        old = getattr(self._tl, 'network', None)
+        self._tl.network = network
+        try:
+            yield
+        finally:
+            self._tl.network = old
+
+    def _networkFor(self, channel):
+        """The network `channel` belongs to for the code running now: the one
+        it was told about (`_network`), else the only network the bot is on
+        that has this channel; None when that's ambiguous."""
+        network = getattr(self._tl, 'network', None)
+        if network:
+            return network
+        found = [irc.network for irc in world.ircs if channel in irc.state.channels]
+        return found[0] if len(found) == 1 else None
+
+    def registryValue(self, name, channel=None, network=None, *, value=True):
+        """Like Limnoria's, but a per-channel setting is read for the channel's
+        network too, so what `config channel` and `config network` set (they
+        are stored per network) takes effect. Without a network, the read
+        falls back to the network-less channel value, as plain Limnoria does."""
+        if channel and network is None:
+            network = self._networkFor(channel)
+        return super().registryValue(name, channel, network, value=value)
+
+    def callCommand(self, command, irc, msg, *args, **kwargs):
+        with self._network(irc.network):
+            return super().callCommand(command, irc, msg, *args, **kwargs)
 
     def _getIrc(self, network):
         irc = world.getIrc(network) if network else None
@@ -335,6 +384,7 @@ class DuckHuntPro(callbacks.Plugin):
 
             self._scheduleGunHandBack(network, cname)
 
+    @_viaIrc
     def doJoin(self, irc, msg):
         """When the bot itself joins a channel, kick off spawn planning if
         this channel is enabled and doesn't already have one scheduled."""
@@ -358,18 +408,29 @@ class DuckHuntPro(callbacks.Plugin):
         key = (network.lower(), channelName.lower())
         if key in self._enabledHooks:
             return
-        value = self.registryValue('enabled', channelName, value=False)
-        state = {'on': bool(self.registryValue('enabled', channelName))}
+        value = self.registryValue('enabled', channelName, network, value=False)
+        state = {'on': bool(value())}
 
         def changed():
-            on = bool(self.registryValue('enabled', channelName))
+            on = bool(value())
             if on != state['on']:
                 state['on'] = on
                 self._onEnabledChanged(network, channelName, on)
         value.addCallback(changed)
         self._enabledHooks[key] = (value, changed)
 
+    def _announceEnabled(self, network, channelName, on):
+        """Tells the channel the game has just been switched on or off."""
+        irc = world.getIrc(network)
+        if irc is None or channelName not in irc.state.channels:
+            return
+        with self._network(network):
+            lang = self._lang(channelName)
+            self._out(irc, channelName, None, messages.get(
+                lang, 'enabled_on' if on else 'enabled_off', channel=channelName), 'public')
+
     def _onEnabledChanged(self, network, channelName, on):
+        self._announceEnabled(network, channelName, on)
         if on:
             if self.registryValue('method') == 2:
                 self._planDay(network, channelName)
@@ -380,6 +441,7 @@ class DuckHuntPro(callbacks.Plugin):
     # Nick-change stat fusion
     # -----------------------------------------------------------------
 
+    @_viaIrc
     def doNick(self, irc, msg):
         """Nick-change tracking (Duck_Hunt.tcl's nickchange_tracking): notes
         that a profile may belong to a player's new nick. The transfer itself
@@ -553,11 +615,13 @@ class DuckHuntPro(callbacks.Plugin):
         elif pending and pending['old_nick'].lower() == lowNew:
             self.db.popPendingTransfer(network, channel, oldNick)
 
+    @_viaIrc
     def doPart(self, irc, msg):
         channel = msg.args[0]
         if self.registryValue('enabled', channel):
             self.db.discardPendingTransfer(irc.network, channel, msg.nick)
 
+    @_viaIrc
     def doQuit(self, irc, msg):
         network = irc.network
         for cname in list(irc.state.channels.keys()):
@@ -764,7 +828,8 @@ class DuckHuntPro(callbacks.Plugin):
                             p['clips_left'] = count
                             changed = True
                     if players:
-                        self._huntLog(cname, 'refill_ammo')
+                        with self._network(network):
+                            self._huntLog(cname, 'refill_ammo')
         if changed:
             self.db.save()
         return changed
@@ -920,9 +985,10 @@ class DuckHuntPro(callbacks.Plugin):
         try:
             if self.registryValue('method') == 2:
                 for irc in list(world.ircs):
-                    for cname in list(irc.state.channels.keys()):
-                        if self.registryValue('enabled', cname):
-                            self._planDay(irc.network, cname)
+                    with self._network(irc.network):
+                        for cname in list(irc.state.channels.keys()):
+                            if self.registryValue('enabled', cname):
+                                self._planDay(irc.network, cname)
         finally:
             self._scheduleMidnight()
 
@@ -944,8 +1010,8 @@ class DuckHuntPro(callbacks.Plugin):
         now = time.time()
         for irc in list(world.ircs):
             for cname in list(irc.state.channels.keys()):
-                if (not self.registryValue('enabled', cname)
-                        or not self.registryValue('shopEnabled', cname)):
+                if (not self.registryValue('enabled', cname, irc.network)
+                        or not self.registryValue('shopEnabled', cname, irc.network)):
                     continue
                 chan = self.db.getChannel(irc.network, cname)
                 if not chan or not chan.get('bread'):
@@ -965,15 +1031,16 @@ class DuckHuntPro(callbacks.Plugin):
         now = datetime.now()
         for irc in list(world.ircs):
             for cname in list(irc.state.channels.keys()):
-                if not self.registryValue('enabled', cname):
+                if not self.registryValue('enabled', cname, irc.network):
                     continue
-                sleepHours = self._sleepHours(cname)
+                with self._network(irc.network):
+                    sleepHours = self._sleepHours(cname)
                 span = 1440 - len(sleepHours) * 60
                 if now.hour in sleepHours or span <= 0:
                     continue
                 chan = self.db.channel(irc.network, cname)
                 extra = 2 * db.activeBreadCount(chan, time.time())
-                if self._rng.randint(1, span) <= self.registryValue('ducksPerDay', cname) + extra:
+                if self._rng.randint(1, span) <= self.registryValue('ducksPerDay', cname, irc.network) + extra:
                     self._fireSpawn(irc.network, cname)
 
     def _fireSpecialSpawn(self, network, channelName, firesAt):
