@@ -100,35 +100,143 @@ the daily `.bak` is the only undo.
 
 ## Configuration
 
-Everything lives under `supybot.plugins.DuckHuntPro`; use `config help
-<name>`. Channel values (`enabled`, `language`, `ducksPerDay`,
-`approxGoldenDucksPerDay`, `goldenDuckMinHP/MaxHP`, `duckSleepHours`,
-`shotsBeforeDuckFlee`, `escapeTime`, `unlimitedAmmoPerClip/Clips`,
-`antiHighlight`, `preferredDisplayMode`, `monochrome`, `shopEnabled`,
-`shopUrl`, `gunHandBackMode`, `kickWhenShot/Sabotaged`, `kickOnWildFire`,
-`onlyHuntersCanBeShot`, `topShootersCount`, and so on) can be set per channel;
-the rest are global:
+Names below are relative to `supybot.plugins.DuckHuntPro`, and `config help
+<full name>` shows the same text as this table. *Scope*: **channel** settings
+can be set per channel (`config channel #chan supybot.plugins.DuckHuntPro.ducksPerDay 24`),
+**network** settings per network (`config network DALnet
+supybot.plugins.DuckHuntPro.kickViaChanServ True`), **global** ones apply to the
+whole bot.
+Numbers and costs default to the original `Duck_Hunt.cfg` values. The level table
+(accuracy, jam chance, clip sizes, thresholds) is fixed.
 
-- `method`, `postInitDelay`, `autoRefillAmmoTime`, `backupTime`,
-  `quarterlyResetEnabled`, `huntingLogs`, `huntingLogDirectory`,
-  `anonymPrefix`, `warnOnRename`, `warnOnTakeover`, `pendingTransfersMaxAge`
-- `kickViaChanServ` and `chanServKickLine`, both per network (the original's
-  `kick_method 1`): the kick goes through services as the raw line in
-  `chanServKickLine`, `CS KICK {channel} {nick} :{reason}` by default (needs a
-  `CS` alias for ChanServ, as DALnet's has). For networks without it set e.g.
-  `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`, or Undernet's
-  `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`
-  (Undernet's X: `kick <#channel> <nick | *!*userid@host> [reason]`);
-  `strayBulletExemptCapability` (its `exempted_flags`: users with that
-  capability never take a stray bullet)
-- the original's numbers: `xpPerDuck`, `xpPerGoldenDuckHp`, `xpLuckyShot`,
-  `chanceRicochetTowardsDuck`, `chancesToHitSomeoneElse.*`,
-  `chancesWildFireHitSomeone.*`, `shopCosts.*` and `dropChances.*` (all
-  default to `Duck_Hunt.cfg`'s values)
-- `web.enable`: a read-only dashboard through Limnoria's HTTP server
-  (`/duckhuntpro/`, per-channel leaderboard and champions).
+| Setting | Scope | Default | Description |
+|---|---|---|---|
+| `enabled` | channel | `False` | Enables the duck hunt game in this channel. |
+| `language` | channel | `en` | Language used for this channel's game messages: en or fr (the original script's two catalogues). |
+| `ducksPerDay` | channel | `18` | Approximate number of ducks that fly per day. |
+| `approxGoldenDucksPerDay` | channel | `1` | Approximate number of golden (multi-hit) ducks per day; must not exceed ducksPerDay, since golden ducks are counted within it. |
+| `goldenDuckMinHP` | channel | `3` | Minimum hit points of a golden duck. |
+| `goldenDuckMaxHP` | channel | `5` | Maximum hit points of a golden duck. |
+| `duckSleepHours` | channel | (empty) | Space-separated list of hours (0-23) during which no duck will fly, e.g. "2 3 4 5". Empty means ducks can fly at any hour. |
+| `shotsBeforeDuckFlee` | channel | `3` | Number of non-lethal shots fired at a duck before it flees scared off. -1 means it never flees from gunfire (only from escapeTime). |
+| `successfulShotsAlsoScareDucks` | channel | `True` | Whether a kill on one duck also counts toward scaring off other ducks currently in flight on the same channel. |
+| `escapeTime` | channel | `300` | Seconds a duck stays in flight before escaping unharmed if nobody kills it. |
+| `unlimitedAmmoPerClip` | channel | `False` | Whether clips have unlimited ammo (no reload needed). |
+| `unlimitedAmmoClips` | channel | `False` | Whether players have an unlimited number of clips. |
+| `antiHighlight` | channel | `False` | Randomizes the duck's flight art each time so highlight-triggered auto-shoot scripts can't be trained on a fixed string. |
+| `voiceWhenDuckShot` | channel | `True` | Voices a player in the channel when they shoot down a duck. |
+| `devoiceOnWildFire` | channel | `True` | Devoices a player who fires with no duck in sight. |
+| `devoiceOnMiss` | channel | `False` | Devoices a player who misses a shot at a duck. |
+| `postInitDelay` | global | `60` | Seconds to wait after the plugin loads before planning the day's duck flights, to give the bot time to join all its channels. |
+| `quarterlyResetEnabled` | global | `True` | Whether to automatically archive and reset every channel's standings on the 1st of January/April/July/October. |
+| `topShootersCount` | channel | `3` | How many players `duckshooters` shows, ranked by xp (kills as tiebreaker). |
+| `web.enable` | global | `False` | Enables the built-in web dashboard (leaderboard/ champions/shop pages) served through Limnoria's HTTP server, at /duckhuntpro/<network>/<channel>/<page>. |
+| `minXpForShopping` | channel | `0` | The lowest a player's xp balance is allowed to go after a shop purchase; a purchase that would drop them below this floor is refused. |
+| `shopEnabled` | channel | `True` | Whether the shop command is available at all (Duck_Hunt.tcl's shop_enabled; when off the command does nothing). |
+| `shopPreferredDisplayMode` | channel | `0` | What `shop` without arguments shows: 0 = the catalogue of items and prices, anything else = a message pointing to shopUrl instead. |
+| `shopUrl` | channel | (empty) | The web page listing the shop items, shown when shopPreferredDisplayMode is non-zero. |
+| `dropsEnabled` | channel | `True` | Whether killing a duck can also drop a bonus item/xp-book on top of the normal xp reward. |
+| `maxBreadOnChan` | channel | `20` | Maximum number of active bread pieces on a channel at once; further bread purchases are refused (and not charged) once this cap is hit. |
+| `kickWhenSabotaged` | channel | `True` | Whether a sabotaged weapon jamming also kicks the victim from the channel, matching the original script. |
+| `cantAttractDucksWhenSleeping` | channel | `True` | Whether decoy/bread purchases are refused during this channel's duckSleepHours. |
+| `decoysCanAttractGoldenDucks` | channel | `True` | Whether a duck lured in by the decoy item can randomly turn out to be a golden duck (if false, decoy ducks are always ordinary). |
+| `onlyHuntersCanBeShot` | channel | `True` | Whether accidental-hit victims must already have fired at least one shot in this channel (if false, any channel occupant can be hit, even someone who's never played). |
+| `gunConfiscationWhenShootingSomeone` | channel | `True` | Whether accidentally hitting another player gets your own weapon temporarily confiscated. |
+| `gunConfiscationOnWildFire` | channel | `False` | Whether firing with no duck present (and hitting nobody) also risks a temporary confiscation. |
+| `devoiceOnAccident` | channel | `True` | Devoices a player who accidentally hits someone else. |
+| `kickWhenShot` | channel | `True` | Whether a player who takes a stray hit (and neither deflects nor is defended by armor) gets kicked. |
+| `gunHandBackMode` | channel | `1` | How temporarily-confiscated weapons get returned: 1 = once daily at autoGunHandBackTime, 2 = whenever the channel's duck count drops back to zero (killed/escaped), 3 = never automatically (only the `rearm` command). Permanently-confiscated weapons (`unarm --static`) are never auto-returned by any mode. |
+| `autoGunHandBackTime` | channel | `00:00` | Local time (HH:MM) weapons are auto-returned each day, when gunHandBackMode is 1. |
+| `method` | global | `2` | How duck flights are scheduled (the original's `method`): 1 = every minute each channel has a chance of a flight (random timing), 2 = the day's flight times are planned in advance, replanned at midnight and whenever bread is bought or expires. |
+| `showBreadReplanning` | channel | `True` | Log the new flight plan each time buying or losing bread replans the day (the original's show_bread_replanning). |
+| `preferredDisplayMode` | channel | `1` | Where the game's per-player replies go: 1 = PRIVMSG to the channel, anything else = NOTICE to the player (the original's preferred_display_mode). Duck flights, kills and accidents are always public. |
+| `monochrome` | channel | `False` | Strip colours and other formatting from every message the game sends (it is always stripped on channels with mode +c). |
+| `kickOnWildFire` | channel | `False` | Kick players who shoot when there is no duck (the original's kick_on_wild_fire). |
+| `autoRefillAmmoTime` | global | `00:00` | Local time (HH:MM) at which every player's clips are refilled to their level's count each day (the original script's auto_refill_ammo_time). |
+| `huntingLogs` | global | `False` | Whether to keep the original's hunting logs: a plain-text trace of everything that happens (flights, shots, reloads, purchases, confiscations, stat transfers), one file per channel and day (the original script's hunting_logs). |
+| `huntingLogDirectory` | global | (empty) | Where the hunting logs go, as <channel>_<yyyymmdd>.log files. Empty means a logs directory under the plugin's data directory. |
+| `backupTime` | global | `00:03` | Local time (HH:MM) at which the database file is copied to a .bak file next to it each day (the original script's backup_time). |
+| `anonymPrefix` | global | (empty) | The prefix your network gives to users who don't identify in time ("Anonyme" for nicks like Anonyme54720). Stats are never transferred automatically to such a nick. Case-sensitive; empty = off. |
+| `warnOnRename` | global | `False` | Log a notice when a player who changed nick already has stats under the new nick. |
+| `warnOnTakeover` | global | `True` | Log what happened (and the stats involved) when a nick change makes two profiles merge, one replace the other, or a profile get claimed. |
+| `pendingTransfersMaxAge` | global | `3600` | Seconds. When the plugin starts, nick-change transfers still waiting are forgotten if nothing about them changed for longer than this. |
+| `confiscationEnforcementOnFusion` | channel | `False` | When a renamed player's stats would be merged into their new nick (see nick-change stat fusion), whether a disarmed profile should have its stats discarded instead of merged (an anti-confiscation-dodging measure). Off by default, matching the original script. |
+| `antifloodEnabled` | channel | `True` | Whether to rate-limit the game commands (the original's antiflood). |
+| `floodShoot` | channel | `30:600` | Individual flood limit for the shooting command as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
+| `floodReload` | channel | `15:120` | Individual flood limit for duckreload as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
+| `floodStats` | channel | `2:120` | Individual flood limit for duckstats as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
+| `floodLastduck` | channel | `1:300` | Individual flood limit for lastduck as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
+| `floodShop` | channel | `3:600` | Individual flood limit for shop as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
+| `floodGlobal` | channel | `30:600` | Flood limit on all the game's commands together, for the whole channel ("<requests>:<seconds>"). The original suggests at least the largest individual limit. |
+| `antifloodMsgInterval` | channel | `60` | Minimum number of seconds between two flood-control warnings for the same limit (not too low, or the warnings become the flood). |
+| `kickViaChanServ` | network | `False` | Make the game's kicks through services instead of kicking directly (the original's kick_method 1), on this network. Needed when the bot has no op but is allowed to use services. |
+| `chanServKickLine` | network | `CS KICK {channel} {nick} :{reason}` | The raw IRC line kickViaChanServ sends on this network, with {channel}, {nick} and {reason} filled in. The default is the original's `CS kick` (the network needs a CS alias for ChanServ, as DALnet's has). Without an alias, for example: `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`; on Undernet the service is X: `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`. |
+| `strayBulletExemptCapability` | global | (empty) | A capability (for example "duckhuntpro.exempt"): users who have it, or are bots that have it, can never take a stray bullet. The original's exempted_flags; leave empty to exempt only the bot itself. |
+| `xpPerDuck` | global | `10` | Experience points for killing a duck (xp_duck). |
+| `xpPerGoldenDuckHp` | global | `12` | Experience points for killing a golden duck, per hit point it had. |
+| `xpLuckyShot` | global | `25` | Bonus experience points for a "lucky" kill (a ricochet that hits the duck). |
+| `chanceRicochetTowardsDuck` | global | `10` | Percent chance for a deflected bullet to ricochet towards the duck (chances_to_ricochet_towards_duck). |
+| `chancesToHitSomeoneElse.upTo10` | global | `10` | Percent chance that a missed shot at a duck hits someone else, in a channel of 10 users or fewer. |
+| `chancesToHitSomeoneElse.upTo20` | global | `12` | Percent chance that a missed shot at a duck hits someone else, in 11 to 20 users. |
+| `chancesToHitSomeoneElse.upTo30` | global | `14` | Percent chance that a missed shot at a duck hits someone else, in 21 to 30 users. |
+| `chancesToHitSomeoneElse.above30` | global | `15` | Percent chance that a missed shot at a duck hits someone else, in 31 users or more. |
+| `chancesWildFireHitSomeone.upTo10` | global | `1` | Percent chance that a wild shot (no duck) hits someone, in a channel of 10 users or fewer. |
+| `chancesWildFireHitSomeone.upTo20` | global | `2` | Percent chance that a wild shot (no duck) hits someone, in 11 to 20 users. |
+| `chancesWildFireHitSomeone.upTo30` | global | `3` | Percent chance that a wild shot (no duck) hits someone, in 21 to 30 users. |
+| `chancesWildFireHitSomeone.above30` | global | `4` | Percent chance that a wild shot (no duck) hits someone, in 31 users or more. |
 
-The level table (accuracy, jam chance, clip sizes, thresholds) is fixed.
+### Shop prices (`shopCosts.<item>`, xp)
+
+| Item | Default |
+|---|---|
+| `extra_ammo` | 7 |
+| `extra_clip` | 20 |
+| `ap_ammo` | 15 |
+| `explosive_ammo` | 25 |
+| `buyback_weapon` | 40 |
+| `grease` | 8 |
+| `sight` | 6 |
+| `infrared_detector` | 15 |
+| `silencer` | 5 |
+| `four_leaf_clover` | 13 |
+| `sunglasses` | 5 |
+| `spare_clothes` | 7 |
+| `brush` | 7 |
+| `mirror` | 7 |
+| `sand` | 7 |
+| `water_bucket` | 10 |
+| `sabotage` | 14 |
+| `life_insurance` | 10 |
+| `liability_insurance` | 5 |
+| `decoy` | 8 |
+| `bread` | 2 |
+| `duck_detector` | 5 |
+| `fake_duck` | 50 |
+
+### Kill drop chances (`dropChances.<drop>`, out of 1000)
+
+Rolled in this order; the first success wins, so later drops are effectively rarer.
+
+| Drop | Default |
+|---|---|
+| `junk` | 20 |
+| `ammo` | 20 |
+| `clip` | 15 |
+| `ap_ammo` | 7 |
+| `explosive_ammo` | 5 |
+| `grease` | 7 |
+| `sight` | 12 |
+| `infrared_detector` | 7 |
+| `silencer` | 12 |
+| `sunglasses` | 12 |
+| `duck_detector` | 12 |
+| `four_leaf_clover` | 7 |
+| `xp_book_10` | 3 |
+| `xp_book_20` | 2 |
+| `xp_book_30` | 1 |
+| `xp_book_40` | 1 |
+| `xp_book_50` | 1 |
+| `xp_book_100` | 1 |
 
 ## Languages
 

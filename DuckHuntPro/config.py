@@ -48,8 +48,8 @@ conf.registerChannelValue(DuckHuntPro, 'enabled',
     registry.Boolean(False, """Enables the duck hunt game in this channel."""))
 
 conf.registerChannelValue(DuckHuntPro, 'language',
-    registry.String('en', """Language used for this channel's game messages.
-    Only 'en' ships by default; add more languages by extending messages.py."""))
+    registry.String('en', """Language used for this channel's game messages:
+    en or fr (the original script's two catalogues)."""))
 
 conf.registerChannelValue(DuckHuntPro, 'ducksPerDay',
     registry.PositiveInteger(18, """Approximate number of ducks that fly per day."""))
