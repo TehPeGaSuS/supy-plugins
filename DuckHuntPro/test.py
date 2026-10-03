@@ -1145,6 +1145,200 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn('[missed: -1 xp]', shot[0])
         self.assertIn('[accident: -4 xp]', shot[0])
 
+    # ---- parity with Duck_Hunt.tcl's hit_a_duck / duck_soaring ----------
+
+    def _shot(self, roll=0):
+        """A clean hit on the oldest duck; returns the messages sent."""
+        self._cb()._rng = ScriptedRNG([100, roll])    # no jam, then the accuracy roll
+        return self._texts(self._bangSent())
+
+    def testKillAnnouncementUsesTheOriginalWording(self):
+        self._putDuck()
+        kill = [x for x in self._shot() if 'You shot down the duck in' in x]
+        self.assertEqual(len(kill), 1)
+        self.assertIn('which makes you a total of 1 duck on #test', kill[0])
+        self.assertIn('[10 xp]', kill[0])
+        self.assertIn('*BANG*', kill[0])
+
+    def testKillingOneOfSeveralDucksSaysOneOfTheDucks(self):
+        self._putDuck()
+        self._putDuck()
+        sent = self._shot()
+        self.assertTrue(any('You shot down one of the ducks in' in x for x in sent), sent)
+
+    def testKillTotalPluralises(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, self.nick)['stats']['killed'] = 1
+        self._putDuck()
+        sent = self._shot()
+        self.assertTrue(any('a total of 2 ducks on #test' in x for x in sent), sent)
+
+    def testLevelUpIsAppendedToTheKillLine(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, self.nick)['xp'] = 15   # level 1, 5 short
+        self._putDuck()
+        sent = self._shot()
+        self.assertTrue(any('You are promoted to level 2 (' in x for x in sent), sent)
+
+    def testRicochetKillAnnouncementCarriesTheLuckyShotTag(self):
+        cb = self._cb()
+        self._addHunter('bob', xp=1000)
+        self._putDuck()
+        cb._rng = ScriptedRNG([100, 100, 0, 0, 0, 0])   # miss, accident, deflect, ricochet to duck
+        sent = self._texts(self._bangSent())
+        self.assertTrue(any('by ricochet' in x and '[lucky shot]' in x for x in sent), sent)
+
+    def testMechanicalDuckKillNamesItsBuyerAndPaysNothing(self):
+        cb = self._putDuck(is_fake=True)
+        cb._activeDuck[self._key()][-1]['author'] = 'bob'
+        sent = self._shot()
+        self.assertTrue(any('You shot down the mechanical duck in' in x
+                            and 'offered by bob' in x for x in sent), sent)
+        player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
+        self.assertEqual(player['xp'], 0)
+
+    def testGoldenDuckIsOnlyRevealedByTheFirstHurtingShot(self):
+        cb = self._putDuck(is_golden=True, hp_total=3)
+        first = self._shot()
+        self.assertTrue(any('GOLDEN DUCK DETECTED' in x and '[life -1]' in x
+                            and 'The duck survived' in x for x in first), first)
+        second = self._shot()
+        self.assertTrue(any('The golden duck survived' in x for x in second), second)
+        self.assertFalse(any('DETECTED' in x for x in second), second)
+
+    def testGoldenDuckRevealIsPublicInNoticeMode(self):
+        self._putDuck(is_golden=True, hp_total=3)
+        conf.supybot.plugins.DuckHuntPro.preferredDisplayMode.setValue(2)
+        self._cb()._rng = ScriptedRNG([100, 0])
+        sent = self._bangSent()
+        self.assertEqual([x for c, _, x in sent if c == 'PRIVMSG' and 'DETECTED' in x
+                          and 'survived' not in x].__len__(), 1, sent)
+        self.assertTrue(any(c == 'NOTICE' and 'The golden duck survived' in x
+                            for c, _, x in sent), sent)
+        self._cb()._rng = ScriptedRNG([100, 0])
+        again = self._bangSent()
+        self.assertFalse(any('DETECTED' in x for _, _, x in again), again)   # only once
+
+    def testGoldenKillAnnouncementCountsGoldenDucks(self):
+        cb = self._putDuck(is_golden=True, hp_total=1)
+        sent = self._shot()
+        self.assertTrue(any('You shot down the golden duck in' in x
+                            and 'a total of 1 duck (including 1 golden duck)' in x
+                            and '[12 xp]' in x for x in sent), sent)
+
+    def testAmmoTypeSetsTheFireSoundAndGoldenTag(self):
+        for key, sound, tag in (('ap_ammo', '*BANG*', '[AP ammo]'),
+                                ('explosive_ammo', '*BOOM*', '[expl. ammo]')):
+            cb = self._cb()
+            player = cb.db.player(self.irc.network, self.channel, self.nick)
+            player['items'].clear()
+            player['clip_ammo'], player['clips_left'] = None, None
+            db.giveItem(player, key, time.time(), duration=86400)
+            cb.db._data = cb.db._data if hasattr(cb.db, '_data') else None
+            cb._activeDuck.pop(self._key(), None)
+            self._putDuck(is_golden=True, hp_total=1)
+            sent = self._shot()
+            kill = [x for x in sent if 'golden duck in' in x]
+            self.assertTrue(kill and sound in kill[0] and tag in kill[0], (key, sent))
+
+    def testCloverTagAndBonusOnKills(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        db.giveItem(player, 'four_leaf_clover', time.time(), duration=86400, value=4)
+        self._putDuck()
+        sent = self._shot()
+        self.assertTrue(any('[four-leaf clover]' in x and '[14 xp]' in x for x in sent), sent)
+
+    def _escape(self, **duck):
+        cb = self._cb()
+        self._putDuck(**duck)
+        spawned = cb._activeDuck[self._key()][-1]['spawned_at']
+        cb._duckEscapes(self.irc.network, self.channel, spawned)
+        return ' '.join(self._texts(self._sent()))
+
+    def testEscapeWordingFollowsTheKindOfDuckAndWhetherOthersFly(self):
+        self.assertIn('The duck escapes', self._escape())
+        self.assertIn('The golden duck escapes', self._escape(is_golden=True))
+        self.assertIn('The mechanical duck escapes', self._escape(is_fake=True))
+        self._putDuck()        # another duck is still flying
+        self.assertIn('A duck escapes', self._escape())
+        self.assertIn('A golden duck escapes', self._escape(is_golden=True))
+        self.assertIn('A mechanical duck escapes', self._escape(is_fake=True))
+
+    def testFlightAnnouncementDoesNotGiveAwayGoldenOrMechanicalDucks(self):
+        cb = self._cb()
+        plain = messages.tcl('en', 'm135')
+        for kwargs in ({'forceGolden': True}, {'isFake': True}, {}):
+            cb._spawnDuck(self.irc, self.channel, **kwargs)
+            self.assertEqual(self._texts(self._sent()), [plain], kwargs)
+            cb._activeDuck.pop(self._key(), None)
+
+    def testDuckDetectorNoticeUsesTheOriginalText(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        db.giveItem(player, 'duck_detector', time.time(), uses=1)
+        cb._spawnDuck(self.irc, self.channel)
+        sent = self._sent()
+        self.assertTrue(any(c == 'NOTICE' and x == '%s > DUCK on %s' % (self.nick, self.channel)
+                            for c, _, x in sent), sent)
+
+    def _drop(self, key, rolls=(), setup=None):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        player['items'].clear()
+        player['clip_ammo'], player['clips_left'] = None, None
+        if setup:
+            setup(player)
+        cb._rng = ScriptedRNG(self._scriptedRollFor(key) + list(rolls))
+        msg = cb._rollAndApplyDrop(self.channel, player, self.nick, time.time())
+        return player, msg
+
+    def testDropsGiveTheOriginalItemsAndMessages(self):
+        now = time.time()
+        for key, mkey, uses in (
+                ('sight', 'm400', 1), ('infrared_detector', 'm401', 6),
+                ('silencer', 'm402', None), ('sunglasses', 'm403', None),
+                ('duck_detector', 'm404', 1), ('grease', 'm399', None)):
+            player, msg = self._drop(key)
+            held = db.itemActive(player, key, now)
+            self.assertTrue(held is not None, key)
+            self.assertEqual(held['uses_left'], uses, key)
+            self.assertEqual(msg, messages.tcl('en', mkey, self.nick), key)
+
+    def testApAndExplosiveDropsReplaceEachOther(self):
+        now = time.time()
+        player, msg = self._drop('ap_ammo', setup=lambda p: db.giveItem(
+            p, 'explosive_ammo', now, duration=86400))
+        self.assertTrue(db.itemActive(player, 'ap_ammo', now))
+        self.assertTrue(db.itemActive(player, 'explosive_ammo', now) is None)
+        player, msg = self._drop('explosive_ammo', setup=lambda p: db.giveItem(
+            p, 'ap_ammo', now, duration=86400))
+        self.assertTrue(db.itemActive(player, 'explosive_ammo', now))
+        self.assertTrue(db.itemActive(player, 'ap_ammo', now) is None)
+
+    def testAmmoAndClipDropsStopAtTheLevelCaps(self):
+        lvl = data.LEVELS[1]
+        player, _ = self._drop('ammo', setup=lambda p: p.update(
+            clip_ammo=2, clips_left=lvl.clip_count, xp=0))
+        self.assertEqual(player['clip_ammo'], 3)
+        player, _ = self._drop('ammo', setup=lambda p: p.update(
+            clip_ammo=lvl.clip_size, clips_left=lvl.clip_count, xp=0))
+        self.assertEqual(player['clip_ammo'], lvl.clip_size)
+        player, _ = self._drop('clip', setup=lambda p: p.update(
+            clip_ammo=lvl.clip_size, clips_left=0, xp=0))
+        self.assertEqual(player['clips_left'], 1)
+        player, _ = self._drop('clip', setup=lambda p: p.update(
+            clip_ammo=lvl.clip_size, clips_left=lvl.clip_count, xp=0))
+        self.assertEqual(player['clips_left'], lvl.clip_count)
+
+    def testCloverDropRollsItsBonusAndPluralises(self):
+        player, msg = self._drop('four_leaf_clover', rolls=[1])
+        self.assertTrue(db.itemActive(player, 'four_leaf_clover', time.time())['value'] == 1)
+        self.assertIn('a +1 four-leaf clover', msg)
+        self.assertIn('extra 1 xp point ', msg)
+        player, msg = self._drop('four_leaf_clover', rolls=[7])
+        self.assertIn('extra 7 xp points ', msg)
+
     def testWaterBucketBlocksShootingEntirely(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
@@ -1185,6 +1379,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     # Phase 2: drop table
     # -----------------------------------------------------------------
 
+    def testDropTableKeepsTheOriginalRollOrder(self):
+        self.assertEqual(list(data.DROP_TABLE), [
+            'junk', 'ammo', 'clip', 'ap_ammo', 'explosive_ammo', 'grease', 'sight',
+            'infrared_detector', 'silencer', 'sunglasses', 'duck_detector',
+            'four_leaf_clover', 'xp_book_10', 'xp_book_20', 'xp_book_30',
+            'xp_book_40', 'xp_book_50', 'xp_book_100'])
+
     def testRollDropSequentialBernoulli(self):
         keys = list(data.DROP_TABLE.items())
         values = [chance + 1 for _, chance in keys[:2]] + [keys[2][1]]
@@ -1209,8 +1410,9 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         cb._rng = ScriptedRNG(self._scriptedRollFor('xp_book_10'))
-        msg = cb._rollAndApplyDrop(player, 'en', time.time())
-        self.assertTrue('10' in msg)
+        msg = cb._rollAndApplyDrop(self.channel, player, self.nick, time.time())
+        self.assertIn('hunting magazine', msg)
+        self.assertIn('[10 xp]', msg)
         self.assertEqual(player['xp'], 10)
 
     def testRollAndApplyDropGrantsItem(self):
@@ -1218,16 +1420,18 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         cb._rng = ScriptedRNG(self._scriptedRollFor('grease'))
         now = time.time()
-        msg = cb._rollAndApplyDrop(player, 'en', now)
-        self.assertTrue('grease' in msg)
+        msg = cb._rollAndApplyDrop(self.channel, player, self.nick, now)
+        self.assertTrue('you find some gun grease' in msg.lower() or 'grease' in msg.lower(), msg)
         self.assertTrue(db.itemActive(player, 'grease', now) is not None)
 
     def testRollAndApplyDropJunkIsFlavorOnly(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
-        cb._rng = ScriptedRNG(self._scriptedRollFor('junk'))
-        msg = cb._rollAndApplyDrop(player, 'en', time.time())
-        self.assertTrue(any(flavor in msg for flavor in messages.JUNK_FLAVORS))
+        junk = messages.tclList('en', 'm394')
+        cb._rng = ScriptedRNG(self._scriptedRollFor('junk') + [1])   # second junk entry
+        msg = cb._rollAndApplyDrop(self.channel, player, self.nick, time.time())
+        self.assertTrue(msg.endswith(junk[1]), msg)
+        self.assertTrue(msg.startswith(messages.tcl('en', 'm393', self.nick)), msg)
         self.assertEqual(player['xp'], 0)
 
     def testDropsDisabledSkipsRoll(self):
@@ -1398,12 +1602,23 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     # Phase 3: anti-highlight duck art
     # -----------------------------------------------------------------
 
-    def testRandomDuckArtVariesAndUsesKnownGlyphs(self):
-        rng = random.Random(42)
-        arts = {data.randomDuckArt(rng) for _ in range(20)}
-        self.assertTrue(len(arts) > 1)
+    def testAntiHighlightAnnouncementVariesAndUsesTheOriginalGlyphs(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.antiHighlight.setValue(True)
+        cb._rng = random.Random(42)
+        glyphs = messages.tclList('en', 'm137')
+        cries = messages.tclList('en', 'm138')
+        trail = messages.tcl('en', 'm136')
+        arts = {cb._duckAnnouncement(self.channel) for _ in range(30)}
+        self.assertTrue(len(arts) > 5)
         for art in arts:
-            self.assertTrue(any(glyph in art for glyph in data.DUCK_GLYPHS))
+            self.assertTrue(any('\x02%s\x02' % g in art for g in glyphs), art)
+            self.assertTrue(any(art.endswith('\x0314%s\x0f' % c) for c in cries), art)
+            shown = art.split('\x0f')[0][len('\x0314'):]
+            self.assertEqual(len(shown), len(trail) - 4)   # four trail chars removed
+
+    def testPlainAnnouncementIsTheOriginalOne(self):
+        self.assertEqual(self._cb()._duckAnnouncement(self.channel), messages.tcl('en', 'm135'))
 
     def testSpawnDuckUsesAntiHighlightArtWhenEnabled(self):
         cb = self._cb()

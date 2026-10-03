@@ -127,34 +127,6 @@ def accidentChance(population, duckPresent):
     return tiers[-1][1]
 
 
-# Anti-highlight duck art (Duck_Hunt.tcl's hl_prevention, msgcat m136-138).
-# Randomizes the flight announcement so highlight-triggered auto-shoot
-# scripts can't be trained on one fixed string. A small representative set,
-# not the original's ~228-entry glyph table -- full parity on game numbers/
-# mechanics matters more than matching every joke string 1:1 here.
-DUCK_TRAIL = "-.,_,.-·'`'·-.,_,.-·'`'·"
-DUCK_GLYPHS = ('\\_O<', '\\_o<', '/_O<', '\\_O{', '\\_o{', '/_o<')
-DUCK_CRIES = ('QUACK', 'QUAC', 'QUAAAC', 'KWAK', 'KWAAAK', 'ARK')
-
-
-def randomDuckArt(rng):
-    """Builds one randomized duck-flight announcement: a slightly mutated
-    trail + a random duck glyph + a random cry, so the announcement string
-    differs every flight (hl_prevention)."""
-    trail = list(DUCK_TRAIL)
-    step = max(1, len(trail) // 4)
-    start = rng.randint(0, step - 1) if step > 1 else 0
-    removed = 0
-    for i in range(4):
-        idx = start + i * step - removed
-        if 0 <= idx < len(trail):
-            del trail[idx]
-            removed += 1
-    glyph = DUCK_GLYPHS[rng.randint(0, len(DUCK_GLYPHS) - 1)]
-    cry = DUCK_CRIES[rng.randint(0, len(DUCK_CRIES) - 1)]
-    return "%s %s   %s" % (''.join(trail), glyph, cry)
-
-
 # Nick-fusion (merge_stats): stat keys summed when merging an old nick's
 # profile into a renamed player's new one.
 FUSION_SUMMED_STATS = (
@@ -197,6 +169,8 @@ MAX_BREAD_ON_CHAN = 20
 
 # Kill drop table (cfg lines 404-438): per-1000 chance, keyed by drop name.
 DROP_TABLE = {
+    # The order is the original's roll order (hit_a_duck): the first roll to
+    # succeed wins, so later keys have slightly lower effective odds.
     'junk': 20,
     'ammo': 20,
     'clip': 15,
@@ -206,9 +180,9 @@ DROP_TABLE = {
     'sight': 12,
     'infrared_detector': 7,
     'silencer': 12,
-    'four_leaf_clover': 7,
     'sunglasses': 12,
     'duck_detector': 12,
+    'four_leaf_clover': 7,
     'xp_book_10': 3,
     'xp_book_20': 2,
     'xp_book_30': 1,

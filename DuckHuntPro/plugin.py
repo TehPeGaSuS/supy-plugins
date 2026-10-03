@@ -628,16 +628,40 @@ class DuckHuntPro(callbacks.Plugin):
         if not chan:
             return
         now = time.time()
-        lang = self.registryValue('language', channelName)
         changed = False
         for player in list(chan['players'].values()):
             if db.itemActive(player, 'duck_detector', now):
                 db.consumeItemUse(player, 'duck_detector')
                 changed = True
-                irc.queueMsg(ircmsgs.notice(player['display_nick'], messages.get(
-                    lang, 'duck_detector_notice', channel=channelName)))
+                self._out(irc, channelName, player['display_nick'],
+                          self._t(channelName, 'm351', player['display_nick'], channelName),
+                          'notice')
         if changed:
             self.db.save()
+
+    def _duckAnnouncement(self, channel):
+        """Duck_Hunt.tcl's flight announcement. Identical for every duck (a
+        golden or mechanical one is not given away). With antiHighlight
+        (hl_prevention) it is built from random pieces so highlight-triggered
+        auto-shooters can't be trained on one string: the trail with four
+        quarter-spaced characters removed, a random glyph and a random cry."""
+        lang = self._lang(channel)
+        if not self.registryValue('antiHighlight', channel):
+            return messages.tcl(lang, 'm135')
+        trail = messages.tcl(lang, 'm136')
+        quarter = len(trail) // 4
+        index = self._rng.randint(0, len(trail) - 1)
+        indexes = [index]
+        for _ in range(3):
+            index = (index + quarter) % len(trail)
+            indexes.append(index)
+        for idx in sorted(indexes, reverse=True):
+            trail = trail[:idx] + trail[idx + 1:]
+        glyphs = messages.tclList(lang, 'm137')
+        cries = messages.tclList(lang, 'm138')
+        glyph = glyphs[self._rng.randint(0, len(glyphs) - 1)]
+        cry = cries[self._rng.randint(0, len(cries) - 1)]
+        return '\x0314%s\x0f \x02%s\x02   \x0314%s\x0f' % (trail, glyph, cry)
 
     def _spawnDuck(self, irc, channelName, forceNonGolden=False, isFake=False, buyer=None,
                     forceGolden=False):
@@ -657,11 +681,14 @@ class DuckHuntPro(callbacks.Plugin):
             maxHp = self.registryValue('goldenDuckMaxHP', channelName)
             hpTotal = self._rng.randint(minHp, maxHp)
 
+        # Duck detectors are told first, as in the original.
+        self._notifyDuckDetectors(irc, channelName)
+
         now = time.time()
         self._activeDuck.setdefault(key, []).append({
             'spawned_at': now, 'is_golden': isGolden,
             'hp_total': hpTotal, 'hp_left': hpTotal, 'shots_fired': 0,
-            'is_fake': isFake,
+            'is_fake': isFake, 'author': buyer, 'signaled': False,
         })
 
         chan = self.db.channel(irc.network, channelName)
@@ -669,16 +696,7 @@ class DuckHuntPro(callbacks.Plugin):
             chan['last_duck_at'] = now
         self.db.save()
 
-        lang = self.registryValue('language', channelName)
-        if self.registryValue('antiHighlight', channelName):
-            art = data.randomDuckArt(self._rng)
-            if isGolden:
-                art += ' [GOLDEN]'
-            irc.queueMsg(ircmsgs.privmsg(channelName, art))
-        else:
-            msgKey = 'golden_duck_flies' if isGolden else 'duck_flies'
-            irc.queueMsg(ircmsgs.privmsg(channelName, messages.get(lang, msgKey)))
-        self._notifyDuckDetectors(irc, channelName)
+        self._out(irc, channelName, None, self._duckAnnouncement(channelName), 'public')
 
         escapeAt = now + self._currentEscapeTime(irc.network, channelName, now)
         name = "DuckHuntPro:escape:%s:%s:%r" % (irc.network, key[1], now)
@@ -694,13 +712,18 @@ class DuckHuntPro(callbacks.Plugin):
         # order), but it's not identity-safe, and tracking identity costs
         # nothing here since every duck's spawned_at is already threaded
         # through its own scheduled event.
+        key = (network.lower(), channelName.lower())
+        others = len(self._activeDuck.get(key) or []) > 1
         duck = self._removeDuck(network, channelName, spawnedAt=spawnedAt)
         if duck is None:
             return  # already killed or fled
         irc = self._getIrc(network)
         if irc:
-            lang = self.registryValue('language', channelName)
-            irc.queueMsg(ircmsgs.privmsg(channelName, messages.get(lang, 'duck_escaped')))
+            # "A ... escapes" while others are still flying, "The ..." for the last.
+            mkey = ('m247' if others else 'm248') if duck['is_golden'] else (
+                ('m353' if others else 'm354') if duck.get('is_fake') else
+                ('m3' if others else 'm4'))
+            self._out(irc, channelName, None, self._t(channelName, mkey), 'public')
         self._maybeHandBackOnDuckGone(network, channelName)
 
     def _removeDuck(self, network, channelName, spawnedAt=None):
@@ -1083,71 +1106,104 @@ class DuckHuntPro(callbacks.Plugin):
         return fled
 
     def _resolveDuckHit(self, irc, channel, network, shooterNick, lang, damage, isLucky=False):
-        """Resolves a confirmed hit on the channel's current duck: a
-        partial hit on a multi-hp (golden) duck, or a full kill (xp gain,
-        clover bonus, drop table, leveling, voice, mode-2 gun hand-back).
-        Shared by bang()'s direct-hit path and _resolveAccident()'s
-        ricochet-into-duck ("lucky shot") path."""
+        """Port of Duck_Hunt.tcl's hit_a_duck: a hit on the oldest duck.
+        A golden duck only loses health (and is revealed by that); a kill
+        pays xp (clover bonus included), updates the player's totals and best
+        time, may drop an item, and is announced with the original's wording
+        for the kind of duck (normal / golden / mechanical), whether it was a
+        ricochet and whether other ducks are still flying. `lang` is unused
+        (kept for the callers); the channel's language is used."""
         key = (network.lower(), channel.lower())
         ducks = self._activeDuck.get(key)
         if not ducks:
             return
-        duck = ducks[0]  # oldest -- always the target, see bang()
+        duck = ducks[0]  # oldest -- always the target
         player = self.db.player(network, channel, shooterNick)
-        duck['hp_left'] -= damage
-        if duck['hp_left'] > 0:
-            self.db.save()
-            irc.reply(messages.get(lang, 'kill_golden_hit', nick=shooterNick, hp=duck['hp_left']))
-            return
-
+        nick = shooterNick
         now = time.time()
-        elapsed = now - duck['spawned_at']
-        isFake = duck.get('is_fake', False)
-        xpGain = 0 if isFake else (
-            data.BASE_XP_GOLDEN_DUCK * duck['hp_total'] if duck['is_golden'] else data.XP_PER_DUCK)
-        if isLucky:
-            xpGain += data.XP_LUCKY_SHOT
+        t = lambda k, *a: self._t(channel, k, *a)
+        sound, ammoMsg = {2: ('m427', 'm428'), 3: ('m430', 'm429')}.get(damage, ('m426', None))
+        sound = t(sound)
+        ammoMsg = t(ammoMsg) if ammoMsg else ''
+        noticeMode = self.registryValue('preferredDisplayMode', channel) == 2
+
+        if duck['is_golden']:
+            first = duck['hp_left'] == duck['hp_total']
+            duck['hp_left'] -= damage
+            if duck['hp_left'] > 0:
+                if noticeMode and not duck.get('signaled'):
+                    self._out(irc, channel, nick, t('m259'), 'public')
+                    duck['signaled'] = True
+                if first and not noticeMode:
+                    self._out(irc, channel, nick, t('m249', nick, sound, damage))
+                else:
+                    self._out(irc, channel, nick, t('m271', nick, sound, damage))
+                return
+            xpWon = data.BASE_XP_GOLDEN_DUCK * duck['hp_total']
+            if isLucky:
+                xpWon += data.XP_LUCKY_SHOT
+        elif duck.get('is_fake'):
+            xpWon = 0
+        else:
+            xpWon = data.XP_PER_DUCK + (data.XP_LUCKY_SHOT if isLucky else 0)
+        cloverMsg = ''
         clover = db.itemActive(player, 'four_leaf_clover', now)
         if clover:
-            # Preserves a Duck_Hunt.tcl quirk: the clover bonus-add isn't
-            # gated on is_fake_duck in the original, so it applies even to
-            # an otherwise-zero-xp fake duck kill. Kept for full parity.
-            xpGain += clover.get('value') or 0
-        oldLevel = data.levelForXp(player['xp'])
-        player['xp'] += xpGain
-        newLevel = data.levelForXp(player['xp'])
+            # The clover bonus isn't gated on the duck being real in the
+            # original: it also applies to a mechanical duck's zero xp.
+            xpWon += clover.get('value') or 0
+            cloverMsg = t('m369')
+
+        elapsedMs = int((now - duck['spawned_at']) * 1000)
+        self._removeDuck(network, channel)
         st = player['stats']
-        st['killed'] += 1
         if duck['is_golden']:
             st['golden_killed'] += 1
-        ms = int(elapsed * 1000)
-        st['total_time_ms'] += ms
+        st['killed'] += 1
+        oldLevel = data.levelForXp(player['xp'])
+        player['xp'] += xpWon
+        newLevel = data.levelForXp(player['xp'])
+        st['total_time_ms'] += elapsedMs
         st['timed_shots'] += 1
-        if st['best_time_ms'] is None or ms < st['best_time_ms']:
-            st['best_time_ms'] = ms
-        self._removeDuck(network, channel)
+        if st['best_time_ms'] is None or elapsedMs < st['best_time_ms']:
+            st['best_time_ms'] = elapsedMs
+        lvlUp = (t('m25', newLevel, messages.lvl2rank(newLevel, self._lang(channel)))
+                 if newLevel > oldLevel else '')
+        spent = messages.adaptTimeResolution(elapsedMs, True, self._lang(channel))
 
-        dropMsg = None
+        drop = None
         if self.registryValue('dropsEnabled', channel):
-            dropMsg = self._rollAndApplyDrop(player, lang, now)
+            drop = self._rollAndApplyDrop(channel, player, nick, now)
 
-        self.db.save()
-
-        if isLucky:
-            irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                lang, 'kill_lucky', nick=shooterNick, ricochets=1, xp=xpGain, level=newLevel)))
+        total = st['killed']
+        totalWord = messages.plural(total, t('m27'), t('m28'))
+        goldTotal = st['golden_killed']
+        goldWord = messages.plural(goldTotal, t('m274'), t('m275'))
+        others = bool(self._activeDuck.get(key))
+        golden, fake = duck['is_golden'], duck.get('is_fake')
+        if not isLucky:
+            mkey = (('m251' if others else 'm250') if golden else
+                    ('m357' if others else 'm356') if fake else
+                    ('m155' if others else 'm26'))
         else:
-            msgKey = 'kill_golden_final' if duck['is_golden'] else 'kill'
-            irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                lang, msgKey, nick=shooterNick, elapsed=elapsed, xp=xpGain, level=newLevel)))
-        if dropMsg:
-            irc.queueMsg(ircmsgs.privmsg(channel, dropMsg))
-        if newLevel > oldLevel:
-            irc.queueMsg(ircmsgs.privmsg(channel, messages.get(
-                lang, 'level_up', nick=shooterNick, level=newLevel)))
+            mkey = (('m253' if others else 'm252') if golden else
+                    ('m359' if others else 'm358') if fake else
+                    ('m156' if others else 'm29'))
+        if fake:
+            text = t(mkey, nick, sound, spent, duck.get('author') or '?')
+        elif golden:
+            text = t(mkey, nick, sound, spent, total, totalWord, goldTotal, goldWord,
+                     channel, lvlUp, xpWon) + cloverMsg + ammoMsg
+        else:
+            text = t(mkey, nick, sound, spent, total, totalWord, channel, lvlUp,
+                     xpWon) + cloverMsg
+        self._out(irc, channel, nick, text, 'public')
+        if not others:
+            self._maybeHandBackOnDuckGone(network, channel)
+        if drop:
+            self._out(irc, channel, nick, drop, 'public')
         if self.registryValue('voiceWhenDuckShot', channel):
             self._setVoice(irc, channel, shooterNick, True)
-        self._maybeHandBackOnDuckGone(network, channel)
 
     def _pickAccidentVictim(self, irc, channel, network, excludeNick):
         """Duck_Hunt.tcl's random_user: a random channel occupant other than
@@ -1171,38 +1227,50 @@ class DuckHuntPro(callbacks.Plugin):
             return None
         return candidates[self._rng.randint(0, len(candidates) - 1)]
 
-    def _rollAndApplyDrop(self, player, lang, now):
-        """Rolls the kill drop table and applies the winning drop (or
-        returns None on a dry roll, the much more common case)."""
+    def _rollAndApplyDrop(self, channel, player, nick, now):
+        """Rolls the kill drop table (the original's first-success order) and
+        applies the winning drop. Returns the announcement, or None on a dry
+        roll (the common case)."""
         key = data.rollDrop(self._rng)
         if key is None:
             return None
+        t = lambda k, *a: self._t(channel, k, *a)
+        lvl = data.LEVELS[data.levelForXp(player['xp'])]
+        self._ensureAmmo(player, lvl)
         if key == 'junk':
-            idx = self._rng.randint(0, len(messages.JUNK_FLAVORS) - 1)
-            return messages.get(lang, 'drop_junk', nick=player['display_nick'],
-                                 junk=messages.JUNK_FLAVORS[idx])
+            junk = messages.tclList(self._lang(channel), 'm394')
+            return t('m393', nick) + junk[self._rng.randint(0, len(junk) - 1)]
         if key in data.XP_BOOK_VALUES:
             xp = data.XP_BOOK_VALUES[key]
             player['xp'] += xp
-            return messages.get(lang, 'drop_xp_book', nick=player['display_nick'], xp=xp)
-        if key in ('ammo', 'clip'):
-            lvl = data.LEVELS[data.levelForXp(player['xp'])]
-            self._ensureAmmo(player, lvl)
-            if key == 'ammo':
-                player['clip_ammo'] = min(lvl.clip_size, player['clip_ammo'] + 1)
-            else:
-                player['clips_left'] = min(lvl.clip_count, player['clips_left'] + 1)
-            return messages.get(lang, 'drop_item', nick=player['display_nick'], item=key)
+            return t('m406', nick, xp, t('m286'), xp)
+        if key == 'ammo':
+            if player['clip_ammo'] < lvl.clip_size:
+                player['clip_ammo'] += 1
+            return t('m395', nick)
+        if key == 'clip':
+            if player['clips_left'] < lvl.clip_count:
+                player['clips_left'] += 1
+            return t('m396', nick)
         if key in data.AMMO_TYPE_DAMAGE:
-            other = 'explosive_ammo' if key == 'ap_ammo' else 'ap_ammo'
-            db.removeItem(player, other)
-        meta = data.ITEM_META.get(key)
+            # AP and explosive ammo replace each other.
+            db.removeItem(player, 'explosive_ammo' if key == 'ap_ammo' else 'ap_ammo')
         value = None
         if key == 'four_leaf_clover':
             value = self._rng.randint(data.CLOVER_BONUS_MIN, data.CLOVER_BONUS_MAX)
+        meta = data.ITEM_META.get(key)
+        db.removeItem(player, key)
         if meta:
-            db.giveItem(player, key, now, duration=meta['duration'], uses=meta['uses'], value=value)
-        return messages.get(lang, 'drop_item', nick=player['display_nick'], item=key)
+            db.giveItem(player, key, now, duration=meta['duration'], uses=meta['uses'],
+                        value=value)
+        mkey = {'ap_ammo': 'm397', 'explosive_ammo': 'm398', 'grease': 'm399',
+                'sight': 'm400', 'infrared_detector': 'm401', 'silencer': 'm402',
+                'sunglasses': 'm403', 'duck_detector': 'm404'}.get(key)
+        if key == 'four_leaf_clover':
+            word = messages.plural(value, '%s %s' % (t('m285'), t('m424')),
+                                   '%s %s' % (t('m286'), t('m425')))
+            return t('m405', nick, value, value, word)
+        return t(mkey, nick)
 
     def duckreload(self, irc, msg, args, channel):
         """[<channel>]
