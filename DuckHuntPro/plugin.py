@@ -397,6 +397,104 @@ class DuckHuntPro(callbacks.Plugin):
         """The original's 'loglev' output: a line in the bot's log."""
         self.log.info(ircutils.stripFormatting(self._t(channel, key, *args)))
 
+    # -----------------------------------------------------------------
+    # Hunting logs (Duck_Hunt.tcl's add_to_log)
+    # -----------------------------------------------------------------
+
+    _LOG_TIME_ONLY = {'soaring': 'm157', 'golden_duck_soaring': 'm254', 'fake_duck_soaring': 'm352',
+                      'frightened': 'm159', 'escaped': 'm160', 'golden_duck_escaped': 'm276',
+                      'fake_duck_escaped': 'm355', 'refill_ammo': 'm175',
+                      'hand_back_weapons': 'm176'}
+    _LOG_LAUNCH = {'launch': 'm158', 'golden_duck_launch': 'm255'}
+    _LOG_AMMO = {'hit_golden_duck': 'm256', 'miss': 'm162', 'empty_shot': 'm163', 'reload': 'm164',
+                 'jam': 'm165', 'unjam': 'm166', 'unjam_reload': 'm167', 'accident': 'm168',
+                 'wild_fire': 'm172'}
+    _LOG_SHOOT = {'shoot': 'm161', 'shoot_golden_duck': 'm257'}
+    _LOG_TARGET = {'die': 'm169', 'hit': 'm170', 'deflect': 'm171'}
+    _LOG_PLAIN = {'confiscated': 'm173', 'dead_duck': 'm174', 'dead_golden_duck': 'm258',
+                  'dead_fake_duck': 'm360'}
+    _LOG_UNARM = {'perm_unarm': 'm177', 'temp_unarm': 'm178', 'rearm': 'm179'}
+    _LOG_MERGE = {'merge_stats_1': 'm389', 'merge_stats_2': 'm390', 'merge_stats_3': 'm391',
+                  'merge_stats_4': 'm392', 'merge_stats_5': 'm420'}
+
+    def _huntLogPath(self, channel, now):
+        directory = self.registryValue('huntingLogDirectory') or os.path.join(
+            str(conf.supybot.directories.data), 'DuckHuntPro', 'logs')
+        os.makedirs(directory, exist_ok=True)
+        return os.path.join(directory, '%s_%s.log' % (
+            channel.replace('/', '_'), time.strftime('%Y%m%d', time.localtime(now))))
+
+    def _huntLog(self, channel, action, hunter='-', target='-', shootingTime='-', noLF=False,
+                 extra=None, now=None, network=None):
+        """Appends one entry to the channel's hunting log of the day (the
+        file is named after the current date, as in the original). `noLF`
+        leaves the line open for the next entry to continue it. For the
+        actions that show the hunter's ammunition, `network` finds the
+        profile (read after the action, like the original does)."""
+        if not self.registryValue('huntingLogs'):
+            return
+        stamp = time.time() if now is None else now
+        lang = self._lang(channel)
+        t = lambda key, *args: messages.tcl(lang, key, *args)
+        clock = time.strftime('%H:%M:%S', time.localtime(stamp))
+        ammo = clips = ''
+        player = self.db.getPlayer(network, channel, hunter) if network and hunter != '-' else None
+        if action in self._LOG_AMMO or action in self._LOG_SHOOT:
+            if player is not None:
+                lvl = data.LEVELS[data.levelForXp(player['xp'])]
+                copy = {'clip_ammo': player['clip_ammo'], 'clips_left': player['clips_left']}
+                self._ensureAmmo(copy, lvl)
+                strip = lambda s: ircutils.stripFormatting(s).replace('\x0f', '')
+                ammo = strip(self._displayAmmo(copy, lvl, channel))
+                clips = strip(self._displayClips(copy, lvl, channel))
+        if action in self._LOG_TIME_ONLY:
+            line = t(self._LOG_TIME_ONLY[action], clock)
+        elif action in self._LOG_LAUNCH:
+            line = t(self._LOG_LAUNCH[action], clock, hunter)
+        elif action in self._LOG_AMMO:
+            line = t(self._LOG_AMMO[action], clock, hunter, ammo, clips)
+        elif action in self._LOG_SHOOT:
+            killed = player['stats']['killed'] if player is not None else 0
+            line = t(self._LOG_SHOOT[action], clock, hunter, ammo, clips, killed,
+                     messages.plural(killed, t('m27'), t('m28')), shootingTime)
+        elif action in self._LOG_TARGET:
+            line = t(self._LOG_TARGET[action], target)
+        elif action in self._LOG_PLAIN:
+            line = t(self._LOG_PLAIN[action])
+        elif action in self._LOG_UNARM:
+            line = t(self._LOG_UNARM[action], clock, target, hunter)
+        elif action.startswith('item_'):
+            number = int(action[5:])
+            cost = data.ITEM_COSTS[data.SHOP_ITEMS[number - 1]]
+            key = 'm%d' % (300 + number)
+            if number == 10:
+                line = t(key, clock, hunter, extra, cost)
+            elif number in (14, 15, 16, 17):
+                line = t(key, clock, hunter, target, cost)
+            else:
+                line = t(key, clock, hunter, cost)
+        elif action in self._LOG_MERGE:
+            src, dst, resulting = extra
+            line = t(self._LOG_MERGE[action], clock, hunter, src, target, dst, target, resulting)
+        elif action == 'drop':
+            line = t('m419', clock, hunter, extra)
+        else:
+            return
+        with self.db.lock:
+            with open(self._huntLogPath(channel, time.time()), 'a', encoding='utf-8') as f:
+                f.write(line if noLF else line + '\n')
+
+    def _lootName(self, channel, key, value=None):
+        """What the original calls a drop in the hunting log."""
+        t = lambda k, *a: self._t(channel, k, *a)
+        if key in data.XP_BOOK_VALUES:
+            return t('m418', data.XP_BOOK_VALUES[key])
+        if key == 'four_leaf_clover':
+            return t('m417', value)
+        return t({'ammo': 'm407', 'clip': 'm408', 'ap_ammo': 'm409', 'explosive_ammo': 'm410',
+                  'grease': 'm411', 'sight': 'm412', 'infrared_detector': 'm413',
+                  'silencer': 'm414', 'sunglasses': 'm415', 'duck_detector': 'm416'}[key])
+
     @staticmethod
     def _gunValue(player):
         return {'armed': 1, 'confiscated': 0}.get(player['gun_state'], -1)
@@ -405,7 +503,7 @@ class DuckHuntPro(callbacks.Plugin):
         """A profile's numbers in the order the original prints them."""
         st = p['stats']
         best = -1 if st['best_time_ms'] is None else '%.3f' % (st['best_time_ms'] / 1000.0)
-        return '{%s}' % ' '.join(str(x) for x in (
+        return ' '.join(str(x) for x in (
             self._gunValue(p), int(bool(p['jammed'])), p['clip_ammo'], p['clips_left'], p['xp'],
             st['killed'], st['missed'], st['empty_shots'], st['humans_shot'], st['wild_shots'],
             st['bullets_received'], st['deflected'], st['deaths'], st['confiscations'],
@@ -488,20 +586,32 @@ class DuckHuntPro(callbacks.Plugin):
             if enforce and newGun < 1 and oldGun == 1:
                 # the old profile was armed, the new one is not: the old stats are dropped
                 log('m245', nick, oldNick, oldNick, self._statsText(oldP))
+                if warn:
+                    self._huntLog(channel, 'merge_stats_1', oldNick, nick, extra=(
+                        self._statsText(oldP), self._statsText(newP), self._statsText(newP)))
                 self.db.deletePlayer(network, channel, oldNick)
             elif enforce and newGun < 1 and oldGun < 1:
                 # neither is armed: only the profile with more xp survives
                 if newP['xp'] >= oldP['xp']:
                     log('m246', oldNick, self._statsText(oldP))
+                    if warn:
+                        self._huntLog(channel, 'merge_stats_2', oldNick, nick, extra=(
+                            self._statsText(oldP), self._statsText(newP), self._statsText(newP)))
                     self.db.deletePlayer(network, channel, oldNick)
                 else:
                     log('m246', nick, self._statsText(newP))
+                    if warn:
+                        self._huntLog(channel, 'merge_stats_2', oldNick, nick, extra=(
+                            self._statsText(oldP), self._statsText(newP), self._statsText(oldP)))
                     self.db.deletePlayer(network, channel, nick)
                     self.db.renamePlayer(network, channel, oldNick, nick)
             else:
                 log('m102', oldNick, self._statsText(oldP), nick,
-                    self._statsText(newP) if newP is not None else '{}')
+                    self._statsText(newP) if newP is not None else '')
+                before = (self._statsText(oldP), self._statsText(newP) if newP is not None else '')
                 self.db.mergeStats(network, channel, nick, oldNick)
+                self._huntLog(channel, 'merge_stats_4', oldNick, nick, extra=(
+                    before[0], before[1], self._statsText(self.db.getPlayer(network, channel, nick))))
             survivor = self.db.getPlayer(network, channel, nick)
             if survivor is not None:
                 self._clampAmmo(survivor)
@@ -509,6 +619,9 @@ class DuckHuntPro(callbacks.Plugin):
         elif newP is not None:
             # No stats under the old nick: just flag the (re)assignment.
             log('m127', nick, oldNick, nick, self._statsText(newP))
+            if warn:
+                self._huntLog(channel, 'merge_stats_3', oldNick, nick, extra=(
+                    '', self._statsText(newP), self._statsText(newP)))
 
     # -----------------------------------------------------------------
     # Antiflood
@@ -641,13 +754,16 @@ class DuckHuntPro(callbacks.Plugin):
         with self.db.lock:
             for network in self.db.networks():
                 for cname in self.db.channels(network):
-                    for p in self.db.getChannel(network, cname)['players'].values():
+                    players = self.db.getChannel(network, cname)['players']
+                    for p in players.values():
                         if p['clips_left'] is None:
                             continue
                         count = data.LEVELS[data.levelForXp(p['xp'])].clip_count
                         if p['clips_left'] != count:
                             p['clips_left'] = count
                             changed = True
+                    if players:
+                        self._huntLog(cname, 'refill_ammo')
         if changed:
             self.db.save()
         return changed
@@ -671,6 +787,7 @@ class DuckHuntPro(callbacks.Plugin):
 
     def _fireGunHandBack(self, network, channelName):
         self.db.handBackWeapons(network, channelName)
+        self._huntLog(channelName, 'hand_back_weapons')
         if self.registryValue('gunHandBackMode', channelName) == 1:
             self._scheduleGunHandBack(network, channelName)
 
@@ -686,6 +803,7 @@ class DuckHuntPro(callbacks.Plugin):
             return  # other ducks still in flight -- session isn't over
         if self.registryValue('gunHandBackMode', channelName) == 2:
             self.db.handBackWeapons(network, channelName)
+            self._huntLog(channelName, 'hand_back_weapons')
 
     def _sleepHours(self, channelName):
         raw = self.registryValue('duckSleepHours', channelName)
@@ -960,7 +1078,7 @@ class DuckHuntPro(callbacks.Plugin):
         return '\x0314%s\x0f \x02%s\x02   \x0314%s\x0f' % (trail, glyph, cry)
 
     def _spawnDuck(self, irc, channelName, forceNonGolden=False, isFake=False, buyer=None,
-                    forceGolden=False):
+                    forceGolden=False, logSoaring=True):
         key = (irc.network.lower(), channelName.lower())
         ducksPerDay = max(1, self.registryValue('ducksPerDay', channelName))
         goldenPerDay = self.registryValue('approxGoldenDucksPerDay', channelName)
@@ -991,6 +1109,9 @@ class DuckHuntPro(callbacks.Plugin):
         with self.db.lock:
             chan['last_duck_at'] = now
         self.db.save()
+        if logSoaring:      # (a manual launch has its own entry)
+            self._huntLog(channelName, 'golden_duck_soaring' if isGolden else
+                          'fake_duck_soaring' if isFake else 'soaring', now=now)
 
         self._out(irc, channelName, None, self._duckAnnouncement(channelName), 'public')
 
@@ -1013,6 +1134,8 @@ class DuckHuntPro(callbacks.Plugin):
         duck = self._removeDuck(network, channelName, spawnedAt=spawnedAt)
         if duck is None:
             return  # already killed or fled
+        self._huntLog(channelName, 'golden_duck_escaped' if duck['is_golden'] else
+                      'fake_duck_escaped' if duck.get('is_fake') else 'escaped')
         irc = self._getIrc(network)
         if irc:
             # "A ... escapes" while others are still flying, "The ..." for the last.
@@ -1083,6 +1206,7 @@ class DuckHuntPro(callbacks.Plugin):
                     and not duck['is_golden'] and not duck.get('is_fake', False)):
                 self._removeDuck(network, channel, spawnedAt=duck['spawned_at'])
                 fled += 1
+                self._huntLog(channel, 'frightened', now=now)
         return fled
 
     # -----------------------------------------------------------------
@@ -1214,6 +1338,7 @@ class DuckHuntPro(callbacks.Plugin):
             stats['jams'] += 1
             out(t('m8', nick, self._displayAmmo(player, lvl, channel),
                   self._displayClips(player, lvl, channel)) + sabotageMsg + sandMsg)
+            self._huntLog(channel, 'jam', nick, now=now, network=network)
             if sabotage and self.registryValue('kickWhenSabotaged', channel):
                 self._kickIfOpped(irc, channel, nick, t('m338', sabotage.get('value') or '?'))
             return
@@ -1223,6 +1348,7 @@ class DuckHuntPro(callbacks.Plugin):
             stats['empty_shots'] += 1
             out(t('m6', nick, self._displayAmmo(player, lvl, channel),
                   self._displayClips(player, lvl, channel)))
+            self._huntLog(channel, 'empty_shot', nick, now=now, network=network)
             return
         if not duckPresent and db.itemActive(player, 'infrared_detector', now):
             out(t('m290', nick))
@@ -1325,6 +1451,7 @@ class DuckHuntPro(callbacks.Plugin):
             else:
                 penaltyMsg = ''
                 lostXp = abs(xpAccident)
+            self._huntLog(channel, 'accident', nick, noLF=True, now=now, network=network)
 
             lifeMsg = lifeMsg2 = ''
             if db.itemActive(victimPlayer, 'life_insurance', now):
@@ -1341,6 +1468,7 @@ class DuckHuntPro(callbacks.Plugin):
                 confiscationSent = penaltySent = True
                 out(t('m13', nick, victim, victimLvl.deflection, penaltyMsg, xpAccident)
                     + tail, 'public')
+                self._huntLog(channel, 'deflect', nick, victim.lower(), noLF=True, now=now)
                 if (duckPresent and self._activeDuck.get(key)
                         and self._rng.uniform(0, 100) < data.CHANCE_RICOCHET_TOWARDS_DUCK):
                     damage = data.NORMAL_DAMAGE
@@ -1357,6 +1485,7 @@ class DuckHuntPro(callbacks.Plugin):
                 confiscationSent = penaltySent = True
                 out(t('m14', victim, nick, victimLvl.defense, penaltyMsg, xpAccident)
                     + tail, 'public')
+                self._logVictim(channel, 'hit', nick, victim, now)
                 break
             else:
                 victimPlayer['stats']['deaths'] += 1
@@ -1365,6 +1494,7 @@ class DuckHuntPro(callbacks.Plugin):
                     self._kickIfOpped(irc, channel, victim,
                                       t('m15', nick, lostXp) + conf2 + lifeMsg2)
                 out(t('m16', victim, nick, penaltyMsg, xpAccident) + tail, 'public')
+                self._logVictim(channel, 'die', nick, victim, now)
                 break
 
         if not duckPresent:
@@ -1378,10 +1508,15 @@ class DuckHuntPro(callbacks.Plugin):
                 player['gun_state'] = 'confiscated'
                 stats['confiscations'] += 1
                 confiscationMsg = t('m17')
+            confiscated = bool(confiscationMsg)
+            self._huntLog(channel, 'wild_fire', nick, noLF=confiscated, now=now, network=network)
+            if confiscated:
+                self._huntLog(channel, 'confiscated', now=now)
             if not someoneHit:
                 out(t('m18', nick, xpMiss, xpWild) + confiscationMsg)
         elif not someoneHit:
             out(t('m19', nick, xpMiss) + dazzleMsg)
+            self._huntLog(channel, 'miss', nick, now=now, network=network)
         if not duckPresent and self.registryValue('kickOnWildFire', channel):
             self._kickIfOpped(irc, channel, nick, t('m20', xpMiss, xpWild))
         newLevel = data.levelForXp(player['xp'])
@@ -1389,6 +1524,15 @@ class DuckHuntPro(callbacks.Plugin):
             out(t('m2', nick, newLevel, messages.lvl2rank(newLevel, self._lang(channel))),
                 'public')
         return fled
+
+    def _logVictim(self, channel, action, nick, victim, now):
+        """The hunting-log entry that finishes an accident line (the target
+        is written lowercased, as the original does)."""
+        if self.registryValue('gunConfiscationWhenShootingSomeone', channel):
+            self._huntLog(channel, action, nick, victim.lower(), noLF=True, now=now)
+            self._huntLog(channel, 'confiscated', now=now)
+        else:
+            self._huntLog(channel, action, nick, victim.lower(), now=now)
 
     def _resolveDuckHit(self, irc, channel, network, shooterNick, lang, damage, isLucky=False):
         """Port of Duck_Hunt.tcl's hit_a_duck: a hit on the oldest duck.
@@ -1423,6 +1567,7 @@ class DuckHuntPro(callbacks.Plugin):
                     self._out(irc, channel, nick, t('m249', nick, sound, damage))
                 else:
                     self._out(irc, channel, nick, t('m271', nick, sound, damage))
+                self._huntLog(channel, 'hit_golden_duck', nick, now=now, network=network)
                 return
             xpWon = data.BASE_XP_GOLDEN_DUCK * duck['hp_total']
             if isLucky:
@@ -1457,8 +1602,9 @@ class DuckHuntPro(callbacks.Plugin):
         spent = messages.adaptTimeResolution(elapsedMs, True, self._lang(channel))
 
         drop = None
+        loot = []
         if self.registryValue('dropsEnabled', channel):
-            drop = self._rollAndApplyDrop(channel, player, nick, now)
+            drop = self._rollAndApplyDrop(channel, player, nick, now, lootOut=loot)
 
         total = st['killed']
         totalWord = messages.plural(total, t('m27'), t('m28'))
@@ -1483,10 +1629,18 @@ class DuckHuntPro(callbacks.Plugin):
             text = t(mkey, nick, sound, spent, total, totalWord, channel, lvlUp,
                      xpWon) + cloverMsg
         self._out(irc, channel, nick, text, 'public')
+        if not isLucky:
+            self._huntLog(channel, 'shoot_golden_duck' if golden else 'shoot', nick,
+                          shootingTime=spent, now=now, network=network)
+        else:
+            self._huntLog(channel, 'dead_golden_duck' if golden else
+                          'dead_fake_duck' if fake else 'dead_duck', nick,
+                          shootingTime=spent, now=now, network=network)
         if not others:
             self._maybeHandBackOnDuckGone(network, channel)
         if drop:
             self._out(irc, channel, nick, drop, 'public')
+            self._huntLog(channel, 'drop', nick, extra=loot[0], now=now)
         if self.registryValue('voiceWhenDuckShot', channel):
             self._setVoice(irc, channel, shooterNick, True)
 
@@ -1512,10 +1666,11 @@ class DuckHuntPro(callbacks.Plugin):
             return None
         return candidates[self._rng.randint(0, len(candidates) - 1)]
 
-    def _rollAndApplyDrop(self, channel, player, nick, now):
+    def _rollAndApplyDrop(self, channel, player, nick, now, lootOut=None):
         """Rolls the kill drop table (the original's first-success order) and
         applies the winning drop. Returns the announcement, or None on a dry
-        roll (the common case)."""
+        roll (the common case). `lootOut` (a list) receives the drop's name
+        for the hunting log."""
         key = data.rollDrop(self._rng)
         if key is None:
             return None
@@ -1524,7 +1679,12 @@ class DuckHuntPro(callbacks.Plugin):
         self._ensureAmmo(player, lvl)
         if key == 'junk':
             junk = messages.tclList(self._lang(channel), 'm394')
-            return t('m393', nick) + junk[self._rng.randint(0, len(junk) - 1)]
+            item = junk[self._rng.randint(0, len(junk) - 1)]
+            if lootOut is not None:
+                lootOut.append(item)
+            return t('m393', nick) + item
+        if lootOut is not None and key != 'four_leaf_clover':
+            lootOut.append(self._lootName(channel, key))
         if key in data.XP_BOOK_VALUES:
             xp = data.XP_BOOK_VALUES[key]
             player['xp'] += xp
@@ -1552,6 +1712,8 @@ class DuckHuntPro(callbacks.Plugin):
                 'sight': 'm400', 'infrared_detector': 'm401', 'silencer': 'm402',
                 'sunglasses': 'm403', 'duck_detector': 'm404'}.get(key)
         if key == 'four_leaf_clover':
+            if lootOut is not None:
+                lootOut.append(self._lootName(channel, key, value))
             word = messages.plural(value, '%s %s' % (t('m285'), t('m424')),
                                    '%s %s' % (t('m286'), t('m425')))
             return t('m405', nick, value, value, word)
@@ -1598,13 +1760,16 @@ class DuckHuntPro(callbacks.Plugin):
                 player['jammed'] = False
                 if empty and outOfClips:
                     out(t('m31', nick, *counters()))          # unjammed, no ammo left
+                    self._huntLog(channel, 'unjam', nick, now=now, network=network)
                 elif empty:
                     player['clip_ammo'] = lvl.clip_size
                     if not noClipLimit:
                         player['clips_left'] -= 1
                     out(t('m32', nick, *counters()))          # unjammed and reloaded
+                    self._huntLog(channel, 'unjam_reload', nick, now=now, network=network)
                 else:
                     out(t('m33', nick, *counters()))          # just unjammed
+                    self._huntLog(channel, 'unjam', nick, now=now, network=network)
             elif empty:
                 if outOfClips:
                     out(t('m34', nick, *counters()))
@@ -1613,6 +1778,7 @@ class DuckHuntPro(callbacks.Plugin):
                     if not noClipLimit:
                         player['clips_left'] -= 1
                     out(t('m35', nick, *counters()))
+                    self._huntLog(channel, 'reload', nick, now=now, network=network)
             else:
                 out(t('m36', nick, *counters()))              # nothing to do
         finally:
@@ -1877,6 +2043,8 @@ class DuckHuntPro(callbacks.Plugin):
         usesWord = lambda n: messages.plural(n, t('m292'), t('m293'))
         output = None
         charged = False
+        logPurchase = True
+        logExtra = None
 
         def give(p, k, value=None):
             meta = data.ITEM_META[k]
@@ -1925,6 +2093,7 @@ class DuckHuntPro(callbacks.Plugin):
                 if itemNo == 10:
                     bonus = self._rng.randint(data.CLOVER_BONUS_MIN, data.CLOVER_BONUS_MAX)
                     give(player, itemKey, bonus)
+                    logExtra = bonus
                     output = t('m294', nick, cost, plural, bonus, messages.plural(
                         bonus, '%s %s' % (t('m285'), t('m424')), '%s %s' % (t('m286'), t('m425'))))
                 else:
@@ -1981,6 +2150,7 @@ class DuckHuntPro(callbacks.Plugin):
                     # says the target wears them; the buyer pays for nothing.
                     output = t('m325', nick, targetNick, cost, plural)
                     charged = True
+                    logPurchase = False       # the original logs only the successful dazzle
                 else:
                     db.giveItem(targetPlayer, 'mirror_dazzle', now, duration=None,
                                 uses=1, value=player['display_nick'])
@@ -2056,6 +2226,10 @@ class DuckHuntPro(callbacks.Plugin):
         if charged:
             player['xp'] -= cost
             self._clampAmmo(player)
+            if logPurchase:
+                self._huntLog(channel, 'item_%d' % itemNo, nick,
+                              targetNick if itemNo in (14, 15, 16, 17) else '-',
+                              extra=logExtra, now=now)
         newLevel = data.levelForXp(player['xp'])
         if prevLevel > newLevel and output is not None:
             # Tcl appends m280 (not the m2 channel announcement) to the reply.
@@ -2098,16 +2272,20 @@ class DuckHuntPro(callbacks.Plugin):
                 player['stats']['confiscations'] += 1
                 player['gun_state'] = 'confiscated_permanent'
                 out(t('m69', nick, target))
+                self._huntLog(channel, 'perm_unarm', nick, target)
             else:
                 player['gun_state'] = 'confiscated_permanent'
                 out(t('m70', nick, target))
+                self._huntLog(channel, 'perm_unarm', nick, target)
         elif state == 'confiscated_permanent':
             player['gun_state'] = 'confiscated'
             out(t('m128', nick, target))
+            self._huntLog(channel, 'temp_unarm', nick, target)
         elif state == 'armed':
             player['stats']['confiscations'] += 1
             player['gun_state'] = 'confiscated'
             out(t('m129', nick, target))
+            self._huntLog(channel, 'temp_unarm', nick, target)
         else:
             out(t('m130', nick, target))
         self.db.save()
@@ -2134,6 +2312,7 @@ class DuckHuntPro(callbacks.Plugin):
             player['gun_state'] = 'armed'
             out(t('m73', msg.nick, target))
             self.db.save()
+            self._huntLog(channel, 'rearm', msg.nick, target)
     rearm = wrap(rearm, ['channel', optional('somethingWithoutSpaces')])
 
     # -----------------------------------------------------------------
@@ -2231,7 +2410,12 @@ class DuckHuntPro(callbacks.Plugin):
             elif src.lower() == dst.lower():
                 continue                # merging a profile into itself would delete it
             else:
+                before = (self._statsText(self.db.getPlayer(irc.network, chan, src)),
+                          self._statsText(self.db.getPlayer(irc.network, chan, dst)))
                 self.db.mergeStats(irc.network, chan, dst, src)
+                self._huntLog(chan, 'merge_stats_5', src, dst, extra=(
+                    before[0], before[1],
+                    self._statsText(self.db.getPlayer(irc.network, chan, dst))))
                 merged = True
                 notice(self._t(chan, 'm78', dst, src, dst, chan))
         if merged:
@@ -2328,7 +2512,9 @@ class DuckHuntPro(callbacks.Plugin):
         if chan is None:
             return
         golden = len(parts) == 2 and parts[1] == '1'
-        self._spawnDuck(irc, chan, forceGolden=golden, forceNonGolden=not golden)
+        self._huntLog(chan, 'golden_duck_launch' if golden else 'launch', msg.nick)
+        self._spawnDuck(irc, chan, forceGolden=golden, forceNonGolden=not golden,
+                        logSoaring=False)
     ducklaunch = wrap(ducklaunch, [optional('text')])
 
     # The export's columns, in the original's order: (sort key, header message).

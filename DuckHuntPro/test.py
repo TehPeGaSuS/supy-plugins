@@ -29,6 +29,8 @@
 
 import os
 import random
+import shutil
+import tempfile
 import re
 import time
 import urllib.parse
@@ -2942,6 +2944,254 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def testDisabledAntifloodNeverBlocks(self):
         for now in range(1000, 1010):
             self.assertEqual(self._flood('duckstats', 'floodStats', now), (False, []))
+
+    # -----------------------------------------------------------------
+    # Hunting logs (Duck_Hunt.tcl's add_to_log)
+    # -----------------------------------------------------------------
+
+    def _enableLogs(self):
+        directory = tempfile.mkdtemp(prefix='duckhuntlogs')
+        self.addCleanup(shutil.rmtree, directory, True)
+        conf.supybot.plugins.DuckHuntPro.huntingLogs.setValue(True)
+        conf.supybot.plugins.DuckHuntPro.huntingLogDirectory.setValue(directory)
+        return directory
+
+    def _logLines(self, directory):
+        files = os.listdir(directory)
+        self.assertEqual(len(files), 1, files)
+        with open(os.path.join(directory, files[0]), encoding='utf-8') as f:
+            return f.read().split('\n')
+
+    CLOCK = r'\[(\d\d:\d\d:\d\d)\]'
+
+    def _stamped(self, line):
+        """The log line's own clock, to build the expected text around it."""
+        return re.search(self.CLOCK, line).group(1)
+
+    def testHuntingLogsAreOffByDefaultAndWriteNothing(self):
+        directory = tempfile.mkdtemp(prefix='duckhuntlogs')
+        self.addCleanup(shutil.rmtree, directory, True)
+        conf.supybot.plugins.DuckHuntPro.huntingLogDirectory.setValue(directory)
+        self.assertFalse(conf.supybot.plugins.DuckHuntPro.huntingLogs())
+        self._cmd('duckreload', setup=lambda p: self._tidy(p, ammo=1))
+        self.assertEqual(os.listdir(directory), [])
+
+    def testLogFileIsNamedAfterTheChannelAndTheCurrentDate(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        cb._huntLog(self.channel, 'soaring', now=time.time() - 5 * 86400)
+        self.assertEqual(os.listdir(directory),
+                         ['%s_%s.log' % (self.channel, time.strftime('%Y%m%d'))])
+
+    def testShotLineShowsAmmoClipsAndKillCount(self):
+        directory = self._enableLogs()
+        cb = self._putDuck()
+        cb._rng = ScriptedRNG([100, 0])
+        self._cmd('bang', setup=lambda p: self._tidy(p, ammo=6, clips=2))
+        line = self._logLines(directory)[0]
+        lvl = data.LEVELS[data.levelForXp(20)]
+        self.assertRegex(line, r'^ \|-- ' + self.CLOCK + r' %s \(5/%d\|2/%d\)   \*BANG\* \\_X<  \*KWAK\* \(1 duck / [0-9.a-z]+\)$'
+                         % (self.nick, lvl.clip_size, lvl.clip_count))
+
+    def testMissJamEmptyAndReloadLines(self):
+        directory = self._enableLogs()
+        cb = self._putDuck()
+        lvl = data.LEVELS[data.levelForXp(0)]
+        cb._rng = ScriptedRNG([100, 100, 100])               # no jam, miss, no accident
+        self._cmd('bang', setup=lambda p: self._tidy(p, ammo=3, clips=2))
+        cb._rng = ScriptedRNG([0])                           # jams
+        self._cmd('bang')
+        self._cmd('duckreload')                              # unjams (the clip still has rounds)
+        self._cmd('duckreload')                              # nothing to do: not logged
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        text = lambda key, ammo, clips: messages.tcl('en', key, stamp, self.nick, ammo, clips)
+        counts = '%d/%d' % (3 - 1, lvl.clip_size), '2/%d' % lvl.clip_count
+        self.assertEqual(lines, [text('m162', *counts), text('m165', *counts), text('m166', *counts)])
+
+    def testReloadAndEmptyShotLines(self):
+        directory = self._enableLogs()
+        cb = self._putDuck()
+        lvl = data.LEVELS[data.levelForXp(0)]
+        cb._rng = ScriptedRNG([100])
+        self._cmd('bang', setup=lambda p: self._tidy(p, ammo=0, clips=2))          # *CLIC*
+        self._cmd('duckreload')                                                    # *CLAC CLAC*
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines[0], messages.tcl('en', 'm163', stamp, self.nick, '0/%d' % lvl.clip_size,
+                                                '2/%d' % lvl.clip_count))
+        self.assertEqual(lines[1], messages.tcl('en', 'm164', stamp, self.nick, '%d/%d' % (lvl.clip_size, lvl.clip_size),
+                                                '1/%d' % lvl.clip_count))
+
+    def testWildFireAndConfiscationShareALine(self):
+        directory = self._enableLogs()
+        conf.supybot.plugins.DuckHuntPro.gunConfiscationOnWildFire.setValue(True)
+        cb = self._cb()
+        cb._rng = ScriptedRNG([100, 100, 100])               # no jam, no accident
+        self._cmd('bang', setup=lambda p: self._tidy(p, ammo=3, clips=2))
+        lines = [l for l in self._logLines(directory) if l]
+        self.assertEqual(len(lines), 1, lines)
+        stamp = self._stamped(lines[0])
+        lvl = data.LEVELS[data.levelForXp(0)]
+        self.assertEqual(lines[0], messages.tcl('en', 'm172', stamp, self.nick, '2/%d' % lvl.clip_size,
+                                                '2/%d' % lvl.clip_count) + messages.tcl('en', 'm173'))
+
+    def testWildFireWithoutConfiscationIsALineOfItsOwn(self):
+        directory = self._enableLogs()
+        conf.supybot.plugins.DuckHuntPro.gunConfiscationOnWildFire.setValue(False)
+        cb = self._cb()
+        cb._rng = ScriptedRNG([100, 100])
+        self._cmd('bang', setup=lambda p: self._tidy(p, ammo=3, clips=2))
+        self.assertEqual(self._logLines(directory)[1:], [''])
+
+    def testRicochetKillAndDropLines(self):
+        directory = self._enableLogs()
+        cb = self._putDuck()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        self._tidy(player)
+        cb._rng = ScriptedRNG(self._scriptedRollFor('grease'))
+        conf.supybot.plugins.DuckHuntPro.dropsEnabled.setValue(True)
+        cb._resolveDuckHit(self.irc, self.channel, self.irc.network, self.nick, 'en',
+                           data.NORMAL_DAMAGE, isLucky=True)
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[1])
+        self.assertEqual(lines[0], messages.tcl('en', 'm174'))
+        self.assertEqual(lines[1], messages.tcl('en', 'm419', stamp, self.nick, messages.tcl('en', 'm411')))
+
+    def testDropNamesForTheLog(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        for key, expected in (('xp_book_10', messages.tcl('en', 'm418', 10)),
+                              ('ap_ammo', messages.tcl('en', 'm409')),
+                              ('duck_detector', messages.tcl('en', 'm416'))):
+            loot = []
+            cb._rng = ScriptedRNG(self._scriptedRollFor(key))
+            cb._rollAndApplyDrop(self.channel, player, self.nick, time.time(), lootOut=loot)
+            self.assertEqual(loot, [expected])
+        junk = messages.tclList('en', 'm394')
+        loot = []
+        cb._rng = ScriptedRNG(self._scriptedRollFor('junk') + [1])
+        cb._rollAndApplyDrop(self.channel, player, self.nick, time.time(), lootOut=loot)
+        self.assertEqual(loot, [junk[1]])
+
+    def testShopPurchaseLineHasTheCost(self):
+        directory = self._enableLogs()
+        self._cmd('shop 6', setup=lambda p: self._tidy(p, xp=500))
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines, [messages.tcl('en', 'm306', stamp, self.nick, data.ITEM_COSTS['grease'])])
+
+    def testShopTargetedPurchaseNamesTheTarget(self):
+        directory = self._enableLogs()
+        self._cb().db.player(self.irc.network, self.channel, 'bob')
+        self._addOnlineNick('bob')
+        self._cmd('shop 15 bob', setup=lambda p: self._tidy(p, xp=500))
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines, [messages.tcl('en', 'm315', stamp, self.nick, 'bob', data.ITEM_COSTS['sand'])])
+
+    def testRefusedPurchaseIsNotLogged(self):
+        directory = self._enableLogs()
+        self._cmd('shop 6', setup=lambda p: self._tidy(p, xp=0))
+        self.assertEqual(os.listdir(directory), [])
+
+    def testUnarmAndRearmLines(self):
+        directory = self._enableLogs()
+        self._cb().db.player(self.irc.network, self.channel, 'bob')
+        self._cmd('unarm bob')
+        self._cmd('unarm -static bob')
+        self._cmd('unarm bob')                    # a permanent confiscation becomes a temporary one
+        self._cmd('rearm bob')
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines, [messages.tcl('en', 'm178', stamp, 'bob', self.nick),
+                                 messages.tcl('en', 'm177', stamp, 'bob', self.nick),
+                                 messages.tcl('en', 'm178', stamp, 'bob', self.nick),
+                                 messages.tcl('en', 'm179', stamp, 'bob', self.nick)])
+
+    def testSoaringAndEscapeLines(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        cb._rng = ScriptedRNG([100])
+        cb._spawnDuck(self.irc, self.channel)
+        duck = cb._activeDuck[self._key()][0]
+        cb._duckEscapes(self.irc.network, self.channel, duck['spawned_at'])
+        cb._spawnDuck(self.irc, self.channel, isFake=True, forceNonGolden=True)
+        cb._duckEscapes(self.irc.network, self.channel, cb._activeDuck[self._key()][0]['spawned_at'])
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines, [messages.tcl('en', 'm157', stamp), messages.tcl('en', 'm160', stamp),
+                                 messages.tcl('en', 'm352', stamp), messages.tcl('en', 'm355', stamp)])
+
+    def testManualLaunchHasItsOwnLineInsteadOfASoaringOne(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        self._cmd('ducklaunch ' + self.channel)
+        cb._removeDuck(self.irc.network, self.channel)
+        lines = [l for l in self._logLines(directory) if l]
+        self.assertEqual(lines, [messages.tcl('en', 'm158', self._stamped(lines[0]), self.nick)])
+
+    def testScaredDucksAreLoggedOnePerDuck(self):
+        directory = self._enableLogs()
+        conf.supybot.plugins.DuckHuntPro.shotsBeforeDuckFlee.setValue(1)
+        cb = self._putDuck()
+        self._putDuck()
+        player = cb.db.player(self.irc.network, self.channel, self.nick)
+        self.assertEqual(cb._ducksScaring(self.irc.network, self.channel, player, time.time()), 2)
+        lines = [l for l in self._logLines(directory) if l]
+        self.assertEqual(lines, [messages.tcl('en', 'm159', self._stamped(lines[0]))] * 2)
+
+    def testRefillAndHandBackLines(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, 'bob')
+        cb._refillAmmo()
+        cb._fireGunHandBack(self.irc.network, self.channel)
+        lines = [l for l in self._logLines(directory) if l]
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines[:2], [messages.tcl('en', 'm175', stamp), messages.tcl('en', 'm176', stamp)])
+
+    def testStatTransferLines(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        for nick, xp in (('old', 30), ('new', 25)):
+            cb.db.player(self.irc.network, self.channel, nick)['xp'] = xp
+        before = cb._statsText(cb.db.getPlayer(self.irc.network, self.channel, 'old')), \
+            cb._statsText(cb.db.getPlayer(self.irc.network, self.channel, 'new'))
+        self._cmd('duckfusion %s new old' % self.channel)
+        lines = [l for l in self._logLines(directory) if l]
+        after = cb._statsText(cb.db.getPlayer(self.irc.network, self.channel, 'new'))
+        stamp = self._stamped(lines[0])
+        self.assertEqual(lines, [messages.tcl('en', 'm420', stamp, 'old', before[0], 'new', before[1], 'new', after)])
+
+    def testAutomaticMergeLine(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        for nick, xp in (('old', 30), ('new', 25)):
+            cb.db.player(self.irc.network, self.channel, nick)['xp'] = xp
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb._checkPendingRename(self.irc, self.channel, 'new')
+        lines = [l for l in self._logLines(directory) if l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('[Stats transfer]   hunter renaming to hunter: old {', lines[0])
+        self.assertIn(' = new {', lines[0])
+
+    def testEnforcedMergeLinesNeedWarnOnTakeover(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.confiscationEnforcementOnFusion.setValue(True)
+        conf.supybot.plugins.DuckHuntPro.warnOnTakeover.setValue(False)
+        cb.db.player(self.irc.network, self.channel, 'old')
+        cb.db.player(self.irc.network, self.channel, 'new')['gun_state'] = 'confiscated'
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb._checkPendingRename(self.irc, self.channel, 'new')
+        self.assertEqual(os.listdir(directory), [])
+        conf.supybot.plugins.DuckHuntPro.warnOnTakeover.setValue(True)
+        cb.db.player(self.irc.network, self.channel, 'old')
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb._checkPendingRename(self.irc, self.channel, 'new')
+        lines = [l for l in self._logLines(directory) if l]
+        self.assertIn('hunter renaming to unarmed hunter', lines[0])
 
     # -----------------------------------------------------------------
     # Multi-duck (removing the single-duck-per-channel cap)

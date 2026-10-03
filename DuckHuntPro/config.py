@@ -219,6 +219,16 @@ conf.registerGlobalValue(DuckHuntPro, 'autoRefillAmmoTime',
     clips are refilled to their level's count each day (the original script's
     auto_refill_ammo_time)."""))
 
+conf.registerGlobalValue(DuckHuntPro, 'huntingLogs',
+    registry.Boolean(False, """Whether to keep the original's hunting logs: a
+    plain-text trace of everything that happens (flights, shots, reloads,
+    purchases, confiscations, stat transfers), one file per channel and day
+    (the original script's hunting_logs)."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'huntingLogDirectory',
+    registry.String('', """Where the hunting logs go, as <channel>_<yyyymmdd>.log
+    files. Empty means a logs directory under the plugin's data directory."""))
+
 conf.registerGlobalValue(DuckHuntPro, 'backupTime',
     registry.String('00:03', """Local time (HH:MM) at which the database file is
     copied to a .bak file next to it each day (the original script's
