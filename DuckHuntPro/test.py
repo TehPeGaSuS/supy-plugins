@@ -490,6 +490,63 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(sent, [('NOTICE', self.nick, messages.tcl(
             'en', 'm76', 'DuckHuntPro', self.channel))])
 
+    def _bob(self):
+        return self._cb().db.getPlayer(self.irc.network, self.channel, 'bob')
+
+    def _unarmed(self, state):
+        bob = self._cb().db.player(self.irc.network, self.channel, 'bob')
+        bob['gun_state'] = state
+        bob['stats']['confiscations'] = 0
+
+    def testUnarmShowsItsSyntaxWithoutAnArgument(self):
+        self.assertEqual(self._texts(self._cmd('unarm')),
+                         [messages.tcl('en', 'm66', 'unarm')])
+        self.assertEqual(self._texts(self._cmd('rearm')),
+                         [messages.tcl('en', 'm71', 'rearm')])
+
+    def testUnarmAnUnknownNickCreatesNoProfile(self):
+        sent = self._cmd('unarm ghost')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm67', self.nick, 'ghost', self.channel)])
+        self.assertTrue(self._cb().db.getPlayer(self.irc.network, self.channel, 'ghost') is None)
+        sent = self._cmd('rearm ghost')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm67', self.nick, 'ghost', self.channel)])
+
+    def testUnarmTemporarilyCountsOnlyTheFirstConfiscation(self):
+        self._unarmed('armed')
+        self._cmd('unarm bob')
+        self.assertEqual((self._bob()['gun_state'], self._bob()['stats']['confiscations']),
+                         ('confiscated', 1))
+        sent = self._cmd('unarm bob')                       # already disarmed
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm130', self.nick, 'bob')])
+        self.assertEqual(self._bob()['stats']['confiscations'], 1)
+
+    def testUnarmTemporarilyDowngradesAPermanentConfiscation(self):
+        self._unarmed('confiscated_permanent')
+        sent = self._cmd('unarm bob')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm128', self.nick, 'bob')])
+        self.assertEqual(self._bob()['gun_state'], 'confiscated')
+
+    def testUnarmStaticOnEveryStartingState(self):
+        for state, mkey, args, count in (
+                ('armed', 'm69', (self.nick, 'bob'), 1),
+                ('confiscated', 'm70', (self.nick, 'bob'), 0),
+                ('confiscated_permanent', 'm68', (self.nick, 'bob', 'bob'), 0)):
+            self._unarmed(state)
+            sent = self._cmd('unarm -static bob')
+            self.assertEqual(self._texts(sent), [messages.tcl('en', mkey, *args)], state)
+            self.assertEqual(self._bob()['gun_state'], 'confiscated_permanent', state)
+            self.assertEqual(self._bob()['stats']['confiscations'], count, state)
+
+    def testRearmOfAnArmedPlayerIsPuzzling(self):
+        self._unarmed('armed')
+        sent = self._cmd('rearm bob')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm72', 'bob', self.nick)])
+
+    def testRearmRestoresPermanentConfiscationsToo(self):
+        self._unarmed('confiscated_permanent')
+        self._cmd('rearm bob')
+        self.assertEqual(self._bob()['gun_state'], 'armed')
+
     def testReloadClearsJam(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
@@ -1759,22 +1816,23 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testUnarmAndRearmCommands(self):
         cb = self._cb()
-        self.assertNotError('unarm bob')
-        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertEqual(bob['gun_state'], 'confiscated')
-        self.assertNotError('rearm bob')
-        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertEqual(bob['gun_state'], 'armed')
+        cb.db.player(self.irc.network, self.channel, 'bob')
+        sent = self._cmd('unarm bob')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm129', self.nick, 'bob')])
+        self.assertEqual(self._bob()['gun_state'], 'confiscated')
+        sent = self._cmd('rearm bob')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm73', self.nick, 'bob')])
+        self.assertEqual(self._bob()['gun_state'], 'armed')
 
     def testUnarmStaticSurvivesModeBasedHandBack(self):
         cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, 'bob')
         conf.supybot.plugins.DuckHuntPro.gunHandBackMode.setValue(2)
-        self.assertNotError('unarm bob static')
-        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertEqual(bob['gun_state'], 'confiscated_permanent')
+        self.assertEqual(self._texts(self._cmd('unarm -static bob')),
+                         [messages.tcl('en', 'm69', self.nick, 'bob')])
+        self.assertEqual(self._bob()['gun_state'], 'confiscated_permanent')
         cb._maybeHandBackOnDuckGone(self.irc.network, self.channel)
-        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertEqual(bob['gun_state'], 'confiscated_permanent')
+        self.assertEqual(self._bob()['gun_state'], 'confiscated_permanent')
 
     def testBuybackRefusesPermanentConfiscation(self):
         cb = self._cb()

@@ -1810,39 +1810,72 @@ class DuckHuntPro(callbacks.Plugin):
     # Weapon confiscation admin commands
     # -----------------------------------------------------------------
 
-    def unarm(self, irc, msg, args, channel, nick, mode):
-        """<nick> [static] [<channel>]
-        Confiscates <nick>'s weapon. Pass `static` to make it permanent --
-        only `rearm` can undo it, and it survives every auto-hand-back mode.
+    def unarm(self, irc, msg, args, channel, text):
+        """[<channel>] [-static] <nick>
+        Confiscates <nick>'s weapon; it is handed back at the next automatic
+        hand-back. With -static the confiscation is permanent: only `rearm`
+        undoes it and no automatic hand-back mode touches it.
         """
-        static = bool(mode) and mode.lower() == 'static'
-        lang = self.registryValue('language', channel)
-        player = self.db.player(irc.network, channel, nick)
-        newState = 'confiscated_permanent' if static else 'confiscated'
-        if player['gun_state'] == newState:
-            irc.reply(messages.get(lang, 'unarm_already', nick=player['display_nick']))
+        t = lambda k, *a: self._t(channel, k, *a)
+        out = lambda text: self._out(irc, channel, msg.nick, text, 'public')
+        parts = (text or '').split()
+        static = bool(parts) and parts[0].lower() in ('-static', '--static')
+        if static:
+            parts = parts[1:]
+        if not parts:
+            out(t('m66', 'unarm'))
             return
-        player['gun_state'] = newState
-        player['stats']['confiscations'] += 1
+        target = parts[0]
+        self._checkPendingRename(irc, channel, target)
+        player = self.db.getPlayer(irc.network, channel, target)
+        if player is None:
+            out(t('m67', msg.nick, target, channel))
+            return
+        state = player['gun_state']
+        nick = msg.nick
+        if static:
+            if state == 'confiscated_permanent':
+                out(t('m68', nick, target, target))
+            elif state == 'armed':
+                player['stats']['confiscations'] += 1
+                player['gun_state'] = 'confiscated_permanent'
+                out(t('m69', nick, target))
+            else:
+                player['gun_state'] = 'confiscated_permanent'
+                out(t('m70', nick, target))
+        elif state == 'confiscated_permanent':
+            player['gun_state'] = 'confiscated'
+            out(t('m128', nick, target))
+        elif state == 'armed':
+            player['stats']['confiscations'] += 1
+            player['gun_state'] = 'confiscated'
+            out(t('m129', nick, target))
+        else:
+            out(t('m130', nick, target))
         self.db.save()
-        suffix = messages.get(lang, 'unarm_static_suffix') if static else ''
-        irc.reply(messages.get(lang, 'unarm_ok', nick=player['display_nick'], static=suffix))
-    unarm = wrap(unarm, [('checkChannelCapability', 'op'), 'channel',
-                          'somethingWithoutSpaces', optional('somethingWithoutSpaces')])
+    unarm = wrap(unarm, [('checkChannelCapability', 'op'), 'channel', optional('text')])
 
-    def rearm(self, irc, msg, args, channel, nick):
-        """<nick> [<channel>]
-        Force-restores <nick>'s weapon, regardless of confiscation mode.
+    def rearm(self, irc, msg, args, channel, target):
+        """[<channel>] <nick>
+        Gives <nick> their weapon back, whether it was confiscated
+        automatically, temporarily or permanently.
         """
-        lang = self.registryValue('language', channel)
-        player = self.db.getPlayer(irc.network, channel, nick)
-        if not player or player['gun_state'] == 'armed':
-            irc.reply(messages.get(lang, 'rearm_already_armed', nick=nick))
+        t = lambda k, *a: self._t(channel, k, *a)
+        out = lambda text: self._out(irc, channel, msg.nick, text, 'public')
+        if not target:
+            out(t('m71', 'rearm'))
             return
-        player['gun_state'] = 'armed'
-        self.db.save()
-        irc.reply(messages.get(lang, 'rearm_ok', nick=player['display_nick']))
-    rearm = wrap(rearm, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
+        self._checkPendingRename(irc, channel, target)
+        player = self.db.getPlayer(irc.network, channel, target)
+        if player is None:
+            out(t('m67', msg.nick, target, channel))
+        elif player['gun_state'] == 'armed':
+            out(t('m72', target, msg.nick))
+        else:
+            player['gun_state'] = 'armed'
+            out(t('m73', msg.nick, target))
+            self.db.save()
+    rearm = wrap(rearm, [('checkChannelCapability', 'op'), 'channel', optional('somethingWithoutSpaces')])
 
     def _exportPlayers(self):
         lines = ['network\tchannel\tnick\tlevel\txp\tkilled\tgolden_killed']
