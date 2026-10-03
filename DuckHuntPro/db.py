@@ -142,6 +142,29 @@ class Database:
             self.data.setdefault('networks', {})
             self.data.setdefault('pending_transfers', {})
 
+    def importPlayers(self, network, channelName, players, overwrite=False):
+        """Adds converted profiles ({lowernick: player dict}, see tcldb) to a
+        channel. Existing profiles are kept unless `overwrite`. Returns
+        (added, replaced, skipped)."""
+        chan = self.channel(network, channelName)
+        added = replaced = skipped = 0
+        with self.lock:
+            for key, imported in players.items():
+                profile = _newPlayer(imported['display_nick'])
+                profile.update({k: v for k, v in imported.items() if k != 'stats'})
+                profile['stats'].update(imported['stats'])
+                if key in chan['players']:
+                    if not overwrite:
+                        skipped += 1
+                        continue
+                    replaced += 1
+                else:
+                    added += 1
+                chan['players'][key] = profile
+        if added or replaced:
+            self.save()
+        return added, replaced, skipped
+
     def backup(self):
         """Copies the database file to `<file>.bak` (the original's daily
         backup_db). Returns whether there was a file to copy."""

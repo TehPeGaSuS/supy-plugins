@@ -2838,6 +2838,42 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(self._notices('duckexport xp level'),
                          [messages.tcl('en', 'm205', 'duckexport')])
 
+    def _tclDb(self):
+        import tempfile
+        header = '--- Duck Hunt v2.11 ---\n---\n'
+        body = ('%s {alice {gun 1 xp 150 ducks_shot 12 nick Alice current_ammo_clip 4 remaining_ammo_clips 1} '
+                'bob {gun -1 xp 20 nick Bob}} #other {carol {xp 5}}' % self.channel)
+        f = tempfile.NamedTemporaryFile('w', suffix='.db', delete=False, encoding='utf-8')
+        f.write(header + body)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def testDuckimportAddsProfilesAndKeepsExistingOnes(self):
+        cb = self._cb()
+        self._players(alice=999)
+        path = self._tclDb()
+        m = self.assertNotError('duckimport ' + path)
+        self.assertIn('2 channel(s): 2 profile(s) added, 0 replaced, 1 kept', m.args[1])
+        alice = cb.db.getPlayer(self.irc.network, self.channel, 'alice')
+        self.assertEqual(alice['xp'], 999)
+        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
+        self.assertEqual((bob['xp'], bob['gun_state'], bob['display_nick']), (20, 'confiscated_permanent', 'Bob'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, '#other', 'carol')['xp'], 5)
+
+    def testDuckimportOverwrite(self):
+        cb = self._cb()
+        self._players(alice=999)
+        m = self.assertNotError('duckimport %s overwrite' % self._tclDb())
+        self.assertIn('2 profile(s) added, 1 replaced', m.args[1])
+        alice = cb.db.getPlayer(self.irc.network, self.channel, 'alice')
+        self.assertEqual((alice['xp'], alice['stats']['killed'], alice['clip_ammo'], alice['clips_left']),
+                         (150, 12, 4, 1))
+
+    def testDuckimportRejectsABadFileAndABadWord(self):
+        self.assertError('duckimport /nonexistent/player_data.db')
+        self.assertError('duckimport %s please' % self._tclDb())
+
     def testExportOfAnEmptyDatabase(self):
         lines = self._export()
         self.assertIn(messages.tcl('en', 'm208'), lines)
@@ -2954,6 +2990,16 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         conf.supybot.plugins.DuckHuntPro.huntingLogs.setValue(True)
         conf.supybot.plugins.DuckHuntPro.huntingLogDirectory.setValue(directory)
+        # Freeze the clock: a test that straddles a second boundary would
+        # otherwise see two different time stamps.
+        cb, real, frozen = self._cb(), self._cb()._huntLog, time.time()
+
+        def huntLog(*args, **kwargs):
+            if kwargs.get('now') is None:
+                kwargs['now'] = frozen
+            return real(*args, **kwargs)
+        cb._huntLog = huntLog
+        self.addCleanup(lambda: cb.__dict__.pop('_huntLog', None))
         return directory
 
     def _logLines(self, directory):
@@ -3004,10 +3050,11 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self._cmd('duckreload')                              # unjams (the clip still has rounds)
         self._cmd('duckreload')                              # nothing to do: not logged
         lines = [l for l in self._logLines(directory) if l]
-        stamp = self._stamped(lines[0])
-        text = lambda key, ammo, clips: messages.tcl('en', key, stamp, self.nick, ammo, clips)
         counts = '%d/%d' % (3 - 1, lvl.clip_size), '2/%d' % lvl.clip_count
-        self.assertEqual(lines, [text('m162', *counts), text('m165', *counts), text('m166', *counts)])
+        # each line carries its own time stamp (the test can straddle a second)
+        expected = [messages.tcl('en', key, self._stamped(line), self.nick, *counts)
+                    for key, line in zip(('m162', 'm165', 'm166'), lines)]
+        self.assertEqual(lines, expected)
 
     def testReloadAndEmptyShotLines(self):
         directory = self._enableLogs()

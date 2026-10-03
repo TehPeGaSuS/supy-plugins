@@ -14,6 +14,7 @@ import supybot.httpserver as httpserver
 from . import data
 from . import messages
 from . import db
+from . import tcldb
 from .db import Database
 
 try:
@@ -2631,6 +2632,30 @@ class DuckHuntPro(callbacks.Plugin):
         with open(path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
         return path
+
+    def duckimport(self, irc, msg, args, path, overwrite):
+        """<path to player_data.db> [overwrite]
+        Imports the player database of the original Eggdrop Duck Hunt script
+        into this network's channels (global admin only). Profiles that
+        already exist are kept unless you say `overwrite`; expired items are
+        dropped. Run `duckexport` first if in doubt: there is no undo besides
+        the daily .bak copy."""
+        try:
+            channels = tcldb.loadFile(path)
+        except (OSError, tcldb.TclParseError) as e:
+            irc.error('Could not read %s: %s' % (path, e), Raise=True)
+        keep = overwrite is not None and overwrite.lower() == 'overwrite'
+        if overwrite is not None and not keep:
+            irc.errorInvalid('argument', overwrite, Raise=True)
+        now = time.time()
+        totals = [0, 0, 0]
+        for channel, players in channels.items():
+            counts = self.db.importPlayers(irc.network, channel,
+                                           tcldb.convertChannel(players, now), keep)
+            totals = [a + b for a, b in zip(totals, counts)]
+        irc.reply('Imported %d channel(s): %d profile(s) added, %d replaced, %d kept as they were.'
+                  % (len(channels), *totals))
+    duckimport = wrap(duckimport, ['admin', 'filename', optional('somethingWithoutSpaces')])
 
     def duckexport(self, irc, msg, args, sortBy):
         """[<sort criterion>]
