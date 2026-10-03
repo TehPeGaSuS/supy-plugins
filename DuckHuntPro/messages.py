@@ -205,6 +205,19 @@ MESSAGES = {
 
         'fusion_merged': "{old}'s stats have been merged into {new} (nick change).",
     },
+    # The plugin's own additions to the original (the season features); the
+    # original's messages themselves are in tclmessages.py, in both languages.
+    'fr': {
+        'shooters_header': 'Meilleurs chasseurs :',
+        'shooters_line': '#{rank} {nick} -- niveau {level}, {xp} xp, {killed} tué(s)',
+        'shooters_empty': "Personne n'a encore abattu de canard ici.",
+        'champions_header': 'Champions de la saison terminée le {when} :',
+        'champions_line': '#{rank} {nick} -- {xp} xp, {killed} tué(s)',
+        'champions_empty': "Aucune remise à zéro trimestrielle n'a encore eu lieu ici.",
+        'quarterly_reset': ("Une nouvelle saison de chasse commence ! Le classement a été "
+                             "archivé -- voir 'duckchampions' pour les meilleurs chasseurs "
+                             "de la saison précédente."),
+    },
 }
 
 JUNK_FLAVORS = (

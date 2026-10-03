@@ -1821,6 +1821,15 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             ircdb.checkCapability = real
             del state.nickToHostmask
 
+    def testSeasonCommandsSpeakFrenchToo(self):
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertEqual(self._texts(self._cmd('duckshooters')),
+                         [self.nick + ': ' + messages.get('fr', 'shooters_empty')])
+        self.assertEqual(self._texts(self._cmd('duckchampions')),
+                         [self.nick + ': ' + messages.get('fr', 'champions_empty')])
+        self.assertIn('Meilleurs', messages.get('fr', 'shooters_header'))
+        self.assertNotEqual(messages.get('fr', 'quarterly_reset'), messages.get('en', 'quarterly_reset'))
+
     def testKillingOneOfSeveralDucksSaysOneOfTheDucks(self):
         self._putDuck()
         self._putDuck()

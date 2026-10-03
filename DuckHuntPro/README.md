@@ -240,9 +240,12 @@ Rolled in this order; the first success wins, so later drops are effectively rar
 
 ## Languages
 
-Messages are the original's catalogues (`tclmessages.py`, generated from
-`en.utf8`/`fr.utf8`: do not edit by hand). Set a channel's `language` to `en`
-or `fr`.
+English and French, as in the original. Set a channel's `language` to `en` or
+`fr`. The original's messages are in `tclmessages.py` (generated from
+`en.utf8`/`fr.utf8` by a script: do not edit by hand). `messages.py` holds the
+few strings the plugin adds itself (`duckshooters`, `duckchampions`, the
+quarterly-reset announcement), with an `en` and a `fr` entry each; most of its
+English dictionary is left over from the first version and no longer used.
 
 ## Known differences from the Tcl script
 
