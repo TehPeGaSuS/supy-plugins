@@ -452,7 +452,8 @@ class GitHooks(callbacks.Plugin):
                 format_ = conf_('format.%s.%s' % (event, payload.get('action')))
                 if format_.strip() == 'ignore':
                     return
-            self.plugin.last_payloads[event] = payload
+            if event != 'before.push':
+                self.plugin.last_payloads[event] = payload
             global_ = ''
             base = event.split('.')[0]
             if not format_.strip() and \
@@ -766,8 +767,9 @@ class GitHooks(callbacks.Plugin):
             irc.reply(_('Events seen since I started: %s. Use "vars <event> '
                         '[<pattern>]" to see their variables. Friendly names '
                         'available everywhere: $repo $owner $name $user '
-                        '$what $action $ref $number $title $body $url '
-                        '$branch $label $assignee $tag $forge.') %
+                        '$what $kind $verb $action $ref $number $title '
+                        '$body $url $branch $label $assignee $tag $count '
+                        '$forge.') %
                       (', '.join(seen) or _('none yet')))
             return
         payload = self.last_payloads.get(event)
@@ -781,7 +783,9 @@ class GitHooks(callbacks.Plugin):
         friendly = sorted(_global_vars(event, payload))
         names = sorted((k for (k, val) in repl.items()
                         if isinstance(val, (str, int, float, bool))
-                        and '__' not in k.strip('_')
+                        and '__' not in k and not k.startswith('_')
+                        and (not k.endswith('_firstline') or
+                             'firstline' in (pattern or ''))
                         and (not pattern or pattern.lower() in k.lower())),
                        key=lambda k: (k not in friendly, k))
         limit = 40

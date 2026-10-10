@@ -466,6 +466,8 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
         self.assertRegexp('githooks vars', 'issues')
         self.assertRegexp('githooks vars issues', r'\$repo=bob/proj.*\$title=It broke')
         self.assertRegexp('githooks vars issues issue_number', r'\$issue_number=7')
+        self.assertNotRegexp('githooks vars issues', r'_firstline|\$__')
+        self.assertRegexp('githooks vars issues firstline', r'_firstline=')
 
     def testDocumentedPushVariables(self):
         fmt = ('$commit_id_short|$commit_message_firstline|$commit_author_name|'
