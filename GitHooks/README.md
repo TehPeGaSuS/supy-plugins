@@ -104,7 +104,7 @@ mIRC and most others) and paste the result in.
 |---|---|
 | `$forge` | GitHub, Gitea, Forgejo or Gogs |
 | `$repo` `$owner` `$name` | `owner/name`, owner, name |
-| `$user` | who did it (the commit author, for pushes) |
+| `$user` | who did it (for pushes, the commit author's login) |
 | `$what` | ready phrase, e.g. "opened issue #3", "committed" |
 | `$kind` `$verb` | `issue`/`PR`/`commit`... and `opened`/`commented on`/`merged`... |
 | `$action` | the raw action (opened, closed, labeled...) |

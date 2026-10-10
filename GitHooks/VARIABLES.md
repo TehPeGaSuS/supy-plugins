@@ -87,7 +87,7 @@ What they contain depends on the event:
 | `watch` / `star` | `starred` | | the repository | the repository |
 
 `$user` is the person who triggered the event. The exceptions are pushes,
-where it is the commit author, and reviews, where it is the reviewer.
+where it is the commit author's login (the git name if the forge sends no login), and reviews, where it is the reviewer.
 A merged pull request has the action `merged` instead of `closed`. When the
 forge doesn't send a link (Gogs has no issue or pull request URLs), the plugin
 builds it from the repository URL.

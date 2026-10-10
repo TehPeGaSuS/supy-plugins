@@ -363,7 +363,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
         with conf.supybot.plugins.GitHooks.format.get('global').context(fmt):
             self.cb.announce.onPayload({'x-gogs-event': 'push'}, GITEA_PUSH)
             self.assertResponse(
-                ' ', 'bob/proj/main Alice aaaaaaa Fix it '
+                ' ', 'bob/proj/main alice aaaaaaa Fix it '
                 'https://git.example/bob/proj/commit/aaa')
 
     def testAliases(self):
@@ -401,7 +401,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             self.cb.announce.onPayload({'X-Gitea-Event': 'push'},
                                        dict(GITEA_PUSH, commits=commits))
             self.assertResponse(
-                ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 \x02Alice\x02 '
+                ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 \x02alice\x02 '
                 '\x0313aaaaaaa\x03 - c0 - https://git.example/bob/proj/commit/aaa')
             self.assertResponse(
                 ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 '
@@ -418,7 +418,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
         with g.context('GLOBAL $title'), g.get('push').context(
                 '$user pushed $ref to $branch: $title'):
             self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
-            self.assertResponse(' ', 'Alice pushed aaaaaaa to main: Fix it')
+            self.assertResponse(' ', 'alice pushed aaaaaaa to main: Fix it')
             self.cb.announce.onPayload({'X-Gitea-Event': 'issues'},
                                        GITEA_ISSUE)
             self.assertResponse(' ', 'GLOBAL It broke')
@@ -491,7 +491,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             'https://git.example/pr/9')
         self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
         self.assertResponse(
-            ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 \x02Alice\x02 '
+            ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 \x02alice\x02 '
             'pushed \x0313aaaaaaa\x03 to \x0307main\x03: Fix it - '
             'https://git.example/bob/proj/commit/aaa')
         comment = dict(GITEA_ISSUE, action='created',
@@ -526,6 +526,16 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
         for i in range(2):
             self.assertRegexp(' ', r'pushed .* to .*main.*: c%d - ' % i)
         self.assertNoResponse(' ')
+
+    def testPushUserFallsBackToAuthorName(self):
+        commit = dict(GITEA_PUSH['commits'][0], author={'name': 'Al Ice'})
+        push = dict(GITEA_PUSH, commits=[commit])
+        with conf.supybot.plugins.GitHooks.format.get('global').context('$user'):
+            self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, push)
+            self.assertResponse(' ', 'Al Ice')
+            commit['author'] = {}
+            self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, push)
+            self.assertResponse(' ', 'alice')  # the sender's login
 
     def testUnknownEventIgnored(self):
         self.cb.announce.onPayload({'X-Gitea-Event': 'whatever'}, GITEA_ISSUE)

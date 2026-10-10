@@ -278,13 +278,15 @@ def _global_vars(event, payload):
         v['branch'] = ref.split('/', 2)[2]
     if event == 'push.summary':
         pusher = payload.get('pusher') or {}
-        v.update(user=pusher.get('name') or pusher.get('login') or
-                 pusher.get('username') or v['user'],
+        v.update(user=v['user'] or pusher.get('login') or
+                 pusher.get('username') or pusher.get('name') or '',
                  what='pushed %s commits' % len(payload.get('commits', ())),
                  url=payload.get('compare') or payload.get('compare_url', ''))
     elif event in ('push', 'push.commit'):
         c = payload['__commit']
-        v.update(user=c.get('author', {}).get('name', v['user']),
+        a = c.get('author') or {}
+        v.update(user=a.get('username') or a.get('login') or a.get('name') or
+                 v['user'],
                  what='committed', ref=c['id'][:7],
                  title=c['message'].split('\n', 1)[0], url=c['url'])
     elif event == 'push.hidden':
