@@ -500,6 +500,31 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             '\x02alice\x02 commented on \x0313#7\x03: It broke - '
             'https://git.example/c')
 
+    def testBigPushLikeGitBot(self):
+        commits = [dict(GITEA_PUSH['commits'][0], id=ch * 40, message='c%d' % i,
+                        url='https://git.example/c/%d' % i)
+                   for (i, ch) in enumerate('abcde')]
+        push = dict(GITEA_PUSH, commits=commits,
+                    pusher={'login': 'alice'},
+                    compare_url='https://git.example/compare/x...y')
+        pre = '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 '
+        self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, push)
+        self.assertResponse(
+            ' ', pre + '\x02alice\x02 pushed 5 commits to \x0307main\x03 - '
+            'https://git.example/compare/x...y')
+        for i, ch in enumerate('abc'):
+            self.assertResponse(
+                ' ', pre + '\x0313%s\x03 - c%d - https://git.example/c/%d' %
+                (ch * 7, i, i))
+        self.assertResponse(' ', pre + '(+2 hidden commits)')
+        self.assertNoResponse(' ')
+        # a small push: one full line per commit, no summary
+        self.cb.announce.onPayload({'X-Gitea-Event': 'push'},
+                                   dict(push, commits=commits[:2]))
+        for i in range(2):
+            self.assertRegexp(' ', r'pushed .* to .*main.*: c%d - ' % i)
+        self.assertNoResponse(' ')
+
     def testUnknownEventIgnored(self):
         self.cb.announce.onPayload({'X-Gitea-Event': 'whatever'}, GITEA_ISSUE)
         self.assertNoResponse(' ')

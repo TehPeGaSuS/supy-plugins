@@ -184,6 +184,12 @@ class GithubCallback(httpserver.SupyHTTPServerCallback):
 # API access stuff
 #####################
 
+PUSH_TEMPLATES = {
+    'push': ('format.global.push', config.DEFAULT_GLOBAL_PUSH),
+    'push.summary': ('format.global.push.summary', config.DEFAULT_PUSH_SUMMARY),
+    'push.commit': ('format.global.push.commit', config.DEFAULT_PUSH_COMMIT),
+}
+
 COMMENT_VERBS = {'created': 'commented on', 'edited': 'edited a comment on',
                  'deleted': 'deleted a comment on'}
 
@@ -193,9 +199,9 @@ def _kind_and_verb(v, event, payload):
     action = v['action'].replace('_', ' ')
     if action in ('synchronize', 'synchronized'):
         action = 'updated'
-    if event == 'push':
+    if event in ('push', 'push.summary'):
         v.update(kind='push', verb='pushed')
-    elif event == 'push.hidden':
+    elif event in ('push.commit', 'push.hidden'):
         v.update(kind='push')
     elif event in ('issues', 'issue_comment'):
         i = payload['issue']
@@ -258,17 +264,25 @@ def _global_vars(event, payload):
         'what': event, 'ref': '', 'title': '', 'url': '', 'branch': '',
         'forge': payload.get('__forge', 'Git'), 'hidden': '',
         'number': '', 'body': '', 'label': '', 'assignee': '', 'tag': '',
-        'kind': event, 'verb': '',
+        'kind': event, 'verb': '', 'count': '',
     }
     for (key, path) in (('label', ('label', 'name')),
                         ('assignee', ('assignee', 'login'))):
         obj = payload.get(path[0])
         if isinstance(obj, dict):
             v[key] = obj.get(path[1]) or ''
+    if isinstance(payload.get('commits'), list):
+        v['count'] = len(payload['commits'])
     ref = payload.get('ref')
     if isinstance(ref, str) and ref.count('/') >= 2:
         v['branch'] = ref.split('/', 2)[2]
-    if event == 'push':
+    if event == 'push.summary':
+        pusher = payload.get('pusher') or {}
+        v.update(user=pusher.get('name') or pusher.get('login') or
+                 pusher.get('username') or v['user'],
+                 what='pushed %s commits' % len(payload.get('commits', ())),
+                 url=payload.get('compare') or payload.get('compare_url', ''))
+    elif event in ('push', 'push.commit'):
         c = payload['__commit']
         v.update(user=c.get('author', {}).get('name', v['user']),
                  what='committed', ref=c['id'][:7],
@@ -446,14 +460,25 @@ class GitHooks(callbacks.Plugin):
                 global_ = conf_('format.global')
                 if global_.strip() and event == 'push.hidden':
                     global_ = conf_('format.global.hidden') or global_
-                elif global_.strip() and event == 'push':
-                    push = conf_('format.global.push')
+                elif global_.strip() and event in PUSH_TEMPLATES:
+                    name, default = PUSH_TEMPLATES[event]
+                    tmpl = conf_(name)
                     # changing format.global also replaces the default push
-                    # line, unless format.global.push was set as well
-                    if push.strip() and not (
-                            push == config.DEFAULT_GLOBAL_PUSH and
-                            global_ != config.DEFAULT_GLOBAL):
-                        global_ = push
+                    # lines, unless the push templates were set as well
+                    untouched = tmpl == default and \
+                        global_ != config.DEFAULT_GLOBAL
+                    if event == 'push.summary':
+                        global_ = '' if untouched else tmpl
+                    elif tmpl.strip() and not untouched:
+                        global_ = tmpl
+                    elif event == 'push.commit':
+                        # fall back to the single-commit push template if
+                        # that one was customized
+                        tmpl = conf_('format.global.push')
+                        if tmpl.strip() and tmpl != config.DEFAULT_GLOBAL_PUSH:
+                            global_ = tmpl
+                    if not global_.strip():
+                        return
                 if global_.strip():
                     format_ = global_
             if not format_.strip():
@@ -553,9 +578,14 @@ class GitHooks(callbacks.Plugin):
 
                     self._createPrivmsg(irc, channel, payload2, 'before.push')
 
+                    if hidden:
+                        # big push: one summary line, then shortened commits
+                        self._createPrivmsg(irc, channel, payload2,
+                                'push.summary')
                     for commit in commits:
                         payload2['__commit'] = commit
-                        self._createPrivmsg(irc, channel, payload2, 'push')
+                        self._createPrivmsg(irc, channel, payload2,
+                                'push.commit' if hidden else 'push')
 
                     if hidden:
                         payload2['__hidden_commits'] = hidden

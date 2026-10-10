@@ -22,9 +22,13 @@ The defaults already give GitBot-style lines. They are:
 ```
 format.global       ^C03[$forge]^C ^C14($repo)^C [$kind] ^B$user^B $verb ^C13$ref^C: $title - $url
 format.global.push  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed ^C13$ref^C to ^C07$branch^C: $title - $url
-format.global.hidden  ^C03[$forge]^C ^C14($repo)^C (+$hidden hidden commits)
+format.global.push.summary  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed $count commits to ^C07$branch^C - $url
+format.global.push.commit   ^C03[$forge]^C ^C14($repo)^C ^C13$ref^C - $title - $url
+format.global.hidden        ^C03[$forge]^C ^C14($repo)^C (+$hidden hidden commits)
 ```
 
+The `push` template is used for pushes up to `max_announce_commits`; bigger
+pushes get `push.summary`, then shortened `push.commit` lines, then `hidden`.
 (`^C` is the colour code, Ctrl+K, and `^B` is bold, Ctrl+B.) To make your own:
 
 ```
@@ -64,6 +68,7 @@ everywhere:
 | `$branch` | branch of a push, or of a created/deleted branch |
 | `$label` `$assignee` | for labeled and assigned events |
 | `$tag` | tag of a release |
+| `$count` | number of commits in the push |
 | `$hidden` | number of hidden commits (only on the hidden-commits line) |
 
 What they contain depends on the event:
@@ -216,6 +221,9 @@ The defaults (GitBot style) give, for example:
 ```
 [GitHub] (bob/proj) alice pushed 3154423 to main: Fix crash on empty config - https://github.com/bob/proj/commit/3154423facdc7041d731fad3b5b57ac887a2ad66
 [GitHub] (bob/proj) [issue] carol opened #7: It broke - https://github.com/bob/proj/issues/7
+[GitHub] (bob/proj) alice pushed 6 commits to main - https://github.com/bob/proj/compare/16c0988...098dbc7
+[GitHub] (bob/proj) 3154423 - Fix crash on empty config - https://github.com/bob/proj/commit/3154423
+[GitHub] (bob/proj) (+3 hidden commits)
 ```
 
 Announcing releases and new branches as well:

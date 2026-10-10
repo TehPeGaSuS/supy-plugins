@@ -81,6 +81,10 @@ DEFAULT_GLOBAL = ('\x0303[$forge]\x03 \x0314($repo)\x03 [$kind] '
 DEFAULT_GLOBAL_PUSH = ('\x0303[$forge]\x03 \x0314($repo)\x03 '
                        '\x02$user\x02 pushed \x0313$ref\x03 to '
                        '\x0307$branch\x03: $title - $url')
+DEFAULT_PUSH_SUMMARY = ('\x0303[$forge]\x03 \x0314($repo)\x03 \x02$user\x02 '
+                        'pushed $count commits to \x0307$branch\x03 - $url')
+DEFAULT_PUSH_COMMIT = ('\x0303[$forge]\x03 \x0314($repo)\x03 '
+                       '\x0313$ref\x03 - $title - $url')
 conf.registerChannelValue(GitHooks.format, 'global',
         registry.String(DEFAULT_GLOBAL,
         _("""Plain-text template used for push, issue, pull request and
@@ -105,6 +109,18 @@ conf.registerChannelValue(GitHooks.format.get('global'), 'push',
         you changed format.global and left this one alone, format.global is
         used. Example: $user pushed $ref to $branch: $title
         - $url""")))
+conf.registerChannelValue(GitHooks.format.get('global').get('push'), 'summary',
+        registry.String(DEFAULT_PUSH_SUMMARY,
+        _("""Plain-text template of the line announcing a push with more commits
+        than max_announce_commits, sent before the commit lines. $count is the
+        number of commits and $url the compare link. Empty disables it. Not
+        used when you changed format.global and left this one alone.""")))
+conf.registerChannelValue(GitHooks.format.get('global').get('push'), 'commit',
+        registry.String(DEFAULT_PUSH_COMMIT,
+        _("""Plain-text template of each commit line of a push with more commits
+        than max_announce_commits (the commits are then shortened to
+        "hash - message"). If empty, or if you changed format.global and left
+        this one alone, format.global.push or format.global is used.""")))
 conf.registerChannelValue(GitHooks.format.get('global'), 'hidden',
         registry.String('\x0303[$forge]\x03 \x0314($repo)\x03 '
         '(+$hidden hidden commits)',

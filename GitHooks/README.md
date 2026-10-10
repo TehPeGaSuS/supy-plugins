@@ -66,14 +66,26 @@ Out of the box, GitHooks announces in the style of the GitBot IRC bot, with
 colours:
 
 ```
-[GitHub] (bob/proj) alice pushed 3154423 to main: Fix the thing - https://github.com/.../commit/3154423
+[GitHub] (bob/proj) alice pushed 3154423 to main: Fix crash on empty config - https://github.com/.../commit/3154423
 [GitHub] (bob/proj) [issue] carol opened #7: It broke - https://github.com/.../issues/7
-[Gitea] (bob/proj) [PR] carol merged #9: Add x - https://git.example/bob/proj/pulls/9
+[Gitea] (bob/proj) [PR] dave merged #9: Add x - https://git.example/bob/proj/pulls/9
+```
+
+A push with more commits than `max_announce_commits` (3 by default) is
+shortened:
+
+```
+[GitHub] (bob/proj) alice pushed 6 commits to main - https://github.com/bob/proj/compare/16c0988...098dbc7
+[GitHub] (bob/proj) 3154423 - Fix crash on empty config - https://github.com/.../commit/3154423
+[GitHub] (bob/proj) b6cd4a2 - Add optional reason field - https://github.com/.../commit/b6cd4a2
+[GitHub] (bob/proj) b8c5f46 - Include the spamfilter - https://github.com/.../commit/b8c5f46
 [GitHub] (bob/proj) (+3 hidden commits)
 ```
 
-That is `format.global` (every event but pushes), `format.global.push` (each
-commit of a push) and `format.global.hidden` (the "more commits" line). To change
+Those are `format.global` (every event but pushes), `format.global.push` (each
+commit of a small push), `format.global.push.summary` and `.push.commit` (the
+first line and the commit lines of a big push) and `format.global.hidden` (the
+"more commits" line). To change
 the look, set them to your own plain-text template:
 
 ```
