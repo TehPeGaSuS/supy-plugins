@@ -66,8 +66,10 @@ For the common events you can skip the `echo`/`cif` templates entirely and set
 one plain-text template:
 
 ```
-@config supybot.plugins.GitHooks.format.global <your template>
+@config supybot.plugins.GitHooks.format.global "<your template>"
 ```
+
+Keep the double quotes: Limnoria runs anything in `[...]` as a nested command.
 
 Type the colour codes straight from your IRC client (Ctrl+K, Ctrl+B, Ctrl+O in
 mIRC and most others) and paste the result in.

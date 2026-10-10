@@ -18,8 +18,13 @@ need.
 ## Quick start
 
 ```
-@config supybot.plugins.GitHooks.format.global [$forge] ($repo) $user $action $ref - $title - $url
+@config supybot.plugins.GitHooks.format.global "[$forge] ($repo) $user $action $ref - $title - $url"
 ```
+
+**Put the template in double quotes.** Spaces are fine without them, but
+Limnoria treats `[...]` as a nested command, so an unquoted `[$forge]` fails
+with `"$forge" is not a valid command`. Quoting always works, colour codes
+included.
 
 Colour and bold codes are typed straight from your IRC client (Ctrl+K, Ctrl+B,
 Ctrl+O in mIRC and most others), so you can set the format from your client
@@ -185,6 +190,8 @@ only since the bot last started.
   `echo ...` commands, see the README, and use the same variable names.
 
 ## Ready-made templates
+
+Set them with `@config supybot.plugins.GitHooks.<setting> "<template>"`.
 
 Minimal:
 
