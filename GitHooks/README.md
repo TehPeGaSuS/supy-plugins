@@ -62,14 +62,28 @@ see announced on IRC, using bold formatting and no colors; but this can be tweak
 
 ### Simple global format
 
-For the common events you can skip the `echo`/`cif` templates entirely and set
-one plain-text template:
+Out of the box, GitHooks announces in the style of the GitBot IRC bot, with
+colours:
+
+```
+[GitHub] (bob/proj) alice pushed 3154423 to main: Fix the thing - https://github.com/.../commit/3154423
+[GitHub] (bob/proj) [issue] carol opened #7: It broke - https://github.com/.../issues/7
+[Gitea] (bob/proj) [PR] carol merged #9: Add x - https://git.example/bob/proj/pulls/9
+[GitHub] (bob/proj) (+3 hidden commits)
+```
+
+That is `format.global` (every event but pushes), `format.global.push` (each
+commit of a push) and `format.global.hidden` (the "more commits" line). To change
+the look, set them to your own plain-text template:
 
 ```
 @config supybot.plugins.GitHooks.format.global "<your template>"
 ```
 
 Keep the double quotes: Limnoria runs anything in `[...]` as a nested command.
+If you change `format.global` and leave `format.global.push` alone, pushes use
+your `format.global` too. Set `format.global` to empty to go back to the older
+per-event `echo` formats described below.
 
 Type the colour codes straight from your IRC client (Ctrl+K, Ctrl+B, Ctrl+O in
 mIRC and most others) and paste the result in.
@@ -80,6 +94,7 @@ mIRC and most others) and paste the result in.
 | `$repo` `$owner` `$name` | `owner/name`, owner, name |
 | `$user` | who did it (the commit author, for pushes) |
 | `$what` | ready phrase, e.g. "opened issue #3", "committed" |
+| `$kind` `$verb` | `issue`/`PR`/`commit`... and `opened`/`commented on`/`merged`... |
 | `$action` | the raw action (opened, closed, labeled...) |
 | `$ref` | `#3`, short commit id, tag or branch name |
 | `$number` `$title` `$body` | issue/PR number, title, first line of the text |
@@ -89,14 +104,6 @@ mIRC and most others) and paste the result in.
 
 The raw payload variables (`$issue__title`, `$issue_title`) also work.
 Empty variables don't leave double spaces.
-
-Example, in the style of the [GitBot](https://github.com/TehPeGaSuS/GitBot) bot
-(`^C` = Ctrl+K, `^B` = Ctrl+B):
-
-```
-format.global       ^C03[$forge]^C ^C14($repo)^C ^B$user^B $action ^C13$ref^C - $title - $url
-format.global.push  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed ^C13$ref^C to ^C07$branch^C: $title - $url
-```
 
 More settings:
 * `format.global.push`: template for each commit of a push (falls back to

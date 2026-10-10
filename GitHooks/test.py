@@ -30,9 +30,14 @@
 
 from supybot.test import *
 
-DEFAULT_ISSUE_ANNOUNCE = '''progval/\x02Supybot-plugins\x02: \x02progval\x02
+LEGACY_ISSUE_ANNOUNCE = '''progval/\x02Supybot-plugins\x02: \x02progval\x02
 opened issue #350: \x02GitHub: Add config var for each issue/PR action\x02
 https://github.com/progval/Supybot-plugins/issues/350'''.replace('\n', ' ')
+DEFAULT_ISSUE_ANNOUNCE = (
+    '\x0303[GitHub]\x03 \x0314(progval/Supybot-plugins)\x03 [issue] '
+    '\x02progval\x02 opened \x0313#350\x03: '
+    'GitHub: Add config var for each issue/PR action - '
+    'https://github.com/progval/Supybot-plugins/issues/350')
 ISSUE_EVENT = {
   "action": "opened",
   "issue": {
@@ -285,6 +290,21 @@ class GitHooksTestCase(ChannelPluginTestCase):
                     'githooks announce remove %s progval Supybot-plugins' %
                     self.channel)
 
+    def testLegacyFormats(self):
+        self.assertNotError(
+                'githooks announce add %s progval Supybot-plugins' %
+                self.channel)
+        try:
+            with conf.supybot.plugins.GitHooks.format.get('global').context(''):
+                cb = self.irc.getCallback('GitHooks')
+                cb.announce.onPayload({'X-GitHub-Event': 'issues'},
+                                      ISSUE_EVENT)
+                self.assertResponse(' ', LEGACY_ISSUE_ANNOUNCE)
+        finally:
+            self.assertNotError(
+                    'githooks announce remove %s progval Supybot-plugins' %
+                    self.channel)
+
     def testIgnoreIssueAction(self):
         self.assertNotError(
                 'githooks announce add %s progval Supybot-plugins' %
@@ -455,6 +475,30 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             self.assertResponse(
                 ' ', 'aaaaaaa|Fix it|Alice|1|0|main|'
                 'https://git.example/bob/proj/commit/aaa')
+
+    def testDefaultsLikeGitBot(self):
+        # nothing configured: GitBot-style lines
+        pr = {'action': 'opened', 'repository': GITEA_REPO,
+              'sender': {'login': 'alice'},
+              'pull_request': {'number': 9, 'title': 'Add x',
+                               'html_url': 'https://git.example/pr/9'}}
+        self.cb.announce.onPayload({'X-Gitea-Event': 'pull_request'}, pr)
+        self.assertResponse(
+            ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 [PR] '
+            '\x02alice\x02 opened \x0313#9\x03: Add x - '
+            'https://git.example/pr/9')
+        self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
+        self.assertResponse(
+            ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 \x02Alice\x02 '
+            'pushed \x0313aaaaaaa\x03 to \x0307main\x03: Fix it - '
+            'https://git.example/bob/proj/commit/aaa')
+        comment = dict(GITEA_ISSUE, action='created',
+                       comment={'html_url': 'https://git.example/c'})
+        self.cb.announce.onPayload({'X-Gitea-Event': 'issue_comment'}, comment)
+        self.assertResponse(
+            ' ', '\x0303[Gitea]\x03 \x0314(bob/proj)\x03 [issue] '
+            '\x02alice\x02 commented on \x0313#7\x03: It broke - '
+            'https://git.example/c')
 
     def testUnknownEventIgnored(self):
         self.cb.announce.onPayload({'X-Gitea-Event': 'whatever'}, GITEA_ISSUE)

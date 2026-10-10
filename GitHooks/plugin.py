@@ -41,6 +41,7 @@ import fnmatch
 import threading
 from string import Template
 import supybot.log as log
+from . import config
 import supybot.utils as utils
 import supybot.world as world
 from supybot.commands import *
@@ -183,6 +184,40 @@ class GithubCallback(httpserver.SupyHTTPServerCallback):
 # API access stuff
 #####################
 
+COMMENT_VERBS = {'created': 'commented on', 'edited': 'edited a comment on',
+                 'deleted': 'deleted a comment on'}
+
+def _kind_and_verb(v, event, payload):
+    """$kind ("issue", "PR", "commit"...) and $verb ("opened",
+    "commented on"...), for templates like "[$kind] $user $verb $ref"."""
+    action = v['action'].replace('_', ' ')
+    if action in ('synchronize', 'synchronized'):
+        action = 'updated'
+    if event == 'push':
+        v.update(kind='push', verb='pushed')
+    elif event == 'push.hidden':
+        v.update(kind='push')
+    elif event in ('issues', 'issue_comment'):
+        i = payload['issue']
+        is_pr = bool(i.get('pull_request') or payload.get('is_pull'))
+        v['kind'] = 'PR' if is_pr else 'issue'
+        v['verb'] = action if event == 'issues' else \
+            COMMENT_VERBS.get(v['action'], action)
+    elif event.startswith('pull_request'):
+        v['kind'] = 'PR'
+        v['verb'] = action if event == 'pull_request' else 'reviewed'
+    elif event == 'commit_comment':
+        v.update(kind='commit', verb='commented on')
+    elif event in ('create', 'delete'):
+        v.update(kind=payload.get('ref_type', 'ref'), verb=event + 'd')
+    elif event == 'release':
+        v.update(kind='release', verb=action or 'published')
+    elif event == 'fork':
+        v.update(kind='fork', verb='forked')
+    elif event in ('watch', 'star'):
+        v.update(kind='repo', verb='unstarred' if action == 'deleted'
+                 else 'starred')
+
 def _first_line(text):
     for line in (text or '').split('\n'):
         line = line.strip('\r').strip()
@@ -223,6 +258,7 @@ def _global_vars(event, payload):
         'what': event, 'ref': '', 'title': '', 'url': '', 'branch': '',
         'forge': payload.get('__forge', 'Git'), 'hidden': '',
         'number': '', 'body': '', 'label': '', 'assignee': '', 'tag': '',
+        'kind': event, 'verb': '',
     }
     for (key, path) in (('label', ('label', 'name')),
                         ('assignee', ('assignee', 'login'))):
@@ -291,6 +327,7 @@ def _global_vars(event, payload):
         c = payload['comment']
         v.update(what='commented on commit', body=_first_line(c.get('body')), ref=c['commit_id'][:7],
                  title=c['body'].split('\n', 1)[0][:300], url=c['html_url'])
+    _kind_and_verb(v, event, payload)
     return v
 
 def query(caller, type_, uri_end, args):
@@ -410,7 +447,13 @@ class GitHooks(callbacks.Plugin):
                 if global_.strip() and event == 'push.hidden':
                     global_ = conf_('format.global.hidden') or global_
                 elif global_.strip() and event == 'push':
-                    global_ = conf_('format.global.push') or global_
+                    push = conf_('format.global.push')
+                    # changing format.global also replaces the default push
+                    # line, unless format.global.push was set as well
+                    if push.strip() and not (
+                            push == config.DEFAULT_GLOBAL_PUSH and
+                            global_ != config.DEFAULT_GLOBAL):
+                        global_ = push
                 if global_.strip():
                     format_ = global_
             if not format_.strip():

@@ -17,6 +17,16 @@ need.
 
 ## Quick start
 
+The defaults already give GitBot-style lines. They are:
+
+```
+format.global       ^C03[$forge]^C ^C14($repo)^C [$kind] ^B$user^B $verb ^C13$ref^C: $title - $url
+format.global.push  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed ^C13$ref^C to ^C07$branch^C: $title - $url
+format.global.hidden  ^C03[$forge]^C ^C14($repo)^C (+$hidden hidden commits)
+```
+
+(`^C` is the colour code, Ctrl+K, and `^B` is bold, Ctrl+B.) To make your own:
+
 ```
 @config supybot.plugins.GitHooks.format.global "[$forge] ($repo) $user $action $ref - $title - $url"
 ```
@@ -44,6 +54,8 @@ everywhere:
 | `$event` | the event type: `push`, `issues`, `pull_request`... |
 | `$action` | the raw action: `opened`, `closed`, `labeled`... (empty for pushes) |
 | `$what` | a ready phrase such as `opened issue #3` or `committed` |
+| `$kind` | `issue`, `PR`, `commit`, `push`, `release`, `branch`... |
+| `$verb` | `opened`, `closed`, `merged`, `commented on`, `reviewed`, `pushed`... (`synchronize` becomes `updated`) |
 | `$ref` | what the event is about: `#3`, a short commit id, a tag or a branch |
 | `$number` | issue or pull request number |
 | `$title` | title of the issue, pull request or release, or the commit message |
@@ -199,18 +211,11 @@ Minimal:
 format.global  $user $what: $title - $url
 ```
 
-GitBot style (`^C` is Ctrl+K, `^B` is Ctrl+B, `^O` is Ctrl+O):
+The defaults (GitBot style) give, for example:
 
 ```
-format.global       ^C03[$forge]^C ^C14($repo)^C ^B$user^B $action $ref - $title - $url
-format.global.push  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed ^C13$ref^C to ^C07$branch^C: $title - $url
-```
-
-Gives, for example:
-
-```
-[GitHub] (unrealircd/unrealircd) syzop pushed 3154423 to unreal60_dev: spamreport::on-server-ban was a bit too enthousiastic. - https://github.com/unrealircd/unrealircd/commit/3154423facdc7041d731fad3b5b57ac887a2ad66
-[GitHub] (unrealircd/unrealircd) alice opened #7 - It broke - https://github.com/unrealircd/unrealircd/issues/7
+[GitHub] (bob/proj) alice pushed 3154423 to main: Fix crash on empty config - https://github.com/bob/proj/commit/3154423facdc7041d731fad3b5b57ac887a2ad66
+[GitHub] (bob/proj) [issue] carol opened #7: It broke - https://github.com/bob/proj/issues/7
 ```
 
 Announcing releases and new branches as well:

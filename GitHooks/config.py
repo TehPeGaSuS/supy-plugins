@@ -74,15 +74,22 @@ conf.registerChannelValue(GitHooks, 'ignoreBots',
         triggered by bots like dependabot""")))
 
 conf.registerGroup(GitHooks, 'format')
+# The defaults reproduce the style of the GitBot IRC bot:
+# [GitHub] (owner/repo) [issue] user opened #7: title - url
+DEFAULT_GLOBAL = ('\x0303[$forge]\x03 \x0314($repo)\x03 [$kind] '
+                  '\x02$user\x02 $verb \x0313$ref\x03: $title - $url')
+DEFAULT_GLOBAL_PUSH = ('\x0303[$forge]\x03 \x0314($repo)\x03 '
+                       '\x02$user\x02 pushed \x0313$ref\x03 to '
+                       '\x0307$branch\x03: $title - $url')
 conf.registerChannelValue(GitHooks.format, 'global',
-        registry.String('',
+        registry.String(DEFAULT_GLOBAL,
         _("""Plain-text template used for push, issue, pull request and
         comment events instead of the per-event formats below (a per-action
         format such as format.issues.closed still wins, and "ignore" there
         silences it). No commands: colour codes (Ctrl+K, Ctrl+B, Ctrl+O) can
         be pasted directly from your IRC client. Variables: $repo $owner $name
-        $user $what $action $ref $title $url $branch $forge (GitHub, Gitea,
-        Forgejo or Gogs); the raw payload
+        $user $what $kind $verb $action $ref $title $url $branch $forge
+        (GitHub, Gitea, Forgejo or Gogs); the raw payload
         variables like $issue__title also work. Empty disables it.""")))
 conf.registerChannelValue(GitHooks.format.get('global'), 'events',
         registry.SpaceSeparatedSetOfStrings(
@@ -93,9 +100,10 @@ conf.registerChannelValue(GitHooks.format.get('global'), 'events',
         fork, watch or star to also announce those (they are not announced by
         default, to keep the channel quiet).""")))
 conf.registerChannelValue(GitHooks.format.get('global'), 'push',
-        registry.String('',
-        _("""Plain-text template for each commit of a push. If empty,
-        format.global is used. Example: $user pushed $ref to $branch: $title
+        registry.String(DEFAULT_GLOBAL_PUSH,
+        _("""Plain-text template for each commit of a push. If empty, or if
+        you changed format.global and left this one alone, format.global is
+        used. Example: $user pushed $ref to $branch: $title
         - $url""")))
 conf.registerChannelValue(GitHooks.format.get('global'), 'hidden',
         registry.String('\x0303[$forge]\x03 \x0314($repo)\x03 '
