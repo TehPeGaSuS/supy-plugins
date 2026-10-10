@@ -1,8 +1,11 @@
 # GitHooks (Limnoria)
 
-This plugin announces events GitHub repositories to IRC.
+This plugin announces events from GitHub, Gitea, Forgejo and Gogs repositories
+to IRC.
 
 **This plugin requires Limnoria.**
+
+Forked from progval's [GitHub](https://github.com/progval/Supybot-plugins/tree/master/GitHub) work.
 
 ## Webhook Setup
 
