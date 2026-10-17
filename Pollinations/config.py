@@ -134,6 +134,15 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Pollinations,
+    "search_enabled",
+    registry.Boolean(
+        True,
+        _("""Enable the 'search' command. Search models are paid, so turn this off to stop all search spending."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
     "search_model",
     registry.String(
         "sonar",

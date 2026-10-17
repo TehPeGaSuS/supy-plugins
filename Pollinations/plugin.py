@@ -446,6 +446,9 @@ class Pollinations(callbacks.Plugin):
         Answer a question using live web search (needs a search-capable
         model, see 'models search'). Example: search who won the match today
         """
+        if not self.registryValue("search_enabled", msg.channel):
+            irc.reply("Search is disabled.", prefixNick=False)
+            return
         self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", "search_thinking")
 
     search = wrap(search, ["text"])

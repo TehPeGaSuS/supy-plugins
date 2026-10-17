@@ -68,6 +68,7 @@ All settings can be configured per-channel using:
 | `prompt` | "You are $botnick the IRC bot. Be brief, helpful" | System prompt for the AI ($botnick = bot's nickname) |
 | `text_model` | "openai" | Primary text model for chat completions (see [Recommended models](#recommended-models)) |
 | `text_fallback_model` | "openai-fast" | Space-separated list of fallback models tried when the primary fails persistently (429/5xx) |
+| `search_enabled` | True | Set to False to disable `search` (per channel or globally). Search models are paid |
 | `search_model` | "sonar" | Model used by the `search` command (must support web search, see `models search`) |
 | `search_prompt` | "You are answering on IRC. Use live web search… plain text only, no sources/URLs/markdown…" | Instructions for `search` only (e.g. no citations/markdown) |
 | `search_use_prompt` | False | If True, `search` also uses the main `prompt` (personality) before `search_prompt`; if False only `search_prompt` is used |
