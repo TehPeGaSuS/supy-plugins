@@ -278,8 +278,14 @@ class Pollinations(callbacks.Plugin):
         """
         # Parenthesised citations: ([label](url)) or ([a](u1), [b](u2))
         content = re.sub(r"\s*\(\s*\[[^\]]*\]\([^)]*\)(?:\s*[,;]\s*\[[^\]]*\]\([^)]*\))*\s*\)", "", content)
-        # Bare citations: [label](url) -> label (keeps legit named links readable)
+        # Bare citations whose label is just a domain: [yr.no](url) -> dropped
+        content = re.sub(r"\s*\[(?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)+(?:/[^\]\s]*)?\]\((?:https?://)[^)]*\)", "", content)
+        # Other links keep their label so named links stay readable
         content = re.sub(r"\[([^\]]+)\]\((?:https?://)[^)]*\)", r"\1", content)
+        # Plain-text citations the model appends at the end: bare domains or
+        # URLs left on their own after the last sentence
+        content = re.sub(r"(?:[ \t]+(?:https?://\S+|(?:www\.)?[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|gov|edu|fr|uk|de|es|pt|br|no|eu|info)(?:/\S*)?))+[ \t]*$", "", content, flags=re.M)
+        content = re.sub(r"(?im)^\s*(?:sources?|references?)\s*:.*$", "", content)
         content = re.sub(r"\*\*(.+?)\*\*", "\x02\\1\x02", content)
         content = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", "\x1d\\1\x1d", content)
         content = re.sub(r"`([^`\n]+)`", r"\1", content)
