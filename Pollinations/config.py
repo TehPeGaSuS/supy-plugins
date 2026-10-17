@@ -136,7 +136,7 @@ conf.registerChannelValue(
     Pollinations,
     "search_model",
     registry.String(
-        "gemini-search",
+        "sonar",
         _("""Model used by the 'search' command for live web search. Must support web_search (see 'models search'); requires an API token."""),
     ),
 )
@@ -172,7 +172,7 @@ conf.registerChannelValue(
     Pollinations,
     "search_fallback_model",
     registry.String(
-        "perplexity",
+        "gemini-search",
         _("""Space-separated fallback models for the 'search' command if search_model fails"""),
     ),
 )

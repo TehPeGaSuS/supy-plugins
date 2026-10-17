@@ -68,11 +68,11 @@ All settings can be configured per-channel using:
 | `prompt` | "You are $botnick the IRC bot. Be brief, helpful" | System prompt for the AI ($botnick = bot's nickname) |
 | `text_model` | "openai" | Primary text model for chat completions (see [Recommended models](#recommended-models)) |
 | `text_fallback_model` | "openai-fast" | Space-separated list of fallback models tried when the primary fails persistently (429/5xx) |
-| `search_model` | "gemini-search" | Model used by the `search` command (must support web search, see `models search`) |
+| `search_model` | "sonar" | Model used by the `search` command (must support web search, see `models search`) |
 | `search_prompt` | "You are answering on IRC. Use live web search… plain text only, no sources/URLs/markdown…" | Instructions for `search` only (e.g. no citations/markdown) |
 | `search_use_prompt` | False | If True, `search` also uses the main `prompt` (personality) before `search_prompt`; if False only `search_prompt` is used |
 | `search_thinking` | "Thinking..." | Line sent before a `search` answer; empty disables |
-| `search_fallback_model` | "perplexity" | Space-separated fallbacks for `search` |
+| `search_fallback_model` | "gemini-search" | Space-separated fallbacks for `search` |
 | `text_timeout` | 30 | Timeout in seconds for text generation requests |
 | `context_lines` | 50 | Number of recent messages to include as context |
 | `nick_include` | True | Include user's nickname in the prompt |
