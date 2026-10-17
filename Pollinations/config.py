@@ -145,7 +145,7 @@ conf.registerChannelValue(
     Pollinations,
     "search_prompt",
     registry.String(
-        "Answer using live web search. Never include citations, source names, URLs or markdown formatting; write plain text only. Keep the answer short enough for an IRC message.",
+        "You are answering on IRC. Use live web search to get current facts, then reply with plain text only: one or two short sentences. Do NOT mention or list websites, domain names, URLs, sources, citations, references or links, and do not write 'according to' or 'source:'. Do not use markdown, bullet points, bold or emoji. Output only the answer itself.",
         _("""Instructions for the 'search' command only. Used on its own, or appended to the main prompt if search_use_prompt is on."""),
     ),
 )
