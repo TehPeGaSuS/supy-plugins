@@ -268,7 +268,26 @@ class Pollinations(callbacks.Plugin):
             self.log.error(f"Parse error (model={model}): {e}")
             return (None, "parse_error")
 
-    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model"):
+    @staticmethod
+    def _clean_markdown(content):
+        """Turn model markdown into IRC-friendly text.
+
+        Search models cite sources as '([site](url))' after every claim; on
+        IRC that is noise that also eats the line-length budget, so citations
+        are dropped. Remaining links keep their label, bold becomes IRC bold.
+        """
+        # Parenthesised citations: ([label](url)) or ([a](u1), [b](u2))
+        content = re.sub(r"\s*\(\s*\[[^\]]*\]\([^)]*\)(?:\s*[,;]\s*\[[^\]]*\]\([^)]*\))*\s*\)", "", content)
+        # Bare citations: [label](url) -> label (keeps legit named links readable)
+        content = re.sub(r"\[([^\]]+)\]\((?:https?://)[^)]*\)", r"\1", content)
+        content = re.sub(r"\*\*(.+?)\*\*", "\x02\\1\x02", content)
+        content = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", "\x1d\\1\x1d", content)
+        content = re.sub(r"`([^`\n]+)`", r"\1", content)
+        content = re.sub(r"^#{1,6}\s+", "", content, flags=re.M)
+        content = re.sub(r"[ \t]{2,}", " ", content)
+        return content.strip()
+
+    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None):
         channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         
         if not self.active_requests.acquire(blocking=False):
@@ -280,6 +299,10 @@ class Pollinations(callbacks.Plugin):
                 text = "%s: %s" % (msg.nick, text)
             
             prompt = self.registryValue("prompt", msg.channel).replace("$botnick", irc.nick)
+            if extra_prompt_setting:
+                extra = self.registryValue(extra_prompt_setting, msg.channel).strip()
+                if extra:
+                    prompt = "%s %s" % (prompt, extra.replace("$botnick", irc.nick))
             context_lines = self.registryValue("context_lines", msg.channel)
             context = ""
             
@@ -362,6 +385,7 @@ class Pollinations(callbacks.Plugin):
                 return
 
             # --- format and send reply ---
+            content = self._clean_markdown(content)
             if self.registryValue("nick_strip", msg.channel):
                 content = re.sub(r"^%s: " % (irc.nick), "", content)
 
@@ -407,7 +431,7 @@ class Pollinations(callbacks.Plugin):
         Answer a question using live web search (needs a search-capable
         model, see 'models search'). Example: search who won the match today
         """
-        self._chat(irc, msg, text, "search_model", "search_fallback_model")
+        self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt")
 
     search = wrap(search, ["text"])
 

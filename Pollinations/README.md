@@ -69,6 +69,7 @@ All settings can be configured per-channel using:
 | `text_model` | "openai" | Primary text model for chat completions (see [Recommended models](#recommended-models)) |
 | `text_fallback_model` | "openai-fast" | Space-separated list of fallback models tried when the primary fails persistently (429/5xx) |
 | `search_model` | "gemini-search" | Model used by the `search` command (must support web search, see `models search`) |
+| `search_prompt` | "Answer using live web search. Never include citations…" | Extra instructions appended to `prompt` for `search` only (e.g. no citations/markdown) |
 | `search_fallback_model` | "perplexity" | Space-separated fallbacks for `search` |
 | `text_timeout` | 30 | Timeout in seconds for text generation requests |
 | `context_lines` | 50 | Number of recent messages to include as context |

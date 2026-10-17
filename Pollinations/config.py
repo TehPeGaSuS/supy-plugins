@@ -143,6 +143,15 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Pollinations,
+    "search_prompt",
+    registry.String(
+        "Answer using live web search. Never include citations, source names, URLs or markdown formatting; write plain text only. Keep the answer short enough for an IRC message.",
+        _("""Extra instructions appended to the main prompt for the 'search' command only. Empty to disable."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
     "search_fallback_model",
     registry.String(
         "perplexity",
