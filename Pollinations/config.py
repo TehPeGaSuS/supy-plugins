@@ -146,7 +146,25 @@ conf.registerChannelValue(
     "search_prompt",
     registry.String(
         "Answer using live web search. Never include citations, source names, URLs or markdown formatting; write plain text only. Keep the answer short enough for an IRC message.",
-        _("""Extra instructions appended to the main prompt for the 'search' command only. Empty to disable."""),
+        _("""Instructions for the 'search' command only. Used on its own, or appended to the main prompt if search_use_prompt is on."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_use_prompt",
+    registry.Boolean(
+        False,
+        _("""If on, 'search' also uses the main prompt (bot personality) before search_prompt. If off, only search_prompt is used."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_thinking",
+    registry.String(
+        "Thinking...",
+        _("""Line sent to the channel before a 'search' answer. Empty to disable."""),
     ),
 )
 

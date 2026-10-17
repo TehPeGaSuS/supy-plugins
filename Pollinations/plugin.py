@@ -287,7 +287,7 @@ class Pollinations(callbacks.Plugin):
         content = re.sub(r"[ \t]{2,}", " ", content)
         return content.strip()
 
-    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None):
+    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None):
         channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         
         if not self.active_requests.acquire(blocking=False):
@@ -300,9 +300,18 @@ class Pollinations(callbacks.Plugin):
             
             prompt = self.registryValue("prompt", msg.channel).replace("$botnick", irc.nick)
             if extra_prompt_setting:
-                extra = self.registryValue(extra_prompt_setting, msg.channel).strip()
-                if extra:
-                    prompt = "%s %s" % (prompt, extra.replace("$botnick", irc.nick))
+                extra = self.registryValue(extra_prompt_setting, msg.channel).strip().replace("$botnick", irc.nick)
+                # Without the persona toggle the extra prompt replaces the
+                # main one entirely, so a personality does not leak in.
+                if persona_setting and not self.registryValue(persona_setting, msg.channel):
+                    prompt = extra
+                elif extra:
+                    prompt = "%s %s" % (prompt, extra)
+
+            if thinking_setting:
+                thinking = self.registryValue(thinking_setting, msg.channel).strip()
+                if thinking:
+                    irc.queueMsg(ircmsgs.privmsg(channel, thinking))
             context_lines = self.registryValue("context_lines", msg.channel)
             context = ""
             
@@ -431,7 +440,7 @@ class Pollinations(callbacks.Plugin):
         Answer a question using live web search (needs a search-capable
         model, see 'models search'). Example: search who won the match today
         """
-        self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt")
+        self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", "search_thinking")
 
     search = wrap(search, ["text"])
 
