@@ -17,16 +17,27 @@ live channel membership) this plugin has no way to evaluate locally.
 
 This plugin makes **zero** attempt to parse or interpret extban syntax. Anything
 that doesn't look like a plain hostmask is left completely alone:
-- `add`/`timer`/`net add`/`net timer`: a mask that starts with `~` or `$`, or
-  has a `:` anywhere before its first `@`, is rejected with an explicit error
+- `add`/`timer`/`net add`/`net timer`: a mask that starts with `~` or `$`,
+  has a `:` anywhere before its first `@`, or a `#` after it, is rejected with
+  an explicit error
   ("The banmask specified is incorrect. It must be in the format of
   nick!user@host (ASCII only).") -- set it directly via `/mode` instead.
 - Manually-set `+b`/`-b` (the `addManualBans` auto-sync): a mask with no `@`,
-  or a `:` before its first `@`, is silently ignored -- no DB entry, no expiry
+  a `:` before its first `@`, or a `#` after it, is silently ignored -- no DB
+  entry, no expiry
   timer, no bot-issued unban, ever.
 
 A `:` *after* the `@` (e.g. an IPv6 host like `*!*@2001:db8::1`) is fine and
 never flagged -- only a `:` before the `@` triggers this.
+
+A `#` after the `@` catches the ban forms that look like a plain mask with a
+channel glued on: InspIRCd's banredirect (`nick!user@host#channel`) and
+Solanum's forward ban (`nick!user@host$#channel`). No real host contains `#`.
+
+Between them these two rules cover every extban form in UnrealIRCd 6,
+InspIRCd 4, Solanum and Ergo (`m:`), named or lettered, inverted (`!account:`)
+or stacked (`~time:60:~join:~country:BD`), plus whatever third-party modules
+add, as long as they follow the `name:` / `X:` convention.
 
 ### Mask arguments
 

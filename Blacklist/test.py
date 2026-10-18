@@ -946,6 +946,36 @@ class BlacklistTestCase(ChannelPluginTestCase):
         self._drain()
         self.assertRegexp('blacklist list', r'2001:db8::1')
 
+    def testBanRedirectIsLeftAlone(self):
+        # InspIRCd's banredirect: nick!user@host#channel. Not an extban,
+        # but not a plain mask either (hosts can't contain '#').
+        cb = self._cb()
+        self.assertTrue(cb._looksLikeExtban('*!*@bad.host#jail'))
+        self.assertIsNone(cb._completeMask('*!*@bad.host#jail'))
+        self.assertIsNone(cb._completeMask('user@bad.host#jail'))
+        self.assertRegexp('blacklist add *!*@bad.host#jail r',
+                          'banmask specified is incorrect')
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', '*!*@bad.host#jail'),
+                                       prefix='anop!op@op.host'))
+        bucket = cb._get_channel_bucket(self.channel)
+        self.assertTrue(bucket is None or '*!*@bad.host#jail' not in bucket['entries'])
+
+    def testEveryIrcdExtbanFormIsLeftAlone(self):
+        # Forms from UnrealIRCd 6, InspIRCd 4, Solanum and Ergo docs/source.
+        cb = self._cb()
+        for mask in ('~quiet:*!*@h', '~q:*!*@h', '~time:3:*!*@h',
+                     '~time:60:~join:~country:BD', '~account:foo', '~a:foo',
+                     '~msgbypass:external:*!*@h', '~forward:#x:*!*@h',
+                     '~channel:@#trusted', '~certfp:0011aabb',
+                     'mute:*!*@h', 'm:*!*@h', '!account:foo', 'R:foo',
+                     'realmask:*!*@h+*bot*', 'a:*!*@h+*bot*',
+                     'blockinvite:*!*@h', 'A:*!*@h', 'redirect:#x:*!*@h',
+                     'd:#x:*!*@h', '$a:foo', '$~a', '$j:#chan', '$x:*!*@h#*bot*',
+                     'm:host!*@*', '*!*@bad.host$#jail'):
+            self.assertTrue(cb._looksLikeExtban(mask), mask)
+        for mask in ('*!*@h', 'nick!*@*', '*!*@2001:db8::1', '*!user@*.isp.net'):
+            self.assertFalse(cb._looksLikeExtban(mask), mask)
+
     def testDoModeIgnoresExtban(self):
         # No prior +b -> the channel bucket is legitimately never created;
         # the ignored-extban assertion IS that it stays that way.

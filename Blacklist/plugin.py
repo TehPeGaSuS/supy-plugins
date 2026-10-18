@@ -327,13 +327,15 @@ class Blacklist(callbacks.Plugin):
 
     def _looksLikeExtban(self, mask):
         """True if `mask` can't be a plain nick!user@host ban (e.g. an
-        ircd-specific extban such as ~account:foo, $a:foo, or z:foo). A
-        real mask always has an '@' with no ':' before it. We never parse
-        or interpret extban syntax -- just refuse to touch it."""
+        ircd-specific extban such as ~account:foo, $a:foo, or z:foo, or
+        InspIRCd's banredirect nick!user@host#channel). A real mask always
+        has an '@' with no ':' before it, and no '#' after it (hosts can't
+        contain one). We never parse or interpret extban syntax -- just
+        refuse to touch it."""
         at = mask.find('@')
         if at == -1:
             return True
-        return ':' in mask[:at]
+        return ':' in mask[:at] or '#' in mask[at:]
 
     def _botHostmask(self, irc):
         try:
@@ -403,7 +405,7 @@ class Blacklist(callbacks.Plugin):
         """Eggdrop's +ban completion for a token that isn't a full
         nick!user@host: `nick` -> nick!*@*, `user@host` -> *!user@host,
         `nick!user` -> nick!user@*. Returns None for extban-looking input (a
-        leading ~ or $, or a ':' before the '@') and for anything that still
+        leading ~ or $, a ':' before the '@', or a '#' after it) and for anything that still
         isn't a plain hostmask after completion. ASCII only: networks
         case-map nicks in US-ASCII, so a non-ASCII ban can't match reliably."""
         if not target or not target.isascii() \
@@ -418,7 +420,9 @@ class Blacklist(callbacks.Plugin):
             mask = target + '@*'
         else:
             mask = target
-        return mask if mask and ircutils.isUserHostmask(mask) else None
+        if not mask or self._looksLikeExtban(mask):
+            return None
+        return mask if ircutils.isUserHostmask(mask) else None
 
     def _isKnownNick(self, irc, target):
         """True if `target` currently resolves to a real, known nick.
