@@ -47,6 +47,9 @@ def configure(advanced):
     from supybot.questions import expect, anything, something, yn
     conf.registerPlugin("Blacklist", True)
 
+class ManualBanMode(registry.OnlySomeStrings):
+    validStrings = ('forget', 'remember', 'keep')
+
 class BanmaskNumber(registry.Integer):
     def setValue(self, num):
         if num > max(plugin.Blacklist.banmasks):
@@ -59,13 +62,15 @@ conf.registerChannelValue(Blacklist, 'maxInlineEntries',
         registry.PositiveInteger(5, """Maximum number of ban entries to display inline before using pastebin."""))
 
 conf.registerChannelValue(Blacklist, 'enabled',
-        registry.Boolean(False, """Set whether to enable database in a channel."""))
+        registry.Boolean(False, """Sets whether to enable the blacklist database in a channel."""))
 
 conf.registerChannelValue(Blacklist, 'banlistExpiry',
-        registry.PositiveInteger(180, """Sets the number of minutes before a ban is removed from the channl's banlist."""))
+        registry.PositiveInteger(180, """Sets the number of minutes before a ban is removed from the channel's banlist. Applies to
+        entries made with `add` (the entry is kept and re-applied on a matching join) and to bans set by
+        ops directly on IRC, as manualBans says."""))
 
 conf.registerChannelValue(Blacklist, 'banTimerExpiry',
-        registry.PositiveInteger(30, """Sets the numer of minutes before a timed ban expires if none is given."""))
+        registry.PositiveInteger(30, """Sets the number of minutes before a timed ban expires if none is given."""))
 
 conf.registerChannelValue(Blacklist, 'maskNumber',
         BanmaskNumber(2, """Sets the default banmask number if none is given."""))
@@ -75,6 +80,13 @@ conf.registerChannelValue(Blacklist, 'banReason',
 
 conf.registerChannelValue(Blacklist, 'addManualBans',
         registry.Boolean(True, """Sets whether to watch for channel bans directly added by users (not using the bot) to the database."""))
+
+conf.registerChannelValue(Blacklist, 'manualBans',
+        ManualBanMode('forget', """Sets what happens to a ban an op sets directly on IRC (needs addManualBans).
+        'forget': after banlistExpiry minutes the +b is lifted and the entry dropped (like Eggdrop's dynamicbans
+        on a user's ban). 'remember': the +b is lifted after banlistExpiry but the entry is kept and re-applied
+        on the next matching join, exactly like an entry made with `add`; an op's -b only lifts it too, so use
+        `delete` to get rid of it. 'keep': the +b is never lifted; an op's -b drops the entry."""))
 
 conf.registerChannelValue(Blacklist, 'kickOnSelfBan',
         registry.Boolean(True, """Sets whether to react to someone trying to ban the bot itself. The ban is always refused

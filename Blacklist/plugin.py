@@ -1640,13 +1640,21 @@ class Blacklist(callbacks.Plugin):
                 exists = bucket is not None and mask in bucket['entries']
 
             if not exists:
+                # manualBans: 'forget' lifts the +b and drops the entry after
+                # banlistExpiry; 'remember' lifts it but keeps the entry, like
+                # one made with `add` (so it comes back on a matching join);
+                # 'keep' never lifts it.
+                how = self.registryValue('manualBans', channel)
                 expiry = self.registryValue('banlistExpiry', channel)
-                expire_at = time.time() + (expiry * 60) if expiry > 0 else None
-                mode = 'full' if expire_at else None
+                expire_at = time.time() + (expiry * 60) \
+                    if expiry > 0 and how != 'keep' else None
+                mode = None
+                if expire_at:
+                    mode = 'irc_only' if how == 'remember' else 'full'
 
                 entry_id = self._internal_add(channel, mask, msg.nick, "*manual ban",
-                                               is_bot_cmd=False, expire_at=expire_at,
-                                               expire_mode=mode)
+                                               is_bot_cmd=(how == 'remember'),
+                                               expire_at=expire_at, expire_mode=mode)
                 if expire_at:
                     self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, mode)
 

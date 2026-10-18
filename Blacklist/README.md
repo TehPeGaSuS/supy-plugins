@@ -107,10 +107,17 @@ wipes every entry for a channel and lifts every ban it applied — you must
 literally pass the word `confirm` to run it.
 
 Manual bans set directly on IRC (not via the bot) are picked up automatically
-if `addManualBans` is on: they become entries tagged "manual" and expire after
-`banlistExpiry` minutes. Manual unbans are synced back too: a manual entry is
-dropped when someone removes its `+b`, while an entry added with `add` or
-`timer` is kept (marked lifted) and comes back when a matching mask joins.
+if `addManualBans` is on: they become entries tagged "manual". What happens to
+them next is up to `manualBans`:
+
+| `manualBans` | After `banlistExpiry` minutes | An op's `-b` |
+|---|---|---|
+| `forget` (default) | `+b` lifted, entry dropped (Eggdrop's dynamicbans on a user's ban) | drops the entry |
+| `remember` | `+b` lifted, entry kept and re-applied on a matching join, like `add` | only lifts it; use `delete` |
+| `keep` | never lifted | drops the entry |
+
+An entry added with `add` or `timer` is always kept (marked lifted) when an op
+removes its `+b`, and comes back when a matching mask joins.
 Anyone with ops on IRC can do this; only users with `#channel,op` on the bot
 can use the commands.
 
@@ -249,7 +256,7 @@ original expiry time.
 
 ```
 ###
-# Set whether to enable database in a channel.
+# Sets whether to enable the blacklist database in a channel.
 #
 # Default value: False
 ###
@@ -266,6 +273,19 @@ enforcement) to do anything in that channel.
 # Default value: True
 ###
 supybot.plugins.Blacklist.addManualBans: True
+```
+
+```
+###
+# Sets what happens to a ban an op sets directly on IRC (needs
+# addManualBans). 'forget': after banlistExpiry minutes the +b is lifted and
+# the entry dropped. 'remember': the +b is lifted after banlistExpiry but the
+# entry is kept and re-applied on the next matching join, like `add`. 'keep':
+# the +b is never lifted.
+#
+# Default value: forget
+###
+supybot.plugins.Blacklist.manualBans: forget
 ```
 
 ```
@@ -336,7 +356,9 @@ the bot is opped re-applies network bans there.
 ```
 ###
 # Sets the number of minutes before a ban is removed from the channel's
-# banlist.
+# banlist. Applies to entries made with `add` (the entry is kept and
+# re-applied on a matching join) and to bans set by ops directly on IRC, as
+# manualBans says.
 #
 # Default value: 180
 ###
@@ -345,7 +367,7 @@ supybot.plugins.Blacklist.banlistExpiry: 180
 
 ```
 ###
-# Sets the numer of minutes before a timed ban expires if none is given.
+# Sets the number of minutes before a timed ban expires if none is given.
 #
 # Default value: 30
 ###

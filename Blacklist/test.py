@@ -33,6 +33,7 @@ import time
 from supybot.test import *
 import supybot.ircdb as ircdb
 import supybot.ircmsgs as ircmsgs
+import supybot.registry as registry
 import supybot.schedule as schedule
 
 
@@ -364,6 +365,44 @@ class BlacklistTestCase(ChannelPluginTestCase):
         bucket = self._cb().db['channels'][self.channel.lower()]
         self.assertTrue('*!*@manual.host' in bucket['entries'])
         self.assertEqual(bucket['entries']['*!*@manual.host']['reason'], '*manual ban')
+
+    def _manualBan(self, how, mask='*!*@manual.host'):
+        with conf.supybot.plugins.Blacklist.manualBans.context(how):
+            self.irc.feedMsg(ircmsgs.mode(self.channel, ('+b', mask),
+                                           prefix='anop!op@op.host'))
+        return self._cb().db['channels'][self.channel.lower()]['entries'][mask]
+
+    def testManualBansForgetLiftsAndDrops(self):
+        e = self._manualBan('forget')
+        self.assertEqual(e['expire_mode'], 'full')
+        self.assertFalse(e['is_bot_cmd'])
+
+    def testManualBansRememberKeepsTheEntryLikeAdd(self):
+        e = self._manualBan('remember')
+        self.assertEqual(e['expire_mode'], 'irc_only')
+        self.assertTrue(e['is_bot_cmd'])
+        self.assertRegexp('blacklist list', r'\[manual\]')
+        # An op's -b only lifts it; it's still listed and returns on join.
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('-b', '*!*@manual.host'),
+                                       prefix='anop!op@op.host'))
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertTrue(bucket['entries']['*!*@manual.host']['lifted'])
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='x!y@manual.host'))
+        msgs = self._takeAll()
+        self.assertEqual(self._kicked(msgs), ['x'])
+
+    def testManualBansKeepNeverLifts(self):
+        e = self._manualBan('keep')
+        self.assertIsNone(e['expire_at'])
+        self.assertIsNone(e['expire_mode'])
+        self.irc.feedMsg(ircmsgs.mode(self.channel, ('-b', '*!*@manual.host'),
+                                       prefix='anop!op@op.host'))
+        bucket = self._cb().db['channels'][self.channel.lower()]
+        self.assertNotIn('*!*@manual.host', bucket['entries'])
+
+    def testManualBansRejectsUnknownMode(self):
+        self.assertRaises(registry.InvalidRegistryValue,
+                          conf.supybot.plugins.Blacklist.manualBans.set, 'sometimes')
 
     def testDoModeSkipsExemptMask(self):
         self.assertNotError('blacklist exempt add *!*@exempt.host')
