@@ -44,6 +44,9 @@ class BlacklistTestCase(ChannelPluginTestCase):
         conf.supybot.plugins.Blacklist.enabled.setValue(True)
         # Off by default; most tests exercise the network list, so turn it on.
         conf.supybot.plugins.Blacklist.enforceGlobal.setValue(True)
+        # Some tests switch it off per channel; don't let that leak into
+        # the tests that run after them.
+        conf.supybot.plugins.Blacklist.enforceGlobal.get(self.channel).setValue(True)
         # A real JOIN (not just addUser) is needed so irc.state.nickToHostmask
         # can resolve 'foo' the way _createMask does.
         self.irc.feedMsg(ircmsgs.join(self.channel, prefix='foo!foouser@foo.host'))
@@ -270,7 +273,7 @@ class BlacklistTestCase(ChannelPluginTestCase):
     def testNetBlacklistIgnoredWhereEnforceGlobalIsOff(self):
         self.assertNotError('blacklist net add bar!bar@bar.host netreason')
         self._drain()
-        conf.supybot.plugins.Blacklist.enforceGlobal.setValue(False)
+        conf.supybot.plugins.Blacklist.enforceGlobal.get(self.channel).setValue(False)
         try:
             self.irc.feedMsg(ircmsgs.join(self.channel, prefix='bar!bar@bar.host'))
             self.assertEqual(self._takeAll(), [],
@@ -282,7 +285,7 @@ class BlacklistTestCase(ChannelPluginTestCase):
             self.assertEqual(self._kicked(msgs), [],
                               '`net add` must not ban or kick where it is off.')
         finally:
-            conf.supybot.plugins.Blacklist.enforceGlobal.setValue(True)
+            conf.supybot.plugins.Blacklist.enforceGlobal.get(self.channel).setValue(True)
 
     def _joinOtherChannel(self, name='#other'):
         self.irc.feedMsg(ircmsgs.join(name, prefix=self.irc.prefix))
@@ -955,3 +958,329 @@ class BlacklistTestCase(ChannelPluginTestCase):
             '~account:baduser' not in bucket['entries'] and
             'account:baduser' not in bucket['entries']),
             'Extban-shaped +b (with or without a leading prefix char) must never be tracked.')
+
+    # -------------------------------------------------------------
+    # ircd limits: ISUPPORT MODES stacking and MAXLIST/MAXBANS room
+    # -------------------------------------------------------------
+
+    def _isupport(self, **tokens):
+        """Sets ISUPPORT tokens the way Limnoria's do005 stores them
+        (values as captured from PTirc, Teranova and Libera)."""
+        for k, v in tokens.items():
+            self.irc.state.supported[k] = v
+
+    def _storeBans(self, n):
+        cb = self._cb()
+        for i in range(n):
+            cb._internal_add(self.channel, f'*!*@h{i}.example', 'someop',
+                             'r', is_bot_cmd=True)
+
+    def _modeLines(self, msgs, sign):
+        return [m for m in msgs if m.command == 'MODE' and sign in m.args[1]]
+
+    def testResyncStacksPerIsupportModes(self):
+        self._isupport(modes=12)  # PTirc / UnrealIRCd
+        self._storeBans(13)
+        self._channelLostItsBans()
+        self._opBot()
+        lines = self._modeLines(self._takeAll(), '+b')
+        self.assertEqual([len(m.args) - 2 for m in lines], [12, 1])
+
+    def testResyncStacksThreeWithoutModesToken(self):
+        self.irc.state.supported.pop('modes', None)
+        self._storeBans(4)
+        self._channelLostItsBans()
+        self._opBot()
+        lines = self._modeLines(self._takeAll(), '+b')
+        self.assertEqual([len(m.args) - 2 for m in lines], [3, 1])
+
+    def testClearStacksUnbans(self):
+        self._isupport(modes=4)  # Libera / Solanum
+        self._storeBans(5)
+        msgs = self._takeAll(self.assertNotError(f'blacklist clear {self.channel} confirm'))
+        lines = self._modeLines(msgs, '-b')
+        self.assertEqual([len(m.args) - 2 for m in lines], [4, 1])
+
+    def testModeLinesStayShort(self):
+        long_masks = ['*!*@' + 'x' * 60 + f'{i}.example' for i in range(12)]
+        msgs = self._cb()._modeMsgs(self.irc, self.channel, long_masks)
+        self.assertTrue(len(msgs) > 1)
+        for m in msgs:
+            self.assertTrue(len(' '.join(m.args)) < 450, m)
+
+    def testBanRoomReadsMaxlistAndMaxbans(self):
+        cb = self._cb()
+        self.assertIsNone(cb._banRoom(self.irc, self.channel))
+        self._isupport(maxlist={'b': 120, 'e': 120, 'I': 120})
+        self.assertEqual(cb._banRoom(self.irc, self.channel), 120)
+        del self.irc.state.supported['maxlist']
+        self._isupport(maxbans=45)  # ircu (Undernet/QuakeNet) style
+        self.irc.state.channels[self.channel].bans.add('*!*@x')
+        self.assertEqual(cb._banRoom(self.irc, self.channel), 44)
+
+    def testAddWithFullBanListKicksButSkipsTheBan(self):
+        self._isupport(maxlist={'b': 1})
+        self.irc.state.channels[self.channel].bans.add('*!*@already.there')
+        msgs = self._takeAll(self.assertNotError('blacklist add foo r'))
+        self.assertRegex(msgs[-1].args[1], 'ban list is full')
+        self.assertEqual(self._modeLines(msgs, '+b'), [])
+        self.assertEqual(self._kicked(msgs), ['foo'])
+        e = self._cb()._get_channel_bucket(self.channel)['entries']['*!*@foo.host']
+        self.assertTrue(e['lifted'])
+
+    def testResyncWithLimitedRoomKeepsTheMostRecentlyActive(self):
+        self._isupport(maxlist={'b': 2})
+        self._storeBans(3)
+        entries = self._cb()._get_channel_bucket(self.channel)['entries']
+        entries['*!*@h0.example']['last_hit'] = time.time()  # recently active
+        entries['*!*@h1.example']['created_at'] = time.time() - 9 * 86400
+        entries['*!*@h2.example']['created_at'] = time.time() - 1 * 86400
+        entries['*!*@h0.example']['created_at'] = time.time() - 30 * 86400
+        self._channelLostItsBans()
+        self._opBot()
+        lines = self._modeLines(self._takeAll(), '+b')
+        applied = [a for m in lines for a in m.args[2:]]
+        self.assertEqual(sorted(applied), ['*!*@h0.example', '*!*@h2.example'])
+        self.assertTrue(entries['*!*@h1.example']['lifted'])
+
+    def testBanListFullNumericMarksEntryLifted(self):
+        self.assertNotError('blacklist add foo r')
+        self._drain()
+        self.irc.feedMsg(ircmsgs.IrcMsg(prefix='irc.server', command='478',
+            args=(self.irc.nick, self.channel, '*!*@foo.host',
+                  'Channel ban list is full')))
+        e = self._cb()._get_channel_bucket(self.channel)['entries']['*!*@foo.host']
+        self.assertTrue(e['lifted'])
+
+    # -------------------------------------------------------------
+    # CHGHOST re-check
+    # -------------------------------------------------------------
+
+    def testChghostIntoABannedHostIsEnforced(self):
+        self._cb()._internal_add(self.channel, '*!*@bad.vhost', 'someop',
+                                 'vhost ban', is_bot_cmd=True)
+        self.irc.feedMsg(ircmsgs.IrcMsg(prefix='foo!foouser@foo.host',
+                                         command='CHGHOST',
+                                         args=('foouser', 'bad.vhost')))
+        msgs = self._takeAll()
+        self.assertEqual(self._kicked(msgs), ['foo'])
+        self.assertTrue(any('*!*@bad.vhost' in m.args
+                            for m in self._modeLines(msgs, '+b')))
+
+    def testChghostIntoACleanHostIsLeftAlone(self):
+        self._cb()._internal_add(self.channel, '*!*@bad.vhost', 'someop',
+                                 'vhost ban', is_bot_cmd=True)
+        self.irc.feedMsg(ircmsgs.IrcMsg(prefix='foo!foouser@foo.host',
+                                         command='CHGHOST',
+                                         args=('foouser', 'good.vhost')))
+        self.assertEqual(self._takeAll(), [])
+
+    # -------------------------------------------------------------
+    # Hit tracking and stale
+    # -------------------------------------------------------------
+
+    def testAddCountsTheKicksAsHits(self):
+        self._joinBaz()
+        self.assertNotError('blacklist add foo r')
+        self._drain()
+        e = self._cb()._get_channel_bucket(self.channel)['entries']['*!*@foo.host']
+        self.assertEqual(e['hits'], 2)
+        self.assertRegexp('blacklist list', r'2 hits, last \d+s ago')
+
+    def testJoinCountsAHit(self):
+        self._cb()._internal_add(self.channel, '*!*@bad.host', 'someop', 'r',
+                                 is_bot_cmd=True)
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='x!y@bad.host'))
+        self._drain()
+        e = self._cb()._get_channel_bucket(self.channel)['entries']['*!*@bad.host']
+        self.assertEqual(e['hits'], 1)
+
+    def testNetHitsAreCounted(self):
+        self._joinBaz()
+        self.assertNotError('blacklist net add foo r')
+        self._drain()
+        self.assertEqual(self._cb().db['net']['entries']['*!*@foo.host']['hits'], 2)
+
+    def testStaleListsQuietEntriesOldestFirst(self):
+        cb = self._cb()
+        self._storeBans(3)
+        entries = cb._get_channel_bucket(self.channel)['entries']
+        now = time.time()
+        entries['*!*@h0.example']['created_at'] = now - 90 * 86400
+        entries['*!*@h0.example']['hits'] = 1
+        entries['*!*@h0.example']['last_hit'] = now - 40 * 86400
+        entries['*!*@h1.example']['created_at'] = now - 60 * 86400
+        entries['*!*@h2.example']['created_at'] = now - 60 * 86400
+        entries['*!*@h2.example']['hits'] = 1
+        entries['*!*@h2.example']['last_hit'] = now - 86400
+        self.assertResponse('blacklist stale',
+            '[2] *!*@h1.example (never hit, added 60d ago) | '
+            '[1] *!*@h0.example (last hit 40d ago, added 90d ago)')
+        self.assertRegexp('blacklist stale 50', r'h1\.example')
+        self.assertNotRegexp('blacklist stale 50', r'h0\.example')
+
+    def testStaleWithNothingStale(self):
+        self.assertNotError('blacklist add foo r')
+        self._drain()
+        self.assertResponse('blacklist stale',
+                            'Every entry has caught someone in the last 30 days.')
+
+    def testNetStale(self):
+        self._cb()._net_add('*!*@old.example', 'someop', 'r')
+        self._cb().db['net']['entries']['*!*@old.example']['created_at'] -= 31 * 86400
+        self.assertRegexp('blacklist net stale', r'old\.example \(never hit')
+
+    def testStatsMentionsNeverHitAndListUsage(self):
+        self._isupport(maxlist={'b': 100})
+        self._storeBans(2)
+        self.assertRegexp('blacklist stats',
+                          r'2 of them never caught anyone\. Channel ban list: 0/100\.')
+
+    # -------------------------------------------------------------
+    # Too-broad guard
+    # -------------------------------------------------------------
+
+    def _crowd(self, n, host='crowd.example'):
+        for i in range(n):
+            self.irc.feedMsg(ircmsgs.join(self.channel, prefix=f'c{i}!u@{host}'))
+        self._drain()
+
+    def testTooBroadMaskRefused(self):
+        self._crowd(6)
+        self.assertRegexp('blacklist add *!*@crowd.example r',
+                          r'matches 6 people .*maxBanMatches is 5.*--force')
+        self.assertIsNone(self._cb()._get_channel_bucket(self.channel))
+
+    def testTooBroadMaskAllowedWithForce(self):
+        self._crowd(6)
+        self.assertNotError('blacklist add --force *!*@crowd.example r')
+        self.assertEqual(len(self._kicked(self._takeAll())), 6)
+
+    def testTooBroadCheckCanBeDisabled(self):
+        self._crowd(6)
+        with conf.supybot.plugins.Blacklist.maxBanMatches.context(0):
+            self.assertNotError('blacklist timer *!*@crowd.example 5 r')
+
+    def testNetTooBroadMaskRefused(self):
+        self._crowd(6)
+        self.assertRegexp('blacklist net add *!*@crowd.example r', r'matches 6 people')
+        self.assertEqual(self._cb().db['net']['entries'], {})
+
+    # -------------------------------------------------------------
+    # Redundant masks
+    # -------------------------------------------------------------
+
+    def testMaskCovers(self):
+        covers = self._cb()._maskCovers
+        self.assertTrue(covers('*!*@*.isp.net', '*!*@foo.isp.net'))
+        self.assertTrue(covers('*!*@*', 'nick!*@host'))
+        self.assertTrue(covers('NICK!*@*', 'nick!*@*'))
+        self.assertTrue(covers('*!*@h?st', '*!*@host'))
+        self.assertFalse(covers('*!*@foo.isp.net', '*!*@*.isp.net'))
+        self.assertFalse(covers('*!*@h?st', '*!*@h*st'))
+        self.assertFalse(covers('nick!*@*', '*!*@*'))
+
+    def testCoveredMaskRefused(self):
+        self.assertNotError('blacklist add *!*@*.example wide')
+        self._drain()
+        self.assertRegexp('blacklist add *!*@foo.example narrow',
+                          r'already covered by \[1\] \*!\*@\*\.example')
+        self.assertNotError('blacklist add --force *!*@foo.example narrow')
+
+    def testTimedWideEntryDoesNotCoverAPermanentOne(self):
+        self.assertNotError('blacklist timer *!*@*.example 5 wide')
+        self._drain()
+        self.assertNotError('blacklist add *!*@foo.example narrow')
+
+    def testPermanentWideEntryCoversATimedOne(self):
+        self.assertNotError('blacklist add *!*@*.example wide')
+        self._drain()
+        self.assertRegexp('blacklist timer *!*@foo.example 5 narrow', 'already covered')
+
+    def testWiderMaskNamesTheEntriesItMakesRedundant(self):
+        self._replyTo('blacklist add *!*@a.example r')
+        self._replyTo('blacklist add *!*@b.example r')
+        self.assertRegex(self._replyTo('blacklist add *!*@*.example wide'),
+                          r'covers \[1\] \*!\*@a\.example, \[2\] \*!\*@b\.example; delete them')
+
+    def testReaddingTheSameMaskIsNotCovered(self):
+        self.assertNotError('blacklist add *!*@x.example one')
+        self._drain()
+        self.assertNotError('blacklist add *!*@x.example two')
+        self._drain()
+        self.assertRegexp('blacklist list', 'two')
+
+    def testNetCoveredMaskRefused(self):
+        self.assertNotError('blacklist net add *!*@*.example wide')
+        self._drain()
+        self.assertRegexp('blacklist net add *!*@foo.example narrow',
+                          r'already covered by network entry \[1\]')
+
+    # -------------------------------------------------------------
+    # rotateBans: a full ban list makes room by lifting the least
+    # recently active ban the plugin owns
+    # -------------------------------------------------------------
+
+    def _fullListOfOurBans(self):
+        """A 2-slot ban list holding two plugin entries: h0 (stale) and h1
+        (recently active)."""
+        self._isupport(maxlist={'b': 2})
+        self._storeBans(2)
+        entries = self._cb()._get_channel_bucket(self.channel)['entries']
+        entries['*!*@h0.example']['created_at'] = time.time() - 50 * 86400
+        entries['*!*@h1.example']['created_at'] = time.time() - 60 * 86400
+        entries['*!*@h1.example']['last_hit'] = time.time() - 3600
+        bans = self.irc.state.channels[self.channel].bans
+        bans.update(['*!*@h0.example', '*!*@h1.example'])
+        return entries
+
+    def testFullListRotatesOutTheLeastRecentlyActiveBan(self):
+        entries = self._fullListOfOurBans()
+        msgs = self._takeAll(self.assertNotError('blacklist add foo r'))
+        self.assertRegex(msgs[-1].args[1], r'lifted \*!\*@h0\.example to make room')
+        self.assertTrue(any(m.args[1:] == ('-b', '*!*@h0.example') for m in msgs))
+        self.assertTrue(any(m.args[1:] == ('+b', '*!*@foo.host') for m in msgs))
+        self.assertTrue(entries['*!*@h0.example']['lifted'])
+        self.assertFalse(entries['*!*@foo.host']['lifted'])
+
+    def testRotationReleasesATimedBanEarly(self):
+        entries = self._fullListOfOurBans()
+        entries['*!*@h0.example']['expire_at'] = time.time() + 3600
+        entries['*!*@h0.example']['expire_mode'] = 'full'
+        msgs = self._takeAll(self.assertNotError('blacklist add foo r'))
+        self.assertRegex(msgs[-1].args[1], r'released timed ban \*!\*@h0\.example early')
+        self.assertTrue(any(m.args[1:] == ('-b', '*!*@h0.example') for m in msgs))
+        self.assertNotIn('*!*@h0.example', entries)
+
+    def testRotationOnlyLiftsAPermanentIrcOnlyEntry(self):
+        entries = self._fullListOfOurBans()
+        entries['*!*@h0.example']['expire_at'] = time.time() + 3600
+        entries['*!*@h0.example']['expire_mode'] = 'irc_only'
+        self._takeAll(self.assertNotError('blacklist add foo r'))
+        self.assertTrue(entries['*!*@h0.example']['lifted'])
+        self.assertIsNone(entries['*!*@h0.example']['expire_at'])
+
+    def testRotationNeverTouchesForeignBans(self):
+        self._isupport(maxlist={'b': 1})
+        self.irc.state.channels[self.channel].bans.add('*!*@set.by.an.op')
+        msgs = self._takeAll(self.assertNotError('blacklist add foo r'))
+        self.assertEqual(self._modeLines(msgs, '-b'), [])
+        self.assertRegex(msgs[-1].args[1], 'ban list is full')
+
+    def testRotationCanBeTurnedOff(self):
+        self._fullListOfOurBans()
+        with conf.supybot.plugins.Blacklist.rotateBans.context(False):
+            msgs = self._takeAll(self.assertNotError('blacklist add foo r'))
+        self.assertEqual(self._modeLines(msgs, '-b'), [])
+        self.assertRegex(msgs[-1].args[1], 'ban list is full')
+
+    def testJoinRotatesToo(self):
+        entries = self._fullListOfOurBans()
+        self._cb()._internal_add(self.channel, '*!*@bad.host', 'someop', 'r',
+                                 is_bot_cmd=True)
+        entries['*!*@bad.host']['lifted'] = True
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix='x!y@bad.host'))
+        msgs = self._takeAll()
+        self.assertTrue(any(m.args[1:] == ('-b', '*!*@h0.example') for m in msgs))
+        self.assertTrue(any(m.args[1:] == ('+b', '*!*@bad.host') for m in msgs))
+        self.assertEqual(self._kicked(msgs), ['x'])

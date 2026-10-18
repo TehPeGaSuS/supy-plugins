@@ -435,6 +435,240 @@ class Blacklist(callbacks.Plugin):
             return False
 
     # -----------------------------------------------------------------
+    # ircd limits (ISUPPORT MODES / MAXLIST), mask coverage, hit tracking
+    # -----------------------------------------------------------------
+
+    def _modesPerLine(self, irc):
+        """ISUPPORT MODES: how many list modes one MODE line may carry. If
+        it's absent the spec default of 3 applies; present without a value
+        means no limit, which we still cap at 12 to keep lines short."""
+        supported = irc.state.supported
+        if 'modes' not in supported:
+            return 3
+        return supported['modes'] or 12
+
+    def _modeMsgs(self, irc, channel, masks, unban=False):
+        """MODE messages setting +b (or -b) on `masks`, stacked as many per
+        line as the ircd allows and kept well under the 512-byte limit."""
+        build = ircmsgs.unbans if unban else ircmsgs.bans
+        per_line = self._modesPerLine(irc)
+        msgs, chunk, size = [], [], 0
+        for mask in masks:
+            if chunk and (len(chunk) >= per_line or size + len(mask) > 400):
+                msgs.append(build(channel, chunk))
+                chunk, size = [], 0
+            chunk.append(mask)
+            size += len(mask) + 1
+        if chunk:
+            msgs.append(build(channel, chunk))
+        return msgs
+
+    def _banRoom(self, irc, channel):
+        """How many more +b the channel's ban list takes (ISUPPORT MAXLIST's
+        b, or the older MAXBANS), or None if the ircd didn't say. Only +b is
+        counted: Limnoria doesn't track +e/+I/+q, which share one pool with
+        +b on some ircds (Solanum's MAXLIST=bqeI:100), and bans still in
+        flight aren't counted either. So this can only overestimate the
+        room, never refuse wrongly; do478 covers the gap."""
+        supported = irc.state.supported
+        limit = (supported.get('maxlist') or {}).get('b') or supported.get('maxbans')
+        if not limit:
+            return None
+        try:
+            used = len(irc.state.channels[channel].bans)
+        except KeyError:
+            return None
+        return max(limit - used, 0)
+
+    def _makeRoom(self, irc, channel, keep):
+        """The ban list is full and `keep` needs a slot: if rotateBans is
+        on, lift the least recently active ban this plugin owns (one of the
+        channel's entries, or a network entry if the channel enforces
+        those). Bans set outside the plugin and extbans are never touched.
+        A permanent channel entry is only marked lifted and comes back on
+        the next matching join, as with banlistExpiry; a timed one ('full'
+        expiry, e.g. `timer` or a manual ban) is released early, entry and
+        all, for good behaviour. A network entry is only lifted in this
+        channel. Returns (mask, released), or None if nothing could go."""
+        if not self.registryValue('rotateBans', channel):
+            return None
+        try:
+            present = {b.lower() for b in irc.state.channels[channel].bans}
+        except KeyError:
+            return None
+        candidates = []  # (last activity, mask, scope, entry)
+        with self._db_lock:
+            bucket = self.db['channels'].get(channel.lower())
+            for m, e in (bucket['entries'].items() if bucket else ()):
+                candidates.append((e.get('last_hit') or e['created_at'], m, 'channel', e))
+            if self.registryValue('enforceGlobal', channel):
+                for m, e in self.db['net']['entries'].items():
+                    candidates.append((e.get('last_hit') or e['created_at'], m, 'net', e))
+        candidates = [c for c in candidates
+                      if c[1].lower() in present and c[1].lower() != keep.lower()]
+        if not candidates:
+            return None
+        _, mask, scope, e = min(candidates, key=lambda c: c[0])
+        irc.queueMsg(ircmsgs.unban(channel, mask))
+        irc.state.channels[channel].bans.discard(mask)
+        released = scope == 'channel' and e.get('expire_mode') == 'full'
+        if scope == 'channel':
+            with self._db_lock:
+                if released:
+                    self.db['channels'][channel.lower()]['entries'].pop(mask, None)
+                else:
+                    e['lifted'] = True
+                    if e.get('expire_mode') == 'irc_only':
+                        e['expire_at'] = e['expire_mode'] = None
+                self._dbWrite()
+            self._unschedule('channel', channel, e['id'])
+        logger.info(f"Blacklist: {channel}'s ban list is full; "
+                    f"{'released' if released else 'lifted'} {mask} "
+                    f"to make room for {keep}.")
+        return mask, released
+
+    def _hasRoom(self, irc, channel, mask):
+        """True if a +b for `mask` should fit, making room first if the
+        list is full and rotateBans allows it."""
+        return self._banRoom(irc, channel) != 0 \
+            or self._makeRoom(irc, channel, mask) is not None
+
+    def _maskCovers(self, wide, narrow):
+        """True if every hostmask `narrow` matches is also matched by `wide`:
+        a '*' in `wide` absorbs anything, a '?' any one character but a '*',
+        and everything else must be equal under IRC casemapping."""
+        a, b = ircutils.toLower(wide), ircutils.toLower(narrow)
+        memo = {}
+        def covers(i, j):
+            if (i, j) not in memo:
+                if i == len(a):
+                    r = j == len(b)
+                elif a[i] == '*':
+                    r = covers(i + 1, j) or (j < len(b) and covers(i, j + 1))
+                elif j == len(b):
+                    r = False
+                elif a[i] == '?':
+                    r = b[j] != '*' and covers(i + 1, j + 1)
+                else:
+                    r = a[i] == b[j] and covers(i + 1, j + 1)
+                memo[(i, j)] = r
+            return memo[(i, j)]
+        return covers(0, 0)
+
+    def _coverage(self, entries, mask, expire_at=None):
+        """(covering, covered) for a new `mask` against existing (mask, entry)
+        pairs: an entry that already bans everything `mask` would (and lasts
+        at least as long), and the narrower entries `mask` makes redundant.
+        The identical mask is neither: re-adding it just updates the entry."""
+        covering, covered = None, []
+        for m, e in entries:
+            if ircutils.toLower(m) == ircutils.toLower(mask):
+                continue
+            if self._maskCovers(m, mask):
+                theirs = e.get('expire_at') if e.get('expire_mode') == 'full' else None
+                if covering is None and (theirs is None or
+                        (expire_at is not None and theirs >= expire_at)):
+                    covering = (m, e)
+            elif self._maskCovers(mask, m):
+                covered.append((m, e))
+        return covering, covered
+
+    def _coveredNote(self, covered, limit=5):
+        """Reply suffix naming the existing entries a new mask makes redundant."""
+        if not covered:
+            return ""
+        names = ", ".join(f"[{e['id']}] {m}" for m, e in covered[:limit])
+        if len(covered) > limit:
+            names += f" and {len(covered) - limit} more"
+        return (f" It also covers {names}; delete "
+                f"{'them' if len(covered) > 1 else 'it'} to free ban list slots.")
+
+    def _matchingMembers(self, irc, channel, mask, exempt):
+        """Nicks in `channel` whose hostmask matches `mask`, except the bot
+        itself and anything the `exempt(hostmask)` callable protects."""
+        try:
+            members = list(irc.state.channels[channel].users)
+        except KeyError:
+            return []
+        out = []
+        for nick in members:
+            if ircutils.strEqual(nick, irc.nick):
+                continue
+            try:
+                hm = irc.state.nickToHostmask(nick)
+            except KeyError:
+                continue
+            if not exempt(hm) and ircutils.hostmaskPatternEqual(mask, hm):
+                out.append(nick)
+        return out
+
+    def _tooBroad(self, irc, channel, mask, exempt):
+        """An error string if `mask` matches more members of `channel` than
+        its maxBanMatches allows (0 = no limit), else None."""
+        limit = self.registryValue('maxBanMatches', channel)
+        if not limit:
+            return None
+        n = len(self._matchingMembers(irc, channel, mask, exempt))
+        if n <= limit:
+            return None
+        return (f"{mask} matches {n} people in {channel} (maxBanMatches is "
+                f"{limit}). Add --force if you really mean it.")
+
+    def _recordHit(self, scope, channel, mask, count=1):
+        """Counts `count` people caught by an entry and stamps when."""
+        with self._db_lock:
+            bucket = self.db['net'] if scope == 'net' \
+                else self.db['channels'].get(channel.lower())
+            entry = bucket['entries'].get(mask) if bucket else None
+            if entry is None:
+                return
+            entry['hits'] = entry.get('hits', 0) + count
+            entry['last_hit'] = time.time()
+            self._dbWrite()
+
+    def _ago(self, seconds):
+        seconds = max(int(seconds), 0)
+        for unit, size in (('d', 86400), ('h', 3600), ('m', 60)):
+            if seconds >= size:
+                return f"{seconds // size}{unit}"
+        return f"{seconds}s"
+
+    def _hitText(self, e, now):
+        """', 3 hits, last 2d ago' for an entry that has caught anyone."""
+        hits = e.get('hits', 0)
+        if not hits:
+            return ""
+        return (f", {hits} hit{'s' if hits != 1 else ''}, "
+                f"last {self._ago(now - e['last_hit'])} ago")
+
+    def _replyStale(self, irc, channel, items, days, title):
+        """Replies with the entries that haven't caught anyone in `days`
+        days (never-hit entries count from when they were added), least
+        recently active first, pasting the list when it's long."""
+        now = time.time()
+        cutoff = now - days * 86400
+        stale = sorted(((e.get('last_hit') or e['created_at'], m, e)
+                        for m, e in items
+                        if (e.get('last_hit') or e['created_at']) <= cutoff),
+                       key=lambda t: t[0])
+        if not stale:
+            irc.reply(f"Every entry has caught someone in the last {days} days.")
+            return
+        lines = []
+        for _, m, e in stale:
+            seen = f"last hit {self._ago(now - e['last_hit'])} ago" \
+                if e.get('last_hit') else "never hit"
+            lines.append(f"[{e['id']}] {m} ({seen}, added "
+                         f"{self._ago(now - e['created_at'])} ago)")
+        if len(lines) > (self.registryValue('maxInlineEntries', channel) or 5):
+            text = f"{title} ({len(lines)} entries):\n" + "=" * 45 + "\n"
+            text += "".join(line + "\n" for line in lines)
+            url = self._createPastebin(channel, text)
+            irc.reply(f"{len(lines)} stale entries. View here: {url}")
+        else:
+            irc.reply(" | ".join(lines))
+
+    # -----------------------------------------------------------------
     # Expiry scheduling
     # -----------------------------------------------------------------
 
@@ -602,45 +836,64 @@ class Blacklist(callbacks.Plugin):
         """Kicks every member of `channel` whose hostmask matches `mask` (the
         enforce-bans behavior), except the bot itself and anything the
         `exempt(hostmask)` callable protects. Returns the nicks kicked."""
-        try:
-            members = list(irc.state.channels[channel].users)
-        except KeyError:
-            return []
-        kicked = []
-        for nick in members:
-            if ircutils.strEqual(nick, irc.nick):
-                continue
-            try:
-                hm = irc.state.nickToHostmask(nick)
-            except KeyError:
-                continue
-            if exempt(hm) or not ircutils.hostmaskPatternEqual(mask, hm):
-                continue
+        kicked = self._matchingMembers(irc, channel, mask, exempt)
+        for nick in kicked:
             irc.queueMsg(ircmsgs.kick(channel, nick, reason))
-            kicked.append(nick)
         return kicked
 
     def _enforceNet(self, irc, mask, reason):
         """Applies a network-blacklist mask across every channel that has
         enforceGlobal on, banning it and kicking every matching member.
-        Returns (reached, skipped): [(channel, bot_has_ops)] for the channels
-        it was applied in, and the channels with enforceGlobal off."""
-        reached, skipped = [], []
+        Returns (reached, skipped, full): [(channel, bot_has_ops)] for the
+        channels it was applied in, the channels with enforceGlobal off, and
+        the channels whose ban list was full (kicked there, but no +b)."""
+        reached, skipped, full = [], [], []
+        hits = 0
         for chan in list(irc.state.channels.keys()):
             if not self.registryValue('enforceGlobal', chan):
                 skipped.append(chan)
                 continue
-            irc.queueMsg(ircmsgs.ban(chan, mask))
-            self._kickMatching(irc, chan, mask, reason, self._isExemptNet)
+            if not self._hasRoom(irc, chan, mask):
+                full.append(chan)
+            else:
+                irc.queueMsg(ircmsgs.ban(chan, mask))
+            hits += len(self._kickMatching(irc, chan, mask, reason, self._isExemptNet))
             state = irc.state.channels[chan]
             reached.append((chan, state.isOp(irc.nick) or state.isHalfop(irc.nick)))
-        return reached, skipped
+        if hits:
+            self._recordHit('net', None, mask, hits)
+        return reached, skipped, full
 
-    def _netReachText(self, reached, skipped, limit=8):
+    def _netTooBroad(self, irc, mask):
+        """_tooBroad across every channel enforcing the network blacklist."""
+        for chan in list(irc.state.channels.keys()):
+            if self.registryValue('enforceGlobal', chan):
+                err = self._tooBroad(irc, chan, mask, self._isExemptNet)
+                if err:
+                    return err
+        return None
+
+    def _guardNewNet(self, irc, mask, expire_at, force):
+        """_guardNew for the network blacklist. Returns (error, note)."""
+        if force:
+            return None, ""
+        err = self._netTooBroad(irc, mask)
+        if err:
+            return err, ""
+        with self._db_lock:
+            items = list(self.db['net']['entries'].items())
+        covering, covered = self._coverage(items, mask, expire_at)
+        if covering:
+            m, e = covering
+            return (f"{mask} is already covered by network entry [{e['id']}] "
+                    f"{m}. Add --force to store it anyway."), ""
+        return None, self._coveredNote(covered)
+
+    def _netReachText(self, reached, skipped, full=(), limit=8):
         """One line saying where a network ban landed: the channels it was
         applied in and those where the bot has no op (so it won't take).
         Channels with enforceGlobal off are only mentioned when that leaves
-        the ban enforced nowhere."""
+        the ban enforced nowhere, and full ban lists are always mentioned."""
         def capped(names):
             text = ", ".join(names[:limit])
             return text + (f" and {len(names) - limit} more" if len(names) > limit else "")
@@ -660,6 +913,9 @@ class Blacklist(callbacks.Plugin):
                              f"{n} channel{'s' if n != 1 else ''}.")
             else:
                 parts.append("Not enforced anywhere yet.")
+        if full:
+            parts.append(f"The ban list is full in {capped(list(full))}, "
+                         "so matching users are only kicked there.")
         return " ".join(parts)
 
     def _resyncBans(self, irc, channel):
@@ -667,7 +923,9 @@ class Blacklist(callbacks.Plugin):
         list and kicks the members they match (Eggdrop's recheck_bans). Runs
         when the bot gains ops, or finishes joining already opped. Entries
         that were lifted on purpose (banlistExpiry, or an op's manual -b)
-        are left alone: they come back on the next matching join."""
+        are left alone: they come back on the next matching join.
+        If the ban list can't take them all, the most recently active
+        entries win and the rest are marked lifted, to return on join."""
         try:
             state = irc.state.channels[channel]
         except KeyError:
@@ -675,7 +933,8 @@ class Blacklist(callbacks.Plugin):
         if not (state.isOp(irc.nick) or state.isHalfop(irc.nick)):
             return
         present = {b.lower() for b in state.bans}
-        wanted = {}  # mask.lower() -> (mask, kick reason, exempt check)
+        # mask.lower() -> (mask, kick reason, exempt check, scope, entry)
+        wanted = {}
         if self.registryValue('enabled', channel):
             with self._db_lock:
                 bucket = self.db['channels'].get(channel.lower())
@@ -684,20 +943,35 @@ class Blacklist(callbacks.Plugin):
                 if not e.get('lifted'):
                     wanted[mask.lower()] = (
                         mask, e['reason'],
-                        lambda hm: self._isExempt(channel, hm))
+                        lambda hm: self._isExempt(channel, hm), 'channel', e)
         if self.registryValue('enforceGlobal', channel):
             with self._db_lock:
                 net_items = list(self.db['net']['entries'].items())
             for mask, e in net_items:
                 wanted.setdefault(mask.lower(), (
-                    mask, e['reason'] or "Network-wide ban.", self._isExemptNet))
+                    mask, e['reason'] or "Network-wide ban.", self._isExemptNet,
+                    'net', e))
         todo = [w for k, w in wanted.items()
                 if k not in present and not self._looksLikeExtban(w[0])
                 and not self._isSelfBan(irc, w[0])]
-        for n in range(0, len(todo), 4):
-            irc.queueMsg(ircmsgs.bans(channel, [w[0] for w in todo[n:n + 4]]))
-        for mask, reason, exempt in todo:
-            self._kickMatching(irc, channel, mask, reason, exempt)
+        room = self._banRoom(irc, channel)
+        if room is not None and len(todo) > room:
+            todo.sort(key=lambda w: w[4].get('last_hit') or w[4]['created_at'],
+                      reverse=True)
+            todo, dropped = todo[:room], todo[room:]
+            logger.warning(f"Blacklist: {channel}'s ban list is full; "
+                           f"{len(dropped)} stored ban(s) not re-applied.")
+            with self._db_lock:
+                for mask, _, _, scope, e in dropped:
+                    if scope == 'channel':
+                        e['lifted'] = True
+                self._dbWrite()
+        for m in self._modeMsgs(irc, channel, [w[0] for w in todo]):
+            irc.queueMsg(m)
+        for mask, reason, exempt, scope, _ in todo:
+            kicked = self._kickMatching(irc, channel, mask, reason, exempt)
+            if kicked:
+                self._recordHit(scope, channel, mask, len(kicked))
 
     # -----------------------------------------------------------------
     # Commands
@@ -711,9 +985,61 @@ class Blacklist(callbacks.Plugin):
         irc.reply(" | ".join(m[8:11]))
     bantype = wrap(bantype, ['admin'])
 
-    def add(self, irc, msg, args, channel, target, reason):
-        """[<channel>] <nick|mask> [<reason>]
+    def _guardNew(self, irc, channel, mask, expire_at, force):
+        """Checks a new channel entry against the ones already stored and
+        the people in the channel. Returns (error, note): refuse with
+        `error` if set, else append `note` to the success reply."""
+        if force:
+            return None, ""
+        exempt = lambda hm: self._isExempt(channel, hm)
+        err = self._tooBroad(irc, channel, mask, exempt)
+        if err:
+            return err, ""
+        bucket = self._get_channel_bucket(channel)
+        with self._db_lock:
+            items = list(bucket['entries'].items()) if bucket else []
+        covering, covered = self._coverage(items, mask, expire_at)
+        if covering:
+            m, e = covering
+            return (f"{mask} is already covered by [{e['id']}] {m}. "
+                    "Add --force to store it anyway."), ""
+        return None, self._coveredNote(covered)
+
+    def _applyBan(self, irc, channel, mask, reason, exempt):
+        """Sets the +b for a just-stored channel entry and kicks whoever it
+        matches. If the ban list is full the +b is skipped and the entry
+        marked lifted (it returns on the next matching join), unless
+        rotateBans can lift an older one to make room. Returns a reply
+        note."""
+        note = ""
+        full = self._banRoom(irc, channel) == 0
+        lifted = self._makeRoom(irc, channel, mask) if full else None
+        if lifted:
+            old, released = lifted
+            note = (f" {channel}'s ban list was full, so I " + (
+                f"released timed ban {old} early to make room." if released else
+                f"lifted {old} to make room (it comes back on a matching join)."))
+        if full and not lifted:
+            with self._db_lock:
+                bucket = self.db['channels'].get(channel.lower())
+                e = bucket['entries'].get(mask) if bucket else None
+                if e is not None:
+                    e['lifted'] = True
+                    self._dbWrite()
+            note = (f" {channel}'s ban list is full, so I couldn't set the "
+                    "+b; it's stored, and matching users are kicked on join.")
+        else:
+            irc.queueMsg(ircmsgs.ban(channel, mask))
+        kicked = self._kickMatching(irc, channel, mask, reason, exempt)
+        if kicked:
+            self._recordHit('channel', channel, mask, len(kicked))
+        return note
+
+    def add(self, irc, msg, args, channel, optlist, target, reason):
+        """[<channel>] [--force] <nick|mask> [<reason>]
         Adds a mask to the blacklist (Permanent in DB, temporary +b in IRC).
+        Refuses a mask matching more people than maxBanMatches, or one an
+        existing entry already covers, unless --force is given.
         """
         if not self._isKnownNick(irc, target) and self._completeMask(target) is None:
             irc.error("The banmask specified is incorrect. It must be in "
@@ -731,6 +1057,11 @@ class Blacklist(callbacks.Plugin):
             irc.error("That hostmask is exempt from the blacklist.")
             return
         reason = reason or self.registryValue('banReason', channel)
+        # The entry itself is permanent; only its +b is lifted on a timer.
+        err, note = self._guardNew(irc, channel, mask, None, dict(optlist).get('force'))
+        if err:
+            irc.error(err)
+            return
 
         expiry = self.registryValue('banlistExpiry', channel)
         expire_at = time.time() + (expiry * 60) if expiry > 0 else None
@@ -738,16 +1069,15 @@ class Blacklist(callbacks.Plugin):
 
         entry_id = self._internal_add(channel, mask, msg.nick, reason, is_bot_cmd=True,
                                        expire_at=expire_at, expire_mode=mode)
-        irc.queueMsg(ircmsgs.ban(channel, mask))
-
-        self._kickMatching(irc, channel, mask, reason,
-                           lambda hm: self._isExempt(channel, hm))
+        note += self._applyBan(irc, channel, mask, reason,
+                               lambda hm: self._isExempt(channel, hm))
 
         if expire_at:
             self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, mode)
 
-        irc.replySuccess()
-    add = wrap(add, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', optional('text')])
+        irc.replySuccess(note.strip())
+    add = wrap(add, [('checkChannelCapability', 'op'), 'channel', getopts({'force': ''}),
+                     'somethingWithoutSpaces', optional('text')])
 
     def delete(self, irc, msg, args, channel, target):
         """[<channel>] <mask|ID>
@@ -766,9 +1096,10 @@ class Blacklist(callbacks.Plugin):
         irc.replySuccess()
     delete = wrap(delete, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
 
-    def timer(self, irc, msg, args, channel, target, minutes, reason):
-        """[<channel>] <nick|mask> [<minutes>] [<reason>]
+    def timer(self, irc, msg, args, channel, optlist, target, minutes, reason):
+        """[<channel>] [--force] <nick|mask> [<minutes>] [<reason>]
         Applies a temporary ban. If minutes are not provided, uses banTimerExpiry.
+        --force skips the maxBanMatches and already-covered checks, as in add.
         """
         if not self._isKnownNick(irc, target) and self._completeMask(target) is None:
             irc.error("The banmask specified is incorrect. It must be in "
@@ -795,17 +1126,20 @@ class Blacklist(callbacks.Plugin):
         db_reason = reason or ""
         kick_reason = reason or "Temporary ban"
         expire_at = time.time() + (minutes * 60)
+        err, note = self._guardNew(irc, channel, mask, expire_at, dict(optlist).get('force'))
+        if err:
+            irc.error(err)
+            return
 
         entry_id = self._internal_add(channel, mask, msg.nick, db_reason, is_bot_cmd=True,
                                        expire_at=expire_at, expire_mode='full')
-        irc.queueMsg(ircmsgs.ban(channel, mask))
-
-        self._kickMatching(irc, channel, mask, kick_reason,
-                           lambda hm: self._isExempt(channel, hm))
+        note += self._applyBan(irc, channel, mask, kick_reason,
+                               lambda hm: self._isExempt(channel, hm))
 
         self._schedule_expiry(irc.network, 'channel', channel, entry_id, expire_at, 'full')
-        irc.replySuccess()
-    timer = wrap(timer, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
+        irc.replySuccess(note.strip())
+    timer = wrap(timer, [('checkChannelCapability', 'op'), 'channel', getopts({'force': ''}),
+                         'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
 
     def reason(self, irc, msg, args, channel, target, newreason):
         """[<channel>] <mask|ID> <reason>
@@ -874,8 +1208,9 @@ class Blacklist(callbacks.Plugin):
             bucket['entries'] = {}
             self._dbWrite()
 
+        for m in self._modeMsgs(irc, channel, [mask for mask, _ in masks], unban=True):
+            irc.queueMsg(m)
         for mask, e in masks:
-            irc.queueMsg(ircmsgs.unban(channel, mask))
             self._unschedule('channel', channel, e['id'])
         irc.reply(f"Cleared {len(masks)} entries from {channel}.")
     clear = wrap(clear, [('checkChannelCapability', 'op'), 'channel', 'somethingWithoutSpaces'])
@@ -883,11 +1218,34 @@ class Blacklist(callbacks.Plugin):
     def stats(self, irc, msg, args, channel):
         """[<channel>]"""
         bucket = self._get_channel_bucket(channel)
-        count = len(bucket['entries']) if bucket else 0
+        with self._db_lock:
+            entries = list(bucket['entries'].values()) if bucket else []
+        count = len(entries)
         net_count = len(self.db['net']['entries'])
-        irc.reply(f"Channel {channel} has {count} bans in the blacklist "
-                  f"({net_count} in the network blacklist).")
+        text = (f"Channel {channel} has {count} bans in the blacklist "
+                f"({net_count} in the network blacklist).")
+        never = sum(1 for e in entries if not e.get('hits'))
+        if count:
+            text += f" {never} of them never caught anyone."
+        room = self._banRoom(irc, channel)
+        if room is not None:
+            used = len(irc.state.channels[channel].bans)
+            text += f" Channel ban list: {used}/{used + room}."
+        irc.reply(text)
     stats = wrap(stats, [('checkChannelCapability', 'op'), 'channel'])
+
+    def stale(self, irc, msg, args, channel, days):
+        """[<channel>] [<days>]
+        Lists the entries that haven't caught anyone in <days> days (default
+        30), oldest first; entries that never have count from when they were
+        added. Candidates to delete to keep the channel's ban list short.
+        """
+        bucket = self._get_channel_bucket(channel)
+        with self._db_lock:
+            items = list(bucket['entries'].items()) if bucket else []
+        self._replyStale(irc, channel, items, days or 30,
+                         f"Stale bans for {channel} (no hits in {days or 30} days)")
+    stale = wrap(stale, [('checkChannelCapability', 'op'), 'channel', optional('positiveInt')])
 
     def list(self, irc, msg, args, channel):
         """[<channel>]
@@ -914,7 +1272,7 @@ class Blacklist(callbacks.Plugin):
             expire_at = e.get('expire_at')
             expire_mode = e.get('expire_mode')
 
-            elapsed = int(now - created_at) // 60
+            elapsed = self._ago(now - created_at)
             remaining_str = ""
 
             if expire_at:
@@ -931,7 +1289,8 @@ class Blacklist(callbacks.Plugin):
             elif reason == "*manual ban":
                 reason_display = " [manual]"
 
-            entry = f"[{entry_id}] {m} ({elapsed}m ago by {adder}){remaining_str}{reason_display}"
+            entry = (f"[{entry_id}] {m} ({elapsed} ago by {adder}{self._hitText(e, now)})"
+                     f"{remaining_str}{reason_display}")
             output_list.append(entry)
             full_text += entry + "\n"
 
@@ -1012,10 +1371,12 @@ class Blacklist(callbacks.Plugin):
 
         plugin = None
 
-        def add(self, irc, msg, args, target, reason):
-            """<nick|hostmask> [<reason>]
+        def add(self, irc, msg, args, optlist, target, reason):
+            """[--force] <nick|hostmask> [<reason>]
             Adds <nick|hostmask> to the network-wide blacklist and immediately
-            bans/kicks it in every channel currently enforcing it.
+            bans/kicks it in every channel currently enforcing it. Refuses a
+            mask matching more people than a channel's maxBanMatches, or one
+            an existing network entry already covers, unless --force is given.
             """
             p = self.plugin
             if not p._isKnownNick(irc, target) and p._completeMask(target) is None:
@@ -1034,11 +1395,16 @@ class Blacklist(callbacks.Plugin):
                 irc.error("That hostmask is exempt from the network blacklist.")
                 return
             reason = reason or "Network-wide ban."
+            err, note = p._guardNewNet(irc, mask, None, dict(optlist).get('force'))
+            if err:
+                irc.error(err)
+                return
             p._net_add(mask, msg.nick, reason)
-            reached, skipped = p._enforceNet(irc, mask, reason)
+            reached, skipped, full = p._enforceNet(irc, mask, reason)
             irc.reply("Added to the network blacklist. " +
-                      p._netReachText(reached, skipped))
-        add = wrap(add, ['admin', 'somethingWithoutSpaces', optional('text')])
+                      p._netReachText(reached, skipped, full) + note)
+        add = wrap(add, ['admin', getopts({'force': ''}), 'somethingWithoutSpaces',
+                         optional('text')])
 
         def delete(self, irc, msg, args, target):
             """<mask|ID>"""
@@ -1058,10 +1424,11 @@ class Blacklist(callbacks.Plugin):
             irc.replySuccess()
         delete = wrap(delete, ['admin', 'somethingWithoutSpaces'])
 
-        def timer(self, irc, msg, args, target, minutes, reason):
-            """<nick|hostmask> [<minutes>] [<reason>]
+        def timer(self, irc, msg, args, optlist, target, minutes, reason):
+            """[--force] <nick|hostmask> [<minutes>] [<reason>]
             Applies a temporary network-wide ban. If minutes are not provided,
-            uses netTimerExpiry.
+            uses netTimerExpiry. --force skips the maxBanMatches and
+            already-covered checks, as in net add.
             """
             p = self.plugin
             if not p._isKnownNick(irc, target) and p._completeMask(target) is None:
@@ -1088,12 +1455,17 @@ class Blacklist(callbacks.Plugin):
 
             reason = reason or "Temporary network-wide ban."
             expire_at = time.time() + (minutes * 60)
+            err, note = p._guardNewNet(irc, mask, expire_at, dict(optlist).get('force'))
+            if err:
+                irc.error(err)
+                return
             entry_id = p._net_add(mask, msg.nick, reason, expire_at=expire_at, expire_mode='full')
-            reached, skipped = p._enforceNet(irc, mask, reason)
+            reached, skipped, full = p._enforceNet(irc, mask, reason)
             p._schedule_expiry(irc.network, 'net', None, entry_id, expire_at, 'full')
             irc.reply(f"Added to the network blacklist for {minutes} minutes. " +
-                      p._netReachText(reached, skipped))
-        timer = wrap(timer, ['admin', 'somethingWithoutSpaces', optional('positiveInt'), optional('text')])
+                      p._netReachText(reached, skipped, full) + note)
+        timer = wrap(timer, ['admin', getopts({'force': ''}), 'somethingWithoutSpaces',
+                             optional('positiveInt'), optional('text')])
 
         def list(self, irc, msg, args):
             """takes no arguments"""
@@ -1108,12 +1480,13 @@ class Blacklist(callbacks.Plugin):
             out = []
             full_text = f"Network Ban List ({len(items)} entries):\n" + "="*45 + "\n"
             for m, e in items:
-                elapsed = int(now - e['created_at']) // 60
+                elapsed = p._ago(now - e['created_at'])
                 remaining_str = ""
                 if e.get('expire_at'):
                     rem = int(e['expire_at'] - now) // 60
                     remaining_str = f" [{rem}m left]" if rem > 0 else " [expiring...]"
-                entry = f"[{e['id']}] {m} ({elapsed}m ago by {e['adder']}){remaining_str}: {e['reason']}"
+                entry = (f"[{e['id']}] {m} ({elapsed} ago by {e['adder']}"
+                         f"{p._hitText(e, now)}){remaining_str}: {e['reason']}")
                 out.append(entry)
                 full_text += entry + "\n"
 
@@ -1152,12 +1525,25 @@ class Blacklist(callbacks.Plugin):
                 p._dbWrite()
 
             for chan in list(irc.state.channels.keys()):
-                for mask, e in masks:
-                    irc.queueMsg(ircmsgs.unban(chan, mask))
+                for m in p._modeMsgs(irc, chan, [mask for mask, _ in masks], unban=True):
+                    irc.queueMsg(m)
             for mask, e in masks:
                 p._unschedule('net', None, e['id'])
             irc.reply(f"Cleared {len(masks)} entries from the network blacklist.")
         clear = wrap(clear, ['admin', 'somethingWithoutSpaces'])
+
+        def stale(self, irc, msg, args, days):
+            """[<days>]
+            Lists the network entries that haven't caught anyone in <days>
+            days (default 30), oldest first; entries that never have count
+            from when they were added.
+            """
+            p = self.plugin
+            with p._db_lock:
+                items = list(p.db['net']['entries'].items())
+            p._replyStale(irc, None, items, days or 30,
+                          f"Stale network bans (no hits in {days or 30} days)")
+        stale = wrap(stale, ['admin', optional('positiveInt')])
 
         def exemptadd(self, irc, msg, args, first, second):
             """<nick> <hostmask> | <hostmask>
@@ -1285,14 +1671,18 @@ class Blacklist(callbacks.Plugin):
         """Bans and kicks `nick` (whose current hostmask is `prefix`) if the
         network or channel blacklist matches it. Exempts win. Returns True
         if it was enforced."""
+        # A full ban list (with nothing to rotate out) still gets the
+        # kick, just not the +b.
         if self.registryValue('enforceGlobal', channel) \
                 and not self._isExemptNet(prefix):
             with self._db_lock:
                 net_items = list(self.db['net']['entries'].items())
             for mask, e in net_items:
                 if ircutils.hostmaskPatternEqual(mask, prefix):
-                    irc.queueMsg(ircmsgs.ban(channel, mask))
+                    if self._hasRoom(irc, channel, mask):
+                        irc.queueMsg(ircmsgs.ban(channel, mask))
                     irc.queueMsg(ircmsgs.kick(channel, nick, e['reason'] or "Network-wide ban."))
+                    self._recordHit('net', None, mask)
                     return True
 
         if self.registryValue('enabled', channel) \
@@ -1302,9 +1692,13 @@ class Blacklist(callbacks.Plugin):
                 items = list(bucket['entries'].items()) if bucket else []
             for mask, e in items:
                 if ircutils.hostmaskPatternEqual(mask, prefix):
-                    irc.queueMsg(ircmsgs.ban(channel, mask))
+                    banned = self._hasRoom(irc, channel, mask)
+                    if banned:
+                        irc.queueMsg(ircmsgs.ban(channel, mask))
                     irc.queueMsg(ircmsgs.kick(channel, nick, e['reason']))
-                    self._rearm_irc_lift(irc, channel, mask, e)
+                    self._recordHit('channel', channel, mask)
+                    if banned:
+                        self._rearm_irc_lift(irc, channel, mask, e)
                     return True
         return False
 
@@ -1330,6 +1724,34 @@ class Blacklist(callbacks.Plugin):
         for channel, state in list(irc.state.channels.items()):
             if newnick in state.users:
                 self._enforceMember(irc, channel, newnick, prefix)
+
+    def doChghost(self, irc, msg):
+        """IRCv3 CHGHOST: a member's user@host changed in place (a vhost or
+        cloak on identify, or losing one), so re-check them the way doNick
+        does. Without the cap the ircd fakes a quit and rejoin instead,
+        which doJoin already covers."""
+        if len(msg.args) < 2 or ircutils.strEqual(msg.nick, irc.nick):
+            return
+        prefix = ircutils.joinHostmask(msg.nick, msg.args[0], msg.args[1])
+        for channel, state in list(irc.state.channels.items()):
+            if msg.nick in state.users:
+                self._enforceMember(irc, channel, msg.nick, prefix)
+
+    def do478(self, irc, msg):
+        """ERR_BANLISTFULL: a +b didn't take because the channel's ban list
+        is full. Mark the matching channel entry lifted, so it's clear it
+        isn't on the channel; like any lifted entry it is tried again on
+        the next matching join."""
+        if len(msg.args) < 3 or not ircutils.isChannel(msg.args[1]):
+            return
+        channel, mask = msg.args[1], msg.args[2]
+        logger.warning(f"Blacklist: {channel}'s ban list is full; {mask} not set.")
+        with self._db_lock:
+            bucket = self.db['channels'].get(channel.lower())
+            entry = bucket['entries'].get(mask) if bucket else None
+            if entry is not None and not entry.get('lifted'):
+                entry['lifted'] = True
+                self._dbWrite()
 
     def do368(self, irc, msg):
         """End of the channel ban list, requested by Limnoria on join. If the

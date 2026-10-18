@@ -92,6 +92,17 @@ conf.registerChannelValue(Blacklist, 'enforceGlobal',
         entries added with "net add"/"net timer" will be banned/kicked here, and joins are checked
         against the network blacklist in addition to this channel's own list."""))
 
+conf.registerChannelValue(Blacklist, 'maxBanMatches',
+        registry.NonNegativeInteger(5, """Sets how many people in the channel a new ban may match before
+        add/timer (and net add/net timer, per enforcing channel) refuse it as too broad, e.g. a typo like
+        *!*@*.com. Pass --force to go ahead anyway. 0 disables the check."""))
+
+conf.registerChannelValue(Blacklist, 'rotateBans',
+        registry.Boolean(True, """Sets whether a full channel ban list (ISUPPORT MAXLIST/MAXBANS) makes room for
+        a new blacklist ban by lifting the least recently active ban this plugin set. A permanent entry stays in
+        the blacklist and is re-applied on the next matching join; a timed one is released early, entry and
+        all. Bans set outside the plugin are never touched. When off, or when there is nothing to lift, matching users are kicked without a +b."""))
+
 conf.registerGlobalValue(Blacklist, 'netMaskNumber',
         BanmaskNumber(2, """Sets the default banmask number used for network-wide (net) blacklist entries."""))
 

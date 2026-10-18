@@ -43,7 +43,7 @@ never flagged -- only a `:` before the `@` triggers this.
 ## Channel blacklist
 
 ```
-blacklist add [<channel>] <nick|mask> [<reason>]
+blacklist add [<channel>] [--force] <nick|mask> [<reason>]
 ```
 Adds a mask to the channel's blacklist: permanent in the database, banned in
 IRC. If `banlistExpiry` is set, the IRC-side `+b` is lifted after that many
@@ -51,10 +51,21 @@ minutes, but the blacklist entry itself is kept forever (it'll be re-applied
 the next time that mask joins).
 
 ```
-blacklist timer [<channel>] <nick|mask> [<minutes>] [<reason>]
+blacklist timer [<channel>] [--force] <nick|mask> [<minutes>] [<reason>]
 ```
 Applies a temporary ban: both the IRC `+b` and the blacklist entry are
 removed together once it expires (`banTimerExpiry` minutes if none given).
+
+Both refuse a new mask (unless you pass `--force`) when:
+- it matches more people in the channel than `maxBanMatches` (default 5), so
+  a typo like `*!*@*.com` can't empty the channel;
+- an existing entry already covers it (`*!*@foo.isp.net` when
+  `*!*@*.isp.net` is stored), since it would only waste a ban list slot. A
+  timed entry only counts as covering one that expires no later.
+
+Adding a wider mask that makes existing entries redundant is fine; the reply
+names them (`It also covers [3] *!*@a.isp.net, [5] *!*@b.isp.net; delete them
+to free ban list slots.`).
 
 ```
 blacklist delete [<channel>] <mask|ID>
@@ -63,6 +74,7 @@ blacklist search [<channel>] <pattern>
 blacklist reason [<channel>] <mask|ID> <reason>
 blacklist extend [<channel>] <mask|ID> <minutes>
 blacklist stats [<channel>]
+blacklist stale [<channel>] [<days>]
 blacklist clear <channel> confirm
 blacklist kick [<channel>] <nick> [<reason>]
 blacklist bantype
@@ -71,7 +83,15 @@ blacklist bantype
 `extend` — the ID never shifts when other entries are added or removed, so
 scripts and muscle memory both stay valid). `search` matches the mask, adder
 or reason against `<pattern>`. `extend` sets/refreshes an entry's expiry to
-`<minutes>` from now (removes it fully, IRC + list, when it fires). `clear`
+`<minutes>` from now (removes it fully, IRC + list, when it fires).
+
+Each entry counts the people it has caught (kicked on `add`/`timer`, on join,
+on a nick or host change, or on a resync) and when it last did, like
+Eggdrop's "last used" on bans. `list` shows it (`3 hits, last 2d ago`),
+`stats` says how many entries never caught anyone and how full the channel's
+ban list is, and `stale` lists the entries that haven't caught anyone in
+`<days>` days (default 30; never-hit entries count from when they were added),
+oldest first: the candidates to delete. `clear`
 wipes every entry for a channel and lifts every ban it applied — you must
 literally pass the word `confirm` to run it.
 
@@ -124,6 +144,7 @@ blacklist net timer <nick|mask> [<minutes>] [<reason>]
 blacklist net delete <mask|ID>
 blacklist net list
 blacklist net search <pattern>
+blacklist net stale [<days>]
 blacklist net clear confirm
 blacklist net exemptadd [<nick>] <hostmask>
 blacklist net exemptremove <nick> [<hostmask>]
@@ -132,7 +153,9 @@ blacklist net exemptlist [<nick>]
 ```
 `net add` is permanent and bans/kicks the target immediately in every
 enforcing channel; `net timer` is the temporary version. Joins are checked
-against the network blacklist before the channel's own list.
+against the network blacklist before the channel's own list. `net add` and
+`net timer` take `--force` and refuse too-broad or already-covered masks the
+same way `add` does, checking `maxBanMatches` in each enforcing channel.
 
 The reply says where the ban actually landed, for example `Added to the
 network blacklist. Banned in #a, #d. I'm not op in #c, #e, so it won't be
@@ -176,6 +199,31 @@ how many channels have it off.
   lifted by `banlistExpiry`, or removed by an op with `-b`, is marked lifted
   and is *not* re-applied by that resync; it comes back when a matching mask
   joins, as before.
+
+## ircd limits
+
+- **Mode stacking follows ISUPPORT `MODES`.** Re-applied bans (resync) and
+  lifted ones (`clear`, `net clear`) go out as many per `MODE` line as the
+  server allows: 12 on UnrealIRCd, 20 on InspIRCd, 4 on Solanum, 3 if the
+  server doesn't say. Lines are also kept well under 512 bytes.
+- **Ban list size follows ISUPPORT `MAXLIST`** (or ircu's older `MAXBANS`).
+  When the list is full, `rotateBans` (default on) lifts the least recently
+  active ban this plugin set to make room, and the reply says which. A
+  permanent entry stays in the blacklist and comes back on a matching join; a
+  timed one (`timer`, or a manual ban with an expiry) is released early, entry
+  and all, as if for good behaviour. A network entry is only lifted in that
+  channel. Bans set outside the plugin are never touched. If nothing can be lifted, the `+b` is
+  skipped: the entry is stored, matching users are still kicked, and the reply
+  says the list is full. A resync that can't fit everything re-applies the
+  most recently active entries first.
+- Only `+b` is counted. Some ircds share one pool between lists (Solanum's
+  `MAXLIST=bqeI:100`), and Limnoria doesn't track `+e`/`+I`/`+q`, so the
+  server can still refuse a ban. That `478` (ban list full) reply marks the
+  entry lifted, the same as above.
+- **Host changes are re-checked.** With IRCv3 `CHGHOST`, a member who gets
+  (or loses) a vhost or cloak and now matches a stored mask is banned and
+  kicked, like a nick change. Without the cap the server shows a quit and
+  rejoin instead, which the join check already covers.
 
 ## Restart-safe timers
 
@@ -231,6 +279,33 @@ supybot.plugins.Blacklist.kickOnSelfBan: True
 # Default value: Nice try. The ban hammer doesn't swing at the one holding it.
 ###
 supybot.plugins.Blacklist.kickOnSelfBanReason: Nice try. The ban hammer doesn't swing at the one holding it.
+```
+
+```
+###
+# Sets how many people in the channel a new ban may match before add/timer
+# (and net add/net timer, per enforcing channel) refuse it as too broad,
+# e.g. a typo like *!*@*.com. Pass --force to go ahead anyway. 0 disables the
+# check.
+#
+# Default value: 5
+###
+supybot.plugins.Blacklist.maxBanMatches: 5
+```
+
+```
+###
+# Sets whether a full channel ban list (ISUPPORT MAXLIST/MAXBANS) makes room
+# for a new blacklist ban by lifting the least recently active ban this
+# plugin set. A permanent entry stays in the blacklist and is re-applied on
+# the next matching join; a timed one is released early, entry and all. Bans
+# set outside the plugin are never touched.
+# When off, or when there is nothing to lift, matching users are kicked
+# without a +b.
+#
+# Default value: True
+###
+supybot.plugins.Blacklist.rotateBans: True
 ```
 
 ```
