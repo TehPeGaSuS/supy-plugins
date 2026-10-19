@@ -19,6 +19,7 @@ import threading
 import time
 
 from . import data
+from . import tcldb
 
 logger = logging.getLogger('supybot.plugins.DuckHuntPro')
 
@@ -39,7 +40,7 @@ def _newPlayer(nick):
         'stats': {
             'killed': 0, 'golden_killed': 0, 'missed': 0,
             'empty_shots': 0, 'humans_shot': 0, 'wild_shots': 0,
-            'bullets_received': 0, 'deflected': 0, 'absorbed': 0,
+            'bullets_received': 0, 'deflected': 0,
             'confiscations': 0, 'jams': 0, 'deaths': 0,
             'best_time_ms': None, 'total_time_ms': 0, 'timed_shots': 0,
             'reflex_ms': 0,
@@ -78,14 +79,25 @@ def _newNetwork():
 
 def itemActive(player, key, now):
     """Returns the item dict for `key` if the player holds it and it hasn't
-    time-expired, else None (lazily deleting it if it has expired)."""
+    time-expired, else None (lazily deleting it if it has expired). As in
+    the original, an item still works during its expiry second."""
     item = player['items'].get(key)
     if item is None:
         return None
-    if item.get('expires_at') is not None and item['expires_at'] <= now:
+    if item.get('expires_at') is not None and item['expires_at'] < now:
         del player['items'][key]
         return None
     return item
+
+
+def purgeExpiredItems(player, now):
+    """Drops every expired item (the original's get_data "items"). Returns
+    whether there was one: the original saves the database when there was."""
+    expired = [k for k, item in player['items'].items()
+               if item.get('expires_at') is not None and item['expires_at'] < now]
+    for k in expired:
+        del player['items'][k]
+    return bool(expired)
 
 
 def giveItem(player, key, now, duration=None, uses=None, value=None):
@@ -119,11 +131,11 @@ def pruneExpiredBread(chan, now):
     chan['bread'] = [b for b in chan['bread'] if b['expires_at'] > now]
 
 
-def activeBreadCount(chan, now):
-    """Pieces still fresh at `now`. Counting leaves expired pieces in place:
-    the plugin's minute tick removes them one by one so each triggers the
-    original's bread-expired replan."""
-    return len([b for b in chan['bread'] if b['expires_at'] > now])
+def breadCount(chan):
+    """Pieces of bread on the channel. Like the original, this counts the
+    pieces still listed: an expired one counts until the minute tick removes
+    it (and replans)."""
+    return len(chan.get('bread', []))
 
 
 class Database:
@@ -370,7 +382,9 @@ class Database:
                         > (mine.get('expires_at') if mine.get('expires_at') is not None
                            else float('-inf')):
                     items[key] = item
-            dst['items'] = items
+            # The original's lsort -unique -index 1 leaves them in item id order.
+            ids = {key: itemId for itemId, key in tcldb.ITEM_KEYS.items()}
+            dst['items'] = {k: items[k] for k in sorted(items, key=lambda k: ids.get(k, k))}
             activity = [a for a in (dst.get('last_activity'), src.get('last_activity')) if a]
             dst['last_activity'] = max(activity) if activity else None
             if srcKey != dstKey:
@@ -415,6 +429,13 @@ class Database:
         with self.lock:
             return self.data['pending_transfers'].get(
                 self._transferKey(network, channelName, nick))
+
+    def pendingTransfersFrom(self, network, channelName, oldNick):
+        """The pending transfers on this channel that come from `oldNick`."""
+        prefix = '%s|%s|' % (network.lower(), channelName.lower())
+        with self.lock:
+            return [dict(e) for k, e in self.data['pending_transfers'].items()
+                    if k.startswith(prefix) and e['old_nick'].lower() == oldNick.lower()]
 
     def popPendingTransfer(self, network, channelName, nick):
         """Returns and removes the pending transfer for `nick` on this

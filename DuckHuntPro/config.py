@@ -52,7 +52,7 @@ conf.registerChannelValue(DuckHuntPro, 'language',
     en or fr (the original script's two catalogues)."""))
 
 conf.registerChannelValue(DuckHuntPro, 'ducksPerDay',
-    registry.PositiveInteger(18, """Approximate number of ducks that fly per day."""))
+    registry.NonNegativeInteger(18, """Approximate number of ducks that fly per day."""))
 
 conf.registerChannelValue(DuckHuntPro, 'approxGoldenDucksPerDay',
     registry.NonNegativeInteger(1, """Approximate number of golden (multi-hit) ducks
@@ -114,9 +114,11 @@ conf.registerChannelValue(DuckHuntPro, 'topShootersCount',
 conf.registerGroup(DuckHuntPro, 'web')
 
 conf.registerGlobalValue(DuckHuntPro.web, 'enable',
-    registry.Boolean(False, """Enables the built-in web dashboard (leaderboard/
-    champions/shop pages) served through Limnoria's HTTP server, at
-    /duckhuntpro/<network>/<channel>/<page>."""))
+    registry.Boolean(False, """Enables the built-in web dashboard served through
+    Limnoria's HTTP server: each channel's leaderboard and champions at
+    /duckhuntpro/<network>/<channel>/<page>, and the original's shop and
+    progression pages at /duckhuntpro/shop and /duckhuntpro/levels (add /en or
+    /fr for one language; each links to the other)."""))
 
 conf.registerChannelValue(DuckHuntPro, 'minXpForShopping',
     registry.Integer(0, """The lowest a player's xp balance is allowed to go
@@ -134,7 +136,8 @@ conf.registerChannelValue(DuckHuntPro, 'shopPreferredDisplayMode',
 
 conf.registerChannelValue(DuckHuntPro, 'shopUrl',
     registry.String('', """The web page listing the shop items, shown when
-    shopPreferredDisplayMode is non-zero."""))
+    shopPreferredDisplayMode is non-zero. With web.enable on, this can be the
+    dashboard's own shop page: <the bot's web address>/duckhuntpro/shop."""))
 
 conf.registerChannelValue(DuckHuntPro, 'dropsEnabled',
     registry.Boolean(True, """Whether killing a duck can also drop a bonus
@@ -183,7 +186,7 @@ conf.registerChannelValue(DuckHuntPro, 'gunHandBackMode',
     registry.Integer(1, """How temporarily-confiscated weapons get returned:
     1 = once daily at autoGunHandBackTime, 2 = whenever the channel's duck
     count drops back to zero (killed/escaped), 3 = never automatically (only
-    the `rearm` command). Permanently-confiscated weapons (`unarm --static`)
+    the `rearm` command). Permanently-confiscated weapons (`unarm -static`)
     are never auto-returned by any mode."""))
 
 conf.registerChannelValue(DuckHuntPro, 'autoGunHandBackTime',
@@ -205,6 +208,11 @@ conf.registerChannelValue(DuckHuntPro, 'preferredDisplayMode',
     the channel, anything else = NOTICE to the player (the original's
     preferred_display_mode). Duck flights, kills and accidents are always
     public."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'maxLineLength',
+    registry.PositiveInteger(435, """Longer messages are split into several
+    lines, cut at a space when possible, carrying their colours over (the
+    original's max_line_length). Must be at least 9."""))
 
 conf.registerChannelValue(DuckHuntPro, 'monochrome',
     registry.Boolean(False, """Strip colours and other formatting from every
@@ -301,12 +309,34 @@ conf.registerNetworkValue(DuckHuntPro, 'chanServKickLine',
     service is X: `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'strayBulletExemptCapability',
-    registry.String('', """A capability (for example "duckhuntpro.exempt"):
-    users who have it, or are bots that have it, can never take a stray
-    bullet. The original's exempted_flags; leave empty to exempt only the
-    bot itself."""))
+    registry.String('duckhuntpro.exempt', """A capability: users who have it,
+    globally or as #channel,<capability>, can never take a stray bullet. The
+    original's exempted_flags, which exempts bots (flag b) by default: give
+    this capability to the other bots on your channels. Empty = nobody is
+    exempt but the bot itself."""))
 
 # ---- The original's tunable numbers (Duck_Hunt.cfg) ------------------------
+
+
+class LevelGrantings(registry.SpaceSeparatedListOfStrings):
+    """One "xp,accuracy,deflection,defense,jamming,clip_size,clips,xp_miss,
+    xp_wild_fire,xp_accident" entry per level, from level 0 up."""
+    def setValue(self, v):
+        try:
+            rows = data.parseLevelGrantings(v)
+        except ValueError as e:
+            self.error(str(e))
+        super().setValue(v)
+        data.setLevels(rows)
+
+
+conf.registerGlobalValue(DuckHuntPro, 'levelGrantings',
+    LevelGrantings(data.levelGrantingsDefault(), """The level table
+    (level_grantings), one entry per level from level 0, separated by spaces:
+    "xp,accuracy,deflection,defense,jamming,clip_size,clips,xp_miss,xp_wild_fire,xp_accident".
+    xp is the threshold a player must reach to leave that level; the last
+    level's should be unreachable. Rank names come from the language
+    catalogue, so keep 41 levels unless you know what you're doing."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'xpPerDuck',
     registry.Integer(data.XP_PER_DUCK, """Experience points for killing a duck
@@ -319,6 +349,10 @@ conf.registerGlobalValue(DuckHuntPro, 'xpPerGoldenDuckHp',
 conf.registerGlobalValue(DuckHuntPro, 'xpLuckyShot',
     registry.Integer(data.XP_LUCKY_SHOT, """Bonus experience points for a
     "lucky" kill (a ricochet that hits the duck)."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'maxRicochets',
+    registry.NonNegativeInteger(data.MAX_RICOCHETS, """Maximum number of
+    times a stray bullet can ricochet off players (max_ricochets)."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'chanceRicochetTowardsDuck',
     registry.NonNegativeInteger(data.CHANCE_RICOCHET_TOWARDS_DUCK, """Percent chance for a
@@ -334,10 +368,10 @@ conf.registerGroup(DuckHuntPro, 'chancesToHitSomeoneElse')
 conf.registerGroup(DuckHuntPro, 'chancesWildFireHitSomeone')
 for _i, (_name, _what) in enumerate(_TIERS):
     conf.registerGlobalValue(DuckHuntPro.chancesToHitSomeoneElse, _name,
-        registry.PositiveInteger(data.ACCIDENT_CHANCE_DUCK_PRESENT[_i][1],
+        registry.NonNegativeInteger(data.ACCIDENT_CHANCE_DUCK_PRESENT[_i][1],
             "Percent chance that a missed shot at a duck hits someone else, in %s." % _what))
     conf.registerGlobalValue(DuckHuntPro.chancesWildFireHitSomeone, _name,
-        registry.PositiveInteger(data.ACCIDENT_CHANCE_WILD_FIRE[_i][1],
+        registry.NonNegativeInteger(data.ACCIDENT_CHANCE_WILD_FIRE[_i][1],
             "Percent chance that a wild shot (no duck) hits someone, in %s." % _what))
 
 conf.registerGroup(DuckHuntPro, 'shopCosts')

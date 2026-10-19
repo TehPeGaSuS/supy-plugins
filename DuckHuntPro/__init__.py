@@ -53,6 +53,7 @@ __url__ = ''
 from . import data
 from . import messages
 from . import db
+from . import webpages
 from . import config
 from . import plugin
 if sys.version_info >= (3, 4):
@@ -63,6 +64,7 @@ else:
 reload(data)
 reload(messages)
 reload(db)
+reload(webpages)
 reload(config)
 reload(plugin)
 # Add more reloads here if you add third-party modules and want them to be

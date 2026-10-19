@@ -1,4 +1,7 @@
+import builtins
 import contextlib
+import copy
+import fnmatch
 import html
 import os
 import random
@@ -16,6 +19,7 @@ import supybot.httpserver as httpserver
 from . import data
 from . import messages
 from . import db
+from . import webpages
 from . import tcldb
 from .db import Database
 
@@ -93,6 +97,7 @@ class DuckHuntPro(callbacks.Plugin):
         self._floodState = {}    # antiflood: (network, channel, command, nick) -> state
         self._postInitDone = False   # Duck_Hunt.tcl's post_init_done
         self._enabledHooks = {}      # (network, channel) -> (registry value, callback)
+        data.setLevels(data.parseLevelGrantings(self.registryValue('levelGrantings')))
         self.db.dropStalePendingTransfers(self.registryValue('pendingTransfersMaxAge'))
         self._scheduleEvent("DuckHuntPro:postinit",
                             time.time() + self.registryValue('postInitDelay'),
@@ -149,14 +154,18 @@ class DuckHuntPro(callbacks.Plugin):
         parts = [urllib.parse.unquote(p) for p in path.split('/') if p]
         if not parts:
             return self._renderWebIndex()
+        if parts[0] in ('shop', 'levels') and len(parts) <= 2:
+            lang = parts[1] if len(parts) == 2 else self._lang(None)
+            if lang in webpages.TEXTS:
+                if parts[0] == 'shop':
+                    return webpages.renderShop(lang, [self._shopCost(k) for k in data.SHOP_ITEMS])
+                return webpages.renderLevels(lang, data.LEVELS)
         if len(parts) == 3:
             network, channel, page = parts
             if page == 'leaderboard':
                 return self._renderWebLeaderboard(network, channel)
             if page == 'champions':
                 return self._renderWebChampions(network, channel)
-            if page == 'shop':
-                return self._renderWebShop(network, channel)
         raise _WebNotFound()
 
     def _renderWebIndex(self):
@@ -167,11 +176,14 @@ class DuckHuntPro(callbacks.Plugin):
                 chanQ = urllib.parse.quote(cname, safe='')
                 rows.append(
                     '<li>%s %s -- <a href="/duckhuntpro/%s/%s/leaderboard">leaderboard</a>'
-                    ' / <a href="/duckhuntpro/%s/%s/champions">champions</a>'
-                    ' / <a href="/duckhuntpro/%s/%s/shop">shop</a></li>' % (
+                    ' / <a href="/duckhuntpro/%s/%s/champions">champions</a></li>' % (
                         html.escape(network), html.escape(cname),
-                        netQ, chanQ, netQ, chanQ, netQ, chanQ))
+                        netQ, chanQ, netQ, chanQ))
         body = '<ul>%s</ul>' % ''.join(rows) if rows else '<p>No games recorded yet.</p>'
+        body = ('<p><a href="/duckhuntpro/shop">Shop</a> (<a href="/duckhuntpro/shop/en">en</a>'
+                ' / <a href="/duckhuntpro/shop/fr">fr</a>) -- <a href="/duckhuntpro/levels">'
+                'Levels and bonuses</a> (<a href="/duckhuntpro/levels/en">en</a>'
+                ' / <a href="/duckhuntpro/levels/fr">fr</a>)</p>' + body)
         return self._htmlPage('DuckHuntPro', body)
 
     def _renderWebLeaderboard(self, network, channel):
@@ -214,14 +226,6 @@ class DuckHuntPro(callbacks.Plugin):
         ) % (html.escape(when), ''.join(rows))
         title = 'DuckHuntPro champions -- %s %s' % (network, channel)
         return self._htmlPage(title, table)
-
-    def _renderWebShop(self, network, channel):
-        chan = self.db.getChannel(network, channel)
-        if chan is None:
-            raise _WebNotFound()
-        title = 'DuckHuntPro shop -- %s %s' % (network, channel)
-        return self._htmlPage(title, '<p>The shop economy is not implemented yet '
-                                      '(planned for Phase 2).</p>')
 
     # -----------------------------------------------------------------
     # Quarterly stats reset
@@ -330,7 +334,16 @@ class DuckHuntPro(callbacks.Plugin):
         return "DuckHuntPro:plan:%s:%s" % (network, channelName.lower())
 
     def _setPostInitDone(self):
+        """Duck_Hunt.tcl's post_init: once the bot has had time to join its
+        channels, every enabled channel gets the day's flights planned."""
         self._postInitDone = True
+        if self.registryValue('method') != 2:
+            return
+        for irc in list(world.ircs):
+            with self._network(irc.network):
+                for cname in list(irc.state.channels.keys()):
+                    if self.registryValue('enabled', cname):
+                        self._planDay(irc.network, cname)
 
     def _cancelFlights(self, network, channelName):
         """Drops a channel's scheduled flights and any pending first plan."""
@@ -342,65 +355,42 @@ class DuckHuntPro(callbacks.Plugin):
             self._unschedule(self._flightName(network, channelName, t))
         self._unschedule(self._planName(network, channelName))
 
-    def _schedulePlanAfterDelay(self, network, channelName):
-        self._scheduleEvent(self._planName(network, channelName),
-                            time.time() + self.registryValue('postInitDelay'),
-                            self._planDay, (network, channelName))
-
     def _reschedulePlannedFlights(self, irc):
-        """Restores flight timers lost across a bot restart, and plans a
-        fresh day (after postInitDelay) for any enabled channel that has no
-        future flights. (The original re-plans from scratch on every load;
-        restoring the day's remaining flights is a deliberate improvement.)"""
+        """What a (re)load does before the post-init delay: the flights of
+        the previous run are dropped, since post-init plans the day afresh as
+        the original does; the ducks bought with a decoy or a mechanical duck
+        that haven't flown yet are scheduled again; the daily weapon hand-back
+        is scheduled for every channel with players."""
         now = time.time()
         network = irc.network
         for cname in list(irc.state.channels.keys()):
             self._hookEnabled(network, cname)
-            if not self.registryValue('enabled', cname):
-                continue
+        for cname in self.db.channels(network):
             chan = self.db.channel(network, cname)
             with self.db.lock:
-                previous = chan.get('planned_flights', [])
-                future = [t for t in previous if t > now]
-                chan['planned_flights'] = future
+                chan['planned_flights'] = []
+                chan['planned_soarings'] = []
                 previousPending = chan.get('fake_ducks_pending', [])
                 futurePending = [e for e in previousPending if e['fires_at'] > now]
                 chan['fake_ducks_pending'] = futurePending
-            if future != previous or futurePending != previousPending:
-                self.db.save()
-
-            if future:
-                for t in future:
-                    self._scheduleEvent(self._flightName(network, cname, t), t,
-                                        self._fireSpawn, (network, cname))
-            elif self.registryValue('method') == 2:
-                self._schedulePlanAfterDelay(network, cname)
-
             for entry in futurePending:
                 name = "DuckHuntPro:special:%s:%s:%s:%r" % (
                     network, cname, entry['kind'], entry['fires_at'])
                 self._scheduleEvent(name, entry['fires_at'], self._fireSpecialSpawn,
                                      (network, cname, entry['fires_at']))
-
             self._scheduleGunHandBack(network, cname)
+        self.db.save()
 
     @_viaIrc
     def doJoin(self, irc, msg):
-        """When the bot itself joins a channel, kick off spawn planning if
-        this channel is enabled and doesn't already have one scheduled."""
+        """When the bot itself joins a channel, watch its `enabled` setting.
+        Flights are not planned here: as in the original, that happens at
+        post-init, at midnight and when the game is switched on."""
         if not ircutils.strEqual(msg.nick, irc.nick):
             return
         channel = msg.args[0]
-        network = irc.network
-        self._hookEnabled(network, channel)
-        if not self.registryValue('enabled', channel):
-            return
-        chan = self.db.channel(network, channel)
-        with self.db.lock:
-            hasFuture = any(t > time.time() for t in chan.get('planned_flights', []))
-        if not hasFuture and self.registryValue('method') == 2:
-            self._schedulePlanAfterDelay(network, channel)
-        self._scheduleGunHandBack(network, channel)
+        self._hookEnabled(irc.network, channel)
+        self._scheduleGunHandBack(irc.network, channel)
 
     def _hookEnabled(self, network, channelName):
         """Duck_Hunt.tcl hooks `.chanset +/-DuckHunt` to re-plan at once;
@@ -458,7 +448,13 @@ class DuckHuntPro(callbacks.Plugin):
 
     def _logLine(self, channel, key, *args):
         """The original's 'loglev' output: a line in the bot's log."""
-        self.log.info(ircutils.stripFormatting(self._t(channel, key, *args)))
+        self._logText(self._t(channel, key, *args))
+
+    def _logText(self, text):
+        for line in messages.splitLine(ircutils.stripFormatting(text),
+                                       max(9, self.registryValue('maxLineLength'))):
+            if line:
+                self.log.info(line)
 
     # -----------------------------------------------------------------
     # Hunting logs (Duck_Hunt.tcl's add_to_log)
@@ -562,15 +558,56 @@ class DuckHuntPro(callbacks.Plugin):
     def _gunValue(player):
         return {'armed': 1, 'confiscated': 0}.get(player['gun_state'], -1)
 
-    def _statsText(self, p):
-        """A profile's numbers in the order the original prints them."""
+    def _tclItems(self, player, now=None):
+        """A profile's active items as the original's `items` list:
+        {expiry id data} elements, in the order they were obtained."""
+        now = time.time() if now is None else now
+        ids = {key: itemId for itemId, key in tcldb.ITEM_KEYS.items()}
+        items = []
+        for key, item in list(player['items'].items()):
+            if key not in ids or not db.itemActive(player, key, now):
+                continue
+            itemId = ids[key]
+            if itemId in ('7', '8', '18', '22'):
+                value = item.get('uses_left')
+            else:
+                value = item.get('value')
+            expiry = item.get('expires_at')
+            items.append(['-' if expiry is None else int(expiry), itemId,
+                          '-' if value is None else value])
+        return items
+
+    def _statsText(self, p, nick=None, irc=None, channel=None, merged=False):
+        """A profile's data as the original lists it in its warnings and
+        logs (gun jammed ammo clips xp ducks missed empty humans wild bullets
+        deflected deaths confiscated jams best_time reflex nick items golden
+        last_activity; without the nick for a merge's result). A missing
+        profile gives the original's default values."""
+        if p is None:
+            p = db._newPlayer(nick or '')
+            p['last_activity'] = -1
+            name = (nick or '').lower()
+            try:
+                for user in irc.state.channels[channel].users:
+                    if ircutils.strEqual(user, name):
+                        name = user         # (get_data fixes the nick's case if on the channel)
+            except (AttributeError, KeyError):
+                pass
+            p['display_nick'] = name
         st = p['stats']
-        best = -1 if st['best_time_ms'] is None else '%.3f' % (st['best_time_ms'] / 1000.0)
-        return ' '.join(str(x) for x in (
-            self._gunValue(p), int(bool(p['jammed'])), p['clip_ammo'], p['clips_left'], p['xp'],
-            st['killed'], st['missed'], st['empty_shots'], st['humans_shot'], st['wild_shots'],
-            st['bullets_received'], st['deflected'], st['deaths'], st['confiscations'],
-            st['jams'], best, st['reflex_ms']))
+        lvl = data.LEVELS[data.levelForXp(p['xp'])]
+        best = -1 if st.get('best_time_ms') is None else '%.3f' % (st['best_time_ms'] / 1000.0)
+        last = p.get('last_activity')
+        fields = [self._gunValue(p), int(bool(p['jammed'])),
+                  lvl.clip_size if p['clip_ammo'] is None else p['clip_ammo'],
+                  lvl.clip_count if p['clips_left'] is None else p['clips_left'], p['xp'],
+                  st['killed'], st['missed'], st['empty_shots'], st['humans_shot'],
+                  st['wild_shots'], st['bullets_received'], st['deflected'], st['deaths'],
+                  st['confiscations'], st['jams'], best, st.get('reflex_ms', 0)]
+        if not merged:
+            fields.append(p['display_nick'])
+        fields += [self._tclItems(p), st['golden_killed'], -1 if last is None else int(last)]
+        return messages.tclListText(fields)
 
     def _hostOf(self, irc, nick):
         try:
@@ -617,22 +654,23 @@ class DuckHuntPro(callbacks.Plugin):
 
     @_viaIrc
     def doPart(self, irc, msg):
-        channel = msg.args[0]
-        if self.registryValue('enabled', channel):
+        """A pending transfer is forgotten when its nick leaves, on any
+        channel (update_nickchange_tracking)."""
+        for channel in msg.args[0].split(','):
             self.db.discardPendingTransfer(irc.network, channel, msg.nick)
 
     @_viaIrc
     def doQuit(self, irc, msg):
         network = irc.network
         for cname in list(irc.state.channels.keys()):
-            if self.registryValue('enabled', cname):
-                self.db.discardPendingTransfer(network, cname, msg.nick)
+            self.db.discardPendingTransfer(network, cname, msg.nick)
 
     def _checkPendingRename(self, irc, channel, nick):
         """Duck_Hunt.tcl's ckeck_for_pending_rename: if `nick` just took over
         a nick that had stats, move or merge them now that the new nick is
         playing. With confiscationEnforcementOnFusion, a disarmed new nick
-        can't escape its confiscation by inheriting an armed profile."""
+        can't escape its confiscation by inheriting an armed profile.
+        Returns True when stats were moved (the original then saves)."""
         network = irc.network
         entry = self.db.popPendingTransfer(network, channel, nick)
         if not entry:
@@ -641,6 +679,7 @@ class DuckHuntPro(callbacks.Plugin):
         oldP = self.db.getPlayer(network, channel, oldNick)
         newP = self.db.getPlayer(network, channel, nick)
         warn = self.registryValue('warnOnTakeover')
+        stats = lambda p, name, merged=False: self._statsText(p, name, irc, channel, merged)
         host = self._hostOf(irc, nick)
         script = 'DuckHuntPro'
         log = lambda key, *args: warn and self._logLine(channel, key, script, oldNick, host, nick, *args)
@@ -650,43 +689,44 @@ class DuckHuntPro(callbacks.Plugin):
             oldGun = self._gunValue(oldP)
             if enforce and newGun < 1 and oldGun == 1:
                 # the old profile was armed, the new one is not: the old stats are dropped
-                log('m245', nick, oldNick, oldNick, self._statsText(oldP))
+                log('m245', nick, oldNick, oldNick, stats(oldP, oldNick))
                 if warn:
                     self._huntLog(channel, 'merge_stats_1', oldNick, nick, extra=(
-                        self._statsText(oldP), self._statsText(newP), self._statsText(newP)))
+                        stats(oldP, oldNick), stats(newP, nick), stats(newP, nick)))
                 self.db.deletePlayer(network, channel, oldNick)
             elif enforce and newGun < 1 and oldGun < 1:
                 # neither is armed: only the profile with more xp survives
                 if newP['xp'] >= oldP['xp']:
-                    log('m246', oldNick, self._statsText(oldP))
+                    log('m246', oldNick, stats(oldP, oldNick))
                     if warn:
                         self._huntLog(channel, 'merge_stats_2', oldNick, nick, extra=(
-                            self._statsText(oldP), self._statsText(newP), self._statsText(newP)))
+                            stats(oldP, oldNick), stats(newP, nick), stats(newP, nick)))
                     self.db.deletePlayer(network, channel, oldNick)
                 else:
-                    log('m246', nick, self._statsText(newP))
+                    log('m246', nick, stats(newP, nick))
                     if warn:
                         self._huntLog(channel, 'merge_stats_2', oldNick, nick, extra=(
-                            self._statsText(oldP), self._statsText(newP), self._statsText(oldP)))
+                            stats(oldP, oldNick), stats(newP, nick), stats(oldP, oldNick)))
                     self.db.deletePlayer(network, channel, nick)
                     self.db.renamePlayer(network, channel, oldNick, nick)
             else:
-                log('m102', oldNick, self._statsText(oldP), nick,
-                    self._statsText(newP) if newP is not None else '')
-                before = (self._statsText(oldP), self._statsText(newP) if newP is not None else '')
+                log('m102', oldNick, stats(oldP, oldNick), nick,
+                    stats(newP, nick))
+                before = (stats(oldP, oldNick), stats(newP, nick))
                 self.db.mergeStats(network, channel, nick, oldNick)
                 self._huntLog(channel, 'merge_stats_4', oldNick, nick, extra=(
-                    before[0], before[1], self._statsText(self.db.getPlayer(network, channel, nick))))
+                    before[0], before[1], stats(self.db.getPlayer(network, channel, nick), nick, True)))
             survivor = self.db.getPlayer(network, channel, nick)
             if survivor is not None:
                 self._clampAmmo(survivor)
             self.db.save()
+            return True
         elif newP is not None:
             # No stats under the old nick: just flag the (re)assignment.
-            log('m127', nick, oldNick, nick, self._statsText(newP))
+            log('m127', nick, oldNick, nick, stats(newP, nick))
             if warn:
                 self._huntLog(channel, 'merge_stats_3', oldNick, nick, extra=(
-                    '', self._statsText(newP), self._statsText(newP)))
+                    '', stats(newP, nick), stats(newP, nick)))
 
     # -----------------------------------------------------------------
     # Antiflood
@@ -852,10 +892,15 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduleEvent(name, at, self._fireGunHandBack, (network, channelName))
 
     def _fireGunHandBack(self, network, channelName):
-        self.db.handBackWeapons(network, channelName)
-        self._huntLog(channelName, 'hand_back_weapons')
-        if self.registryValue('gunHandBackMode', channelName) == 1:
-            self._scheduleGunHandBack(network, channelName)
+        """The daily hand-back (mode 1). The original only binds it when one
+        of the two automatic confiscations is on."""
+        if self.registryValue('gunHandBackMode', channelName) != 1:
+            return
+        if (self.registryValue('gunConfiscationWhenShootingSomeone', channelName)
+                or self.registryValue('gunConfiscationOnWildFire', channelName)):
+            self.db.handBackWeapons(network, channelName)
+            self._huntLog(channelName, 'hand_back_weapons')
+        self._scheduleGunHandBack(network, channelName)
 
     def _maybeHandBackOnDuckGone(self, network, channelName):
         """Mode 2: temporarily-confiscated weapons return once the
@@ -906,7 +951,7 @@ class DuckHuntPro(callbacks.Plugin):
         reference = ['%02d' % h for h in range(24) if h not in sleepHours]
         if not reference:
             return []
-        breadCount = db.activeBreadCount(chan, now)
+        breadCount = db.breadCount(chan)
         perDay = self.registryValue('ducksPerDay', channelName) + breadCount * data.BREAD_EXTRA_DUCKS_PER_PIECE
         keep = None
         # (precedence as in the Tcl: bread_added always; bread_expired only
@@ -1006,12 +1051,15 @@ class DuckHuntPro(callbacks.Plugin):
 
     def _expireBread(self):
         """Duck_Hunt.tcl's check_for_expired_pieces_of_bread: expired pieces
-        go away one by one, each triggering a replan (method 2)."""
+        go away one by one, each triggering a replan (method 2), on every
+        channel the bot is on, whether the game is on there or not. In method
+        2 this only starts once the post-init delay is over."""
+        if self.registryValue('method') == 2 and not self._postInitDone:
+            return
         now = time.time()
         for irc in list(world.ircs):
             for cname in list(irc.state.channels.keys()):
-                if (not self.registryValue('enabled', cname, irc.network)
-                        or not self.registryValue('shopEnabled', cname, irc.network)):
+                if not self.registryValue('shopEnabled', cname, irc.network):
                     continue
                 chan = self.db.getChannel(irc.network, cname)
                 if not chan or not chan.get('bread'):
@@ -1039,7 +1087,7 @@ class DuckHuntPro(callbacks.Plugin):
                 if now.hour in sleepHours or span <= 0:
                     continue
                 chan = self.db.channel(irc.network, cname)
-                extra = 2 * db.activeBreadCount(chan, time.time())
+                extra = 2 * db.breadCount(chan)
                 if self._rng.randint(1, span) <= self.registryValue('ducksPerDay', cname, irc.network) + extra:
                     self._fireSpawn(irc.network, cname)
 
@@ -1088,7 +1136,7 @@ class DuckHuntPro(callbacks.Plugin):
         if (self.registryValue('method') != 2
                 or not self.registryValue('enabled', channelName)):
             return
-        if reason == 'bread_expired' and not self._postInitDone:
+        if not self._postInitDone:
             return
         self._planDay(network, channelName, reason)
         if self.registryValue('showBreadReplanning', channelName):
@@ -1096,12 +1144,12 @@ class DuckHuntPro(callbacks.Plugin):
             text = (self._t(channelName, 'm346', 'DuckHuntPro', channelName, listing)
                     if reason == 'bread_expired' else
                     self._t(channelName, 'm345', 'DuckHuntPro', who or '?', channelName, listing))
-            self.log.info(ircutils.stripFormatting(text))
+            self._logText(text)
 
     def _currentEscapeTime(self, network, channelName, now):
         base = self.registryValue('escapeTime', channelName)
         chan = self.db.channel(network, channelName)
-        breadCount = db.activeBreadCount(chan, now)
+        breadCount = db.breadCount(chan)
         return base + breadCount * data.BREAD_ESCAPE_BONUS_PER_PIECE
 
     def _notifyDuckDetectors(self, irc, channelName):
@@ -1111,13 +1159,22 @@ class DuckHuntPro(callbacks.Plugin):
             return
         now = time.time()
         changed = False
-        for player in list(chan['players'].values()):
+        for lowerNick, player in list(chan['players'].items()):
+            if chan['players'].get(lowerNick) is not player:
+                continue            # merged into a new nick in the meantime
             if db.itemActive(player, 'duck_detector', now):
                 db.consumeItemUse(player, 'duck_detector')
                 changed = True
-                self._out(irc, channelName, player['display_nick'],
-                          self._t(channelName, 'm351', player['display_nick'], channelName),
-                          'notice')
+                # A holder who changed nick gets their stats moved first, and
+                # the notice at the new nick.
+                for entry in self.db.pendingTransfersFrom(network, channelName, lowerNick):
+                    if self._onChan(irc, channelName, entry['new_nick']):
+                        self._checkPendingRename(irc, channelName, entry['new_nick'])
+                        lowerNick = entry['new_nick'].lower()
+                holder = self.db.getPlayer(network, channelName, lowerNick)
+                name = holder['display_nick'] if holder else lowerNick
+                self._out(irc, channelName, name,
+                          self._t(channelName, 'm351', name, channelName), 'notice')
         if changed:
             self.db.save()
 
@@ -1204,8 +1261,6 @@ class DuckHuntPro(callbacks.Plugin):
         duck = self._removeDuck(network, channelName, spawnedAt=spawnedAt, outcome='escaped')
         if duck is None:
             return  # already killed or fled
-        self._huntLog(channelName, 'golden_duck_escaped' if duck['is_golden'] else
-                      'fake_duck_escaped' if duck.get('is_fake') else 'escaped')
         irc = self._getIrc(network)
         if irc:
             # "A ... escapes" while others are still flying, "The ..." for the last.
@@ -1214,6 +1269,8 @@ class DuckHuntPro(callbacks.Plugin):
                 ('m3' if others else 'm4'))
             self._out(irc, channelName, None, self._t(channelName, mkey), 'public')
         self._maybeHandBackOnDuckGone(network, channelName)
+        self._huntLog(channelName, 'golden_duck_escaped' if duck['is_golden'] else
+                      'fake_duck_escaped' if duck.get('is_fake') else 'escaped')
 
     def _removeDuck(self, network, channelName, spawnedAt=None, outcome=None):
         """Removes one duck from the channel's in-flight list and
@@ -1304,21 +1361,22 @@ class DuckHuntPro(callbacks.Plugin):
         """Sends `text` (several lines if it contains newlines). kind
         'pref' follows preferredDisplayMode (1 = PRIVMSG to the channel,
         otherwise NOTICE to the player); 'public' is always the channel.
-        Formatting is stripped when monochrome is on or the channel is +c."""
+        Formatting is stripped when monochrome is on or the message goes to a
+        +c channel. Long lines are split at maxLineLength (display_output)."""
         channel = channel or None           # a command without a channel (duckexport)
+        toChannel = bool(channel) and (kind == 'public' or (
+            kind == 'pref' and self.registryValue('preferredDisplayMode', channel) == 1))
         mono = self.registryValue('monochrome', channel)
-        if not mono:
+        if not mono and toChannel:
             try:
                 mono = 'c' in irc.state.channels[channel].modes
             except (KeyError, AttributeError):
                 mono = False
         if mono:
             text = ircutils.stripFormatting(text)
-        toChannel = kind == 'public' or (
-            kind == 'pref' and self.registryValue('preferredDisplayMode', channel) == 1)
-        for line in text.split('\n'):
+        for line in messages.splitLine(text, max(9, self.registryValue('maxLineLength'))):
             if line:
-                irc.queueMsg(ircmsgs.privmsg(channel, line) if toChannel and channel
+                irc.queueMsg(ircmsgs.privmsg(channel, line) if toChannel
                              else ircmsgs.notice(nick, line))
 
     def _kickIfOpped(self, irc, channel, nick, reason):
@@ -1356,27 +1414,57 @@ class DuckHuntPro(callbacks.Plugin):
     # Commands
     # -----------------------------------------------------------------
 
+    class _Draft:
+        """A player's profile as the database last had it. The original reads
+        its database, changes it in memory and only writes it back on some
+        paths: on the others (a refused shot, a look at the shop) whatever
+        changed is forgotten. `discard` does the same; `commit` marks a point
+        where the original writes."""
+        def __init__(self, database, network, channel, nick):
+            self.db, self.network, self.channel, self.nick = database, network, channel, nick
+            self.saved = copy.deepcopy(database.getPlayer(network, channel, nick))
+
+        def commit(self, player):
+            self.saved = copy.deepcopy(player)
+
+        def discard(self, player):
+            with self.db.lock:
+                if self.saved is None:
+                    chan = self.db.getChannel(self.network, self.channel)
+                    if chan is not None:
+                        chan['players'].pop(self.nick.lower(), None)
+                else:
+                    player.clear()
+                    player.update(copy.deepcopy(self.saved))
+
     def bang(self, irc, msg, args, channel):
         """[<channel>]
         Shoots at the current duck.
         """
         network = irc.network
-        if self._floodBlocked(irc, msg, channel, 'bang', 'floodShoot'):
+        if (not self.registryValue('enabled', channel)
+                or self._floodBlocked(irc, msg, channel, 'bang', 'floodShoot')):
             return
         self._checkPendingRename(irc, channel, msg.nick)
+        draft = self._Draft(self.db, network, channel, msg.nick)
         player = self.db.player(network, channel, msg.nick)
+        kept = True
         try:
-            self._shoot(irc, msg.nick, channel, network, player)
+            kept = self._shoot(irc, msg.nick, channel, network, player, draft)
         finally:
-            self._clampAmmo(player)
+            if kept is False:
+                draft.discard(player)
+            else:
+                self._clampAmmo(player)
             self.db.save()
     bang = wrap(bang, ['channel'])
 
-    def _shoot(self, irc, nick, channel, network, player):
+    def _shoot(self, irc, nick, channel, network, player, draft):
         """Port of Duck_Hunt.tcl's shoot, step for step: the order of the
         checks (not armed, water bucket, sand/grease/sabotage/liability,
         jammed, new jam roll, empty clip, infrared, ammo, dazzle/sight) and
-        what each one consumes matches the original."""
+        what each one consumes matches the original. Returns False on the
+        paths where the original doesn't save (not armed, wet, jammed)."""
         key = (network.lower(), channel.lower())
         now = time.time()
         stats = player['stats']
@@ -1394,12 +1482,14 @@ class DuckHuntPro(callbacks.Plugin):
 
         if player['gun_state'] != 'armed':
             out(t('m5', nick))
-            return
+            return False
+        if db.purgeExpiredItems(player, now):
+            draft.commit(player)
         bucket = db.itemActive(player, 'water_bucket', now)
         if bucket:
             out(t('m332', nick, bucket.get('value') or '?', messages.adaptTimeResolution(
                 (bucket['expires_at'] - now) * 1000, False, self._lang(channel))))
-            return
+            return False
 
         xpAccident = lvl.xp_accident
         jam = lvl.jam_pct
@@ -1421,7 +1511,7 @@ class DuckHuntPro(callbacks.Plugin):
 
         if player['jammed']:
             out(t('m7', nick))
-            return
+            return False          # (so the sand and the sabotage are still there)
         if sabotage or self._rng.uniform(0, 100) < jam:
             player['jammed'] = True
             stats['jams'] += 1
@@ -1513,7 +1603,8 @@ class DuckHuntPro(callbacks.Plugin):
         someoneHit = confiscationSent = penaltySent = False
         ricochets = 0
         source = nick
-        while self._rng.uniform(0, 100) < chance and ricochets < data.MAX_RICOCHETS:
+        maxRicochets = self.registryValue('maxRicochets')
+        while self._rng.uniform(0, 100) < chance and ricochets < maxRicochets:
             victim = self._pickAccidentVictim(irc, channel, network, source)
             if victim is None:
                 break
@@ -1540,10 +1631,10 @@ class DuckHuntPro(callbacks.Plugin):
                 else:
                     penaltyMsg = t('m12', xpMiss) + wildMsg
                     lostXp = abs(xpMiss) + abs(xpWild) + abs(xpAccident)
+                self._huntLog(channel, 'accident', nick, noLF=True, now=now, network=network)
             else:
                 penaltyMsg = ''
                 lostXp = abs(xpAccident)
-            self._huntLog(channel, 'accident', nick, noLF=True, now=now, network=network)
 
             lifeMsg = lifeMsg2 = ''
             if db.itemActive(victimPlayer, 'life_insurance', now):
@@ -1573,7 +1664,6 @@ class DuckHuntPro(callbacks.Plugin):
                                          damage, isLucky=True)
                     break
             elif self._rng.uniform(0, 100) < victimLvl.defense:
-                victimPlayer['stats']['absorbed'] += 1
                 confiscationSent = penaltySent = True
                 out(t('m14', victim, nick, victimLvl.defense, penaltyMsg, xpAccident)
                     + tail, 'public')
@@ -1752,12 +1842,13 @@ class DuckHuntPro(callbacks.Plugin):
                       and not ircutils.strEqual(u, excludeNick)]
         exempt = self.registryValue('strayBulletExemptCapability')
         if exempt:
-            def immune(nick):
+            def immune(nick):       # (chanlist "-b&-b": the global or the channel flag)
                 try:
-                    return ircdb.checkCapability(irc.state.nickToHostmask(nick), exempt,
-                                                 ignoreDefaultAllow=True)
+                    hostmask = irc.state.nickToHostmask(nick)
                 except KeyError:
                     return False
+                return builtins.any(ircdb.checkCapability(hostmask, cap, ignoreDefaultAllow=True)
+                            for cap in (exempt, ircdb.makeChannelCapability(channel, exempt)))
             candidates = [u for u in candidates if not immune(u)]
         if self.registryValue('onlyHuntersCanBeShot', channel):
             chan = self.db.getChannel(network, channel)
@@ -1830,7 +1921,8 @@ class DuckHuntPro(callbacks.Plugin):
         """
         network = irc.network
         nick = msg.nick
-        if self._floodBlocked(irc, msg, channel, 'duckreload', 'floodReload'):
+        if (not self.registryValue('enabled', channel)
+                or self._floodBlocked(irc, msg, channel, 'duckreload', 'floodReload')):
             return
         self._checkPendingRename(irc, channel, nick)
         t = lambda k, *a: self._t(channel, k, *a)
@@ -1842,10 +1934,12 @@ class DuckHuntPro(callbacks.Plugin):
             out(t('m204', nick, lvl.clip_size, lvl.clip_size, lvl.clip_count, lvl.clip_count))
             return
         now = time.time()
+        draft = self._Draft(self.db, network, channel, nick)
         player['last_activity'] = now
         try:
             if player['gun_state'] != 'armed':
                 out(t('m5', nick))
+                draft.discard(player)     # the original doesn't save here
                 return
             key = (network.lower(), channel.lower())
             ducks = self._activeDuck.get(key)
@@ -1920,7 +2014,8 @@ class DuckHuntPro(callbacks.Plugin):
         """[<channel>] [<nick>]
         Shows your hunting stats, or <nick>'s (a NOTICE).
         """
-        if self._floodBlocked(irc, msg, channel, 'duckstats', 'floodStats'):
+        if (not self.registryValue('enabled', channel)
+                or self._floodBlocked(irc, msg, channel, 'duckstats', 'floodStats')):
             return
         target = target or msg.nick
         self._checkPendingRename(irc, channel, target)
@@ -1959,9 +2054,12 @@ class DuckHuntPro(callbacks.Plugin):
             accuracyMod += '\x0304-%d%%\x03' % int(lvl.accuracy / 2)
         if db.itemActive(player, 'sight', now):
             accuracyMod += '\x0303+%d%%\x03' % int((100 - lvl.accuracy) / 3)
-        names = {k: t(m) for k, m in self._STATS_INVENTORY + self._STATS_EFFECTS}
-        inventory = [names[k] for k, _ in self._STATS_INVENTORY if db.itemActive(player, k, now)]
-        effects = [names[k] for k, _ in self._STATS_EFFECTS if db.itemActive(player, k, now)]
+        # (in the order the player got them, as the original lists them)
+        inventoryNames = {k: t(m) for k, m in self._STATS_INVENTORY}
+        effectNames = {k: t(m) for k, m in self._STATS_EFFECTS}
+        held = [k for k in list(player['items']) if db.itemActive(player, k, now)]
+        inventory = [inventoryNames[k] for k in held if k in inventoryNames]
+        effects = [effectNames[k] for k in held if k in effectNames]
         sep = ' \x0314/\x03 '
         itemsText = t('m385', sep.join(inventory)) if inventory else ''
         effectsText = t('m386', sep.join(effects)) if effects else ''
@@ -2042,17 +2140,32 @@ class DuckHuntPro(callbacks.Plugin):
                 (chan.get('last_duck_flight_s') or 0) * 1000, False, lang, skipZeroSeconds=True))
         return ''
 
-    def lastduck(self, irc, msg, args, channel):
+    def lastduck(self, irc, msg, args, text):
         """[<channel>]
-        Shows how long ago the last duck flew on <channel>. In the channel it
-        is a normal reply; sent privately it needs the channel op capability
-        and answers with a NOTICE (the original's lastduck /msg command).
+        Shows how long ago the last duck flew. In the channel it is a normal
+        reply; sent privately with a <channel> it needs the channel op
+        capability and answers with a NOTICE (the original's lastduck /msg
+        command).
         """
+        public = ircutils.isChannel(msg.args[0])
+        words = (text or '').split()
+        if public:
+            channel = msg.args[0]
+        else:
+            channel = words[0] if words else ''
+            if not (self._isStaff(msg.prefix, channel) if channel
+                    else ircdb.checkCapability(msg.prefix, 'admin')):
+                return
+            if len(words) != 1:
+                self._out(irc, channel, msg.nick, self._t(channel or None, 'm145', 'lastduck'),
+                          'notice')
+                return
         chan = self.db.getChannel(irc.network, channel)
         lastAt = chan.get('last_duck_at') if chan else None
         lang = self._lang(channel)
-        if ircutils.isChannel(msg.args[0]):
-            if self._floodBlocked(irc, msg, channel, 'lastduck', 'floodLastduck'):
+        if public:
+            if (not self.registryValue('enabled', channel)
+                    or self._floodBlocked(irc, msg, channel, 'lastduck', 'floodLastduck')):
                 return
             if not lastAt:
                 self._out(irc, channel, msg.nick, self._t(channel, 'm146', channel))
@@ -2061,8 +2174,6 @@ class DuckHuntPro(callbacks.Plugin):
                     (int(time.time()) - int(lastAt)) * 1000, False, lang)) + self._lastDuckSuffix(irc.network, channel, chan, lang))
             return
         notice = lambda text: self._out(irc, channel, msg.nick, text, 'notice')
-        if not self._isStaff(msg.prefix, channel):
-            return
         if channel not in irc.state.channels:
             notice(self._t(channel, 'm75', channel))
         elif not self.registryValue('enabled', channel):
@@ -2072,7 +2183,7 @@ class DuckHuntPro(callbacks.Plugin):
         else:
             notice(self._t(channel, 'm147', channel, messages.adaptTimeResolution(
                 (int(time.time()) - int(lastAt)) * 1000, False, lang)) + self._lastDuckSuffix(irc.network, channel, chan, lang))
-    lastduck = wrap(lastduck, ['channel'])
+    lastduck = wrap(lastduck, [optional('text')])
 
     # -----------------------------------------------------------------
     # Shop
@@ -2096,22 +2207,29 @@ class DuckHuntPro(callbacks.Plugin):
         bucket, sabotage) need a <target> player, the others take none.
         """
         # Tcl only binds the command when shop_enabled is set.
-        if not self.registryValue('shopEnabled', channel):
+        if (not self.registryValue('shopEnabled', channel)
+                or not self.registryValue('enabled', channel)):
             return
         network = irc.network
         nick = msg.nick
         if self._floodBlocked(irc, msg, channel, 'shop', 'floodShop'):
             return
         self._checkPendingRename(irc, channel, nick)
+        draft = self._Draft(self.db, network, channel, nick)
         player = self.db.player(network, channel, nick)
+        kept = False
         try:
-            self._shop(irc, channel, nick, network, player, (text or '').split())
+            kept = self._shop(irc, channel, nick, network, player, (text or '').split(), draft)
         finally:
+            if not kept:
+                draft.discard(player)
             self.db.save()
     shop = wrap(shop, ['channel', optional('text')])
 
-    def _shop(self, irc, channel, nick, network, player, parts):
-        """Port of Duck_Hunt.tcl's ::DuckHunt::shop, check for check."""
+    def _shop(self, irc, channel, nick, network, player, parts, draft):
+        """Port of Duck_Hunt.tcl's ::DuckHunt::shop, check for check. Returns
+        whether the original saves: only after a purchase (until then, even a
+        new profile or the reaction time is forgotten)."""
         key = (network.lower(), channel.lower())
         now = time.time()
         lang = self._lang(channel)
@@ -2154,8 +2272,17 @@ class DuckHuntPro(callbacks.Plugin):
         if player['xp'] - cost < self.registryValue('minXpForShopping', channel):
             out(t('m266', nick))
             return
-        if targetNick:
-            self._checkPendingRename(irc, channel, targetNick)
+        # The original writes its whole database (so this visit too) when it
+        # moves a renamed target's stats or drops expired items.
+        if targetNick and self._checkPendingRename(irc, channel, targetNick):
+            draft.commit(player)
+        expired = (itemNo in (3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 19, 22)
+                   and db.purgeExpiredItems(player, now))
+        if itemNo in (14, 15, 16, 17):
+            victim = self.db.getPlayer(network, channel, targetNick)
+            expired = (victim is not None and db.purgeExpiredItems(victim, now)) or expired
+        if expired:
+            draft.commit(player)
         prevLevel = data.levelForXp(player['xp'])
         lvl = data.LEVELS[prevLevel]
         self._ensureAmmo(player, lvl)
@@ -2329,7 +2456,7 @@ class DuckHuntPro(callbacks.Plugin):
                 maxBread = self.registryValue('maxBreadOnChan', channel)
                 # Tcl quirk: the cap test is `==`, so lowering maxBreadOnChan
                 # below the current count lets purchases through again.
-                if db.activeBreadCount(chan, now) == maxBread:
+                if db.breadCount(chan) == maxBread:
                     out(t('m387', nick, maxBread, channel))
                 else:
                     db.addBread(chan, now, data.BREAD_DURATION)
@@ -2358,6 +2485,7 @@ class DuckHuntPro(callbacks.Plugin):
             output += t('m280', newLevel, messages.lvl2rank(newLevel, lang))
         if output is not None:
             out(output)
+        return charged
 
     # -----------------------------------------------------------------
     # Weapon confiscation admin commands
@@ -2369,17 +2497,16 @@ class DuckHuntPro(callbacks.Plugin):
         hand-back. With -static the confiscation is permanent: only `rearm`
         undoes it and no automatic hand-back mode touches it.
         """
-        self._requireStaff(irc, msg, channel)
+        if not self._isStaff(msg.prefix, channel) or not self.registryValue('enabled', channel):
+            return
         t = lambda k, *a: self._t(channel, k, *a)
         out = lambda text: self._out(irc, channel, msg.nick, text, 'public')
         parts = (text or '').split()
-        static = bool(parts) and parts[0].lower() in ('-static', '--static')
-        if static:
-            parts = parts[1:]
         if not parts:
             out(t('m66', 'unarm'))
             return
-        target = parts[0]
+        static = parts[0].lower() == '-static'
+        target = (parts[1] if len(parts) > 1 else '') if static else parts[0]
         self._checkPendingRename(irc, channel, target)
         player = self.db.getPlayer(irc.network, channel, target)
         if player is None:
@@ -2418,9 +2545,11 @@ class DuckHuntPro(callbacks.Plugin):
         Gives <nick> their weapon back, whether it was confiscated
         automatically, temporarily or permanently.
         """
-        self._requireStaff(irc, msg, channel)
+        if not self._isStaff(msg.prefix, channel) or not self.registryValue('enabled', channel):
+            return
         t = lambda k, *a: self._t(channel, k, *a)
         out = lambda text: self._out(irc, channel, msg.nick, text, 'public')
+        target = (target or '').strip()
         if not target:
             out(t('m71', 'rearm'))
             return
@@ -2435,7 +2564,7 @@ class DuckHuntPro(callbacks.Plugin):
             out(t('m73', msg.nick, target))
             self.db.save()
             self._huntLog(channel, 'rearm', msg.nick, target)
-    rearm = wrap(rearm, ['channel', optional('somethingWithoutSpaces')])
+    rearm = wrap(rearm, ['channel', optional('text')])
 
     # -----------------------------------------------------------------
     # Staff commands (the original's /msg commands, Duck_Hunt.cfg's *_auth)
@@ -2451,10 +2580,6 @@ class DuckHuntPro(callbacks.Plugin):
                 return True
         return False
 
-    def _requireStaff(self, irc, msg, channel):
-        if not self._isStaff(msg.prefix, channel):
-            irc.errorNoCapability(ircdb.makeChannelCapability(channel, 'op'), Raise=True)
-
     def _staffArgs(self, irc, msg, text, cmd, syntaxKey, minArgs, maxArgs):
         """Common head of the admin commands: splits `text`, checks the staff
         capability on its first word (the channel), and answers with the
@@ -2462,11 +2587,10 @@ class DuckHuntPro(callbacks.Plugin):
         word list, or None when the command is over."""
         parts = (text or '').split()
         chan = parts[0] if parts else None
-        if chan is None:
-            if not (ircdb.checkCapability(msg.prefix, 'admin')):
-                irc.errorNoCapability('admin', Raise=True)
-        else:
-            self._requireStaff(irc, msg, chan)
+        # Like an Eggdrop bind, the command stays silent for anyone else.
+        if not (self._isStaff(msg.prefix, chan) if chan
+                else ircdb.checkCapability(msg.prefix, 'admin')):
+            return None
         if not minArgs <= len(parts) <= maxArgs:
             self._out(irc, chan or '', msg.nick, self._t(chan, syntaxKey, cmd), 'notice')
             return None
@@ -2486,9 +2610,9 @@ class DuckHuntPro(callbacks.Plugin):
 
     def ducklist(self, irc, msg, args, text):
         """<channel> [<search>]
-        Lists the profiles (nicks) known on <channel>, or those containing
-        <search>."""
-        parts = self._staffArgs(irc, msg, text, 'ducklist', 'm122', 1, 2)
+        Lists the profiles (nicks) known on <channel>, or those matching
+        *<search>* (a wildcard pattern, case-insensitive)."""
+        parts = self._staffArgs(irc, msg, text, 'ducklist', 'm122', 1, 1000)
         if parts is None:
             return
         chan = self._knownChannel(irc, msg, parts[0], requireEnabled=False)
@@ -2502,7 +2626,9 @@ class DuckHuntPro(callbacks.Plugin):
         nicks = sorted(info['players'])
         search = parts[1] if len(parts) > 1 else ''
         if search:
-            nicks = [n for n in nicks if search.lower() in n.lower()]
+            # Tcl's lsearch -glob -nocase "*<search>*"
+            nicks = [n for n in nicks
+                     if fnmatch.fnmatchcase(n.lower(), '*%s*' % search.lower())]
         if not nicks:
             notice(self._t(chan, 'm126', search))
         elif len(nicks) == 1:
@@ -2537,7 +2663,7 @@ class DuckHuntPro(callbacks.Plugin):
                 self.db.mergeStats(irc.network, chan, dst, src)
                 self._huntLog(chan, 'merge_stats_5', src, dst, extra=(
                     before[0], before[1],
-                    self._statsText(self.db.getPlayer(irc.network, chan, dst))))
+                    self._statsText(self.db.getPlayer(irc.network, chan, dst), merged=True)))
                 merged = True
                 notice(self._t(chan, 'm78', dst, src, dst, chan))
         if merged:
@@ -2584,7 +2710,7 @@ class DuckHuntPro(callbacks.Plugin):
         """The head shared by duckplanning and duckreplanning: returns the
         channel when the plan can be shown or recomputed."""
         if self.registryValue('method') != 2:
-            irc.error('Flights are not planned in advance (method is not 2).', Raise=True)
+            return None             # (the original only has these commands in method 2)
         parts = self._staffArgs(irc, msg, text, cmd, syntaxKey, 1, 1)
         if parts is None:
             return None
@@ -2690,7 +2816,7 @@ class DuckHuntPro(callbacks.Plugin):
                 9999999999 if st['best_time_ms'] is None else st['best_time_ms'] / 1000.0,
                 round(st['reflex_ms'] / ducks / 1000.0, 3) if ducks else 9999999999,
                 karma, messages.lvl2rank(lvlIndex, self._lang(channel)),
-                ' '.join(sorted(k for k in player['items'] if db.itemActive(player, k, now)))]
+                messages.tclListText(self._tclItems(player, now))]
 
     def _exportPlayers(self, network, sortBy):
         """Duck_Hunt.tcl's export_players_table: writes a fixed-width table of
@@ -2745,6 +2871,7 @@ class DuckHuntPro(callbacks.Plugin):
                     r[30] = '-' if r[30] == 9999999999 else messages.adaptTimeResolution(
                         round(r[30] * 1000), True, lang)
                     r[1] = '-' if r[1] == -1 else time.strftime(t('m422'), time.localtime(r[1]))
+                    r[31] = self._formatFloat(r[31], 2)
                     lines.append(fmt(r))
                 lines += ['', '']
         directory = os.path.join(str(conf.supybot.directories.data), 'DuckHuntPro')
@@ -2784,18 +2911,18 @@ class DuckHuntPro(callbacks.Plugin):
         unless a criterion is given). Needs the global admin capability,
         since it covers every channel."""
         if not ircdb.checkCapability(msg.prefix, 'admin'):
-            irc.errorNoCapability('admin', Raise=True)
+            return
         notice = lambda out: self._out(irc, '', msg.nick, out, 'notice')
         lang = self.registryValue('language')
         sortBy = (sortBy or '').strip()
         if len(sortBy.split()) > 1:
             notice(messages.tcl(lang, 'm205', 'duckexport'))
-        elif sortBy and sortBy.lower() not in self._EXPORT_CRITERIA:
+        elif sortBy and sortBy not in self._EXPORT_CRITERIA:
             valid = list(self._EXPORT_CRITERIA)
             valid.insert(len(valid) - 1, messages.tcl(lang, 'm80'))
             notice(messages.tcl(lang, 'm206', sortBy, ' '.join(valid)))
         else:
-            notice(messages.tcl(lang, 'm262', self._exportPlayers(irc.network, sortBy.lower())))
+            notice(messages.tcl(lang, 'm262', self._exportPlayers(irc.network, sortBy)))
     duckexport = wrap(duckexport, [optional('text')])
 
 

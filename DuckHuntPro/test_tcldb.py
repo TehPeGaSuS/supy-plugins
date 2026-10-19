@@ -119,7 +119,7 @@ class ConvertTests(unittest.TestCase):
     def testConvertedPlayersHaveEveryStatTheDatabaseHas(self):
         # The plugin's per-player stats dict (db._newPlayer) has exactly these keys.
         keys = {'killed', 'golden_killed', 'missed', 'empty_shots', 'humans_shot', 'wild_shots',
-                'bullets_received', 'deflected', 'absorbed', 'confiscations', 'jams', 'deaths',
+                'bullets_received', 'deflected', 'confiscations', 'jams', 'deaths',
                 'best_time_ms', 'total_time_ms', 'timed_shots', 'reflex_ms'}
         self.assertEqual(set(tcldb.convertPlayer({}, 'x', self.NOW)['stats']), keys)
 

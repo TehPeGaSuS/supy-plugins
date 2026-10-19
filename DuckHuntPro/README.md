@@ -38,12 +38,14 @@ capability (the original's `mno|mnol` commands), for example
 `channel capability add #channel <user> op` (or `halfop`; needs
 `#channel,op` yourself). The global form is `admin capability add <user>
 admin`, which only an admin can run and only for capabilities they hold.
+Like the original's binds, these commands say nothing to anyone else, and the
+game's commands say nothing on a channel where `enabled` is off.
 
 | Command | |
 |---|---|
 | `unarm [-static] <nick>` | Confiscate a weapon (`-static`: permanent, only `rearm` undoes it). |
 | `rearm <nick>` | Give the weapon back. |
-| `ducklist <channel> [<search>]` | List the profiles of a channel. |
+| `ducklist <channel> [<search>]` | List the profiles of a channel, or those matching `*<search>*` (wildcards allowed). |
 | `duckfusion <channel> <dest> <src> [<src> ...]` | Merge profiles into `<dest>`. |
 | `duckrename <channel> <old> <new>` | Rename a profile (refuses if `<new>` exists). |
 | `duckdelete <channel> <nick>` | Delete a profile. |
@@ -83,8 +85,10 @@ the daily `.bak` is the only undo.
   or an xp book, rolled in the original's order.
 - **Flights**: `method` 2 plans the day in advance (hours drawn without
   replacement, replanned at midnight and when bread is bought or expires);
-  method 1 rolls every minute. Bread, decoys and fake ducks work as in the
-  original. Ammo is refilled daily at `autoRefillAmmoTime`.
+  method 1 rolls every minute. After a (re)start the day is planned afresh
+  once `postInitDelay` is over; a channel joined later gets its flights at
+  midnight or when its game is switched on, as in the original. Bread, decoys
+  and fake ducks work as in the original. Ammo is refilled daily at `autoRefillAmmoTime`.
 - **Nick changes**: the stats follow a renamed player when they next act (the
   original's deferral against stat theft), using its exact merge rules.
 - **Antiflood**: per player and command (`floodShoot` 30:600, `floodReload`
@@ -107,8 +111,8 @@ settings can be set for the whole bot, for one network, or for one channel
 `config channel #chan supybot.plugins.DuckHuntPro.enabled True`); the most
 specific one wins. **network** settings (the ChanServ kick ones) are per network
 only, **global** ones apply to the whole bot.
-Numbers and costs default to the original `Duck_Hunt.cfg` values. The level table
-(accuracy, jam chance, clip sizes, thresholds) is fixed.
+Numbers, costs and the level table (`levelGrantings`) default to the original
+`Duck_Hunt.cfg` values.
 
 | Setting | Scope | Default | Description |
 |---|---|---|---|
@@ -131,11 +135,11 @@ Numbers and costs default to the original `Duck_Hunt.cfg` values. The level tabl
 | `postInitDelay` | global | `60` | Seconds to wait after the plugin loads before planning the day's duck flights, to give the bot time to join all its channels. |
 | `quarterlyResetEnabled` | global | `True` | Whether to automatically archive and reset every channel's standings on the 1st of January/April/July/October. |
 | `topShootersCount` | channel, network | `3` | How many players `duckshooters` shows, ranked by xp (kills as tiebreaker). |
-| `web.enable` | global | `False` | Enables the built-in web dashboard (leaderboard/ champions/shop pages) served through Limnoria's HTTP server, at /duckhuntpro/<network>/<channel>/<page>. |
+| `web.enable` | global | `False` | Enables the built-in web dashboard served through Limnoria's HTTP server: each channel's leaderboard and champions at /duckhuntpro/<network>/<channel>/<page>, and the original's shop and progression pages at /duckhuntpro/shop and /duckhuntpro/levels (add /en or /fr for one language; each links to the other). |
 | `minXpForShopping` | channel, network | `0` | The lowest a player's xp balance is allowed to go after a shop purchase; a purchase that would drop them below this floor is refused. |
 | `shopEnabled` | channel, network | `True` | Whether the shop command is available at all (Duck_Hunt.tcl's shop_enabled; when off the command does nothing). |
 | `shopPreferredDisplayMode` | channel, network | `0` | What `shop` without arguments shows: 0 = the catalogue of items and prices, anything else = a message pointing to shopUrl instead. |
-| `shopUrl` | channel, network | (empty) | The web page listing the shop items, shown when shopPreferredDisplayMode is non-zero. |
+| `shopUrl` | channel, network | (empty) | The web page listing the shop items, shown when shopPreferredDisplayMode is non-zero. With web.enable on, this can be the dashboard's own shop page: <the bot's web address>/duckhuntpro/shop. |
 | `dropsEnabled` | channel, network | `True` | Whether killing a duck can also drop a bonus item/xp-book on top of the normal xp reward. |
 | `maxBreadOnChan` | channel, network | `20` | Maximum number of active bread pieces on a channel at once; further bread purchases are refused (and not charged) once this cap is hit. |
 | `kickWhenSabotaged` | channel, network | `True` | Whether a sabotaged weapon jamming also kicks the victim from the channel, matching the original script. |
@@ -146,11 +150,12 @@ Numbers and costs default to the original `Duck_Hunt.cfg` values. The level tabl
 | `gunConfiscationOnWildFire` | channel, network | `False` | Whether firing with no duck present (and hitting nobody) also risks a temporary confiscation. |
 | `devoiceOnAccident` | channel, network | `True` | Devoices a player who accidentally hits someone else. |
 | `kickWhenShot` | channel, network | `True` | Whether a player who takes a stray hit (and neither deflects nor is defended by armor) gets kicked. |
-| `gunHandBackMode` | channel, network | `1` | How temporarily-confiscated weapons get returned: 1 = once daily at autoGunHandBackTime, 2 = whenever the channel's duck count drops back to zero (killed/escaped), 3 = never automatically (only the `rearm` command). Permanently-confiscated weapons (`unarm --static`) are never auto-returned by any mode. |
+| `gunHandBackMode` | channel, network | `1` | How temporarily-confiscated weapons get returned: 1 = once daily at autoGunHandBackTime, 2 = whenever the channel's duck count drops back to zero (killed/escaped), 3 = never automatically (only the `rearm` command). Permanently-confiscated weapons (`unarm -static`) are never auto-returned by any mode. |
 | `autoGunHandBackTime` | channel, network | `00:00` | Local time (HH:MM) weapons are auto-returned each day, when gunHandBackMode is 1. |
 | `method` | global | `2` | How duck flights are scheduled (the original's `method`): 1 = every minute each channel has a chance of a flight (random timing), 2 = the day's flight times are planned in advance, replanned at midnight and whenever bread is bought or expires. |
 | `showBreadReplanning` | channel, network | `True` | Log the new flight plan each time buying or losing bread replans the day (the original's show_bread_replanning). |
 | `preferredDisplayMode` | channel, network | `1` | Where the game's per-player replies go: 1 = PRIVMSG to the channel, anything else = NOTICE to the player (the original's preferred_display_mode). Duck flights, kills and accidents are always public. |
+| `maxLineLength` | global | `435` | Longer messages are split into several lines, cut at a space when possible, carrying their colours over (the original's max_line_length). Must be at least 9. |
 | `monochrome` | channel, network | `False` | Strip colours and other formatting from every message the game sends (it is always stripped on channels with mode +c). |
 | `kickOnWildFire` | channel, network | `False` | Kick players who shoot when there is no duck (the original's kick_on_wild_fire). |
 | `autoRefillAmmoTime` | global | `00:00` | Local time (HH:MM) at which every player's clips are refilled to their level's count each day (the original script's auto_refill_ammo_time). |
@@ -172,10 +177,12 @@ Numbers and costs default to the original `Duck_Hunt.cfg` values. The level tabl
 | `antifloodMsgInterval` | channel, network | `60` | Minimum number of seconds between two flood-control warnings for the same limit (not too low, or the warnings become the flood). |
 | `kickViaChanServ` | network | `False` | Make the game's kicks through services instead of kicking directly (the original's kick_method 1), on this network. Needed when the bot has no op but is allowed to use services. |
 | `chanServKickLine` | network | `CS KICK {channel} {nick} :{reason}` | The raw IRC line kickViaChanServ sends on this network, with {channel}, {nick} and {reason} filled in. The default is the original's `CS kick` (the network needs a CS alias for ChanServ, as DALnet's has). Without an alias, for example: `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`; on Undernet the service is X: `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`. |
-| `strayBulletExemptCapability` | global | (empty) | A capability (for example "duckhuntpro.exempt"): users who have it, or are bots that have it, can never take a stray bullet. The original's exempted_flags; leave empty to exempt only the bot itself. |
+| `strayBulletExemptCapability` | global | `duckhuntpro.exempt` | A capability: users who have it, globally or as #channel,<capability>, can never take a stray bullet. The original's exempted_flags, which exempts bots (flag b) by default: give this capability to the other bots on your channels. Empty = nobody is exempt but the bot itself. |
+| `levelGrantings` | global | (the original's 41 levels) | The level table (level_grantings), one entry per level from level 0, separated by spaces: "xp,accuracy,deflection,defense,jamming,clip_size,clips,xp_miss,xp_wild_fire,xp_accident". xp is the threshold a player must reach to leave that level; the last level's should be unreachable. Rank names come from the language catalogue, so keep 41 levels unless you know what you're doing. |
 | `xpPerDuck` | global | `10` | Experience points for killing a duck (xp_duck). |
 | `xpPerGoldenDuckHp` | global | `12` | Experience points for killing a golden duck, per hit point it had. |
 | `xpLuckyShot` | global | `25` | Bonus experience points for a "lucky" kill (a ricochet that hits the duck). |
+| `maxRicochets` | global | `5` | Maximum number of times a stray bullet can ricochet off players (max_ricochets). |
 | `chanceRicochetTowardsDuck` | global | `10` | Percent chance for a deflected bullet to ricochet towards the duck (chances_to_ricochet_towards_duck). |
 | `chancesToHitSomeoneElse.upTo10` | global | `10` | Percent chance that a missed shot at a duck hits someone else, in a channel of 10 users or fewer. |
 | `chancesToHitSomeoneElse.upTo20` | global | `12` | Percent chance that a missed shot at a duck hits someone else, in 11 to 20 users. |
@@ -255,22 +262,25 @@ English dictionary is left over from the first version and no longer used.
   100 ms).
 - `duckfusion` skips a source that is the destination (the original would
   delete the profile).
-- The export's items column lists the active item names, not the raw Tcl list.
-- `ducklaunch` never makes a golden duck unless asked, and logs only its own
-  `launch` line.
+- With `dropsEnabled` off, the original fails after every kill (and loses
+  it); the plugin doesn't.
+- The progression page is built from the level table actually in use, so it
+  shows level 40 at 1% reliability (the cfg's 99% jamming, which the game
+  uses); the original's static page said 99%.
+- Ducks bought with a decoy or a mechanical duck still fly after a restart (an
+  Eggdrop restart loses their timers).
 - Flood windows are tracked by timestamps instead of one timer per request
   (same behaviour).
 - Commands are Limnoria commands (`bang`, not `!bang`); bind your own
   aliases or use the channel's command prefix. `shop_cmd`/`*_cmd`/`*_auth`
   variables have no equivalent: use Limnoria capabilities.
-- Not ported: `max_line_length` (Limnoria splits long lines itself) and the
-  database/table/transfer file paths (the plugin uses its own data file and the
-  Limnoria data directory).
+- Not ported: the database/table/transfer file paths (the plugin uses its own
+  data file and the Limnoria data directory).
 - If both this plugin and `PT/DuckHunt` are loaded, disambiguate shared names
   with the plugin name (`duckhuntpro bang`).
 
 ## Tests
 
-`limnoria-test` runs the suite (about 290 tests); `python3 -m unittest
+`limnoria-test` runs the suite (about 335 tests); `python3 -m unittest
 test_tcldb` in this directory runs the Tcl database reader's tests without
 Limnoria.

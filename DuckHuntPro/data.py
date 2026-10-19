@@ -79,6 +79,36 @@ LEVELS = [
 ]
 
 MAX_LEVEL = len(LEVELS) - 1
+_DEFAULT_LEVELS = list(LEVELS)
+
+
+def levelGrantingsDefault():
+    """The table above in the cfg's notation, for the levelGrantings setting."""
+    return [','.join(str(x) for x in lvl) for lvl in _DEFAULT_LEVELS]
+
+
+def parseLevelGrantings(entries):
+    """Level rows from levelGrantings entries; ValueError if one is malformed."""
+    rows = []
+    for entry in entries:
+        fields = entry.split(',')
+        if len(fields) != len(Level._fields):
+            raise ValueError('a level needs %d comma-separated numbers: %r'
+                             % (len(Level._fields), entry))
+        try:
+            rows.append(Level(*(int(f) for f in fields)))
+        except ValueError:
+            raise ValueError('not a whole number in %r' % entry)
+    if not rows:
+        raise ValueError('the level table is empty')
+    return rows
+
+
+def setLevels(rows):
+    """Replaces the level table (in place, so every holder of LEVELS sees it)."""
+    global MAX_LEVEL
+    LEVELS[:] = rows
+    MAX_LEVEL = len(LEVELS) - 1
 
 
 def levelForXp(xp):
@@ -133,7 +163,7 @@ def accidentChance(population, duckPresent, tiers=None):
 # profile into a renamed player's new one.
 FUSION_SUMMED_STATS = (
     'killed', 'golden_killed', 'missed', 'empty_shots', 'humans_shot',
-    'wild_shots', 'bullets_received', 'deflected', 'absorbed',
+    'wild_shots', 'bullets_received', 'deflected',
     'confiscations', 'jams', 'deaths', 'total_time_ms', 'timed_shots',
 )
 

@@ -179,7 +179,6 @@ def convertPlayer(fields, nick, now=None):
             'wild_shots': _int(get('wild_shots')),
             'bullets_received': _int(get('bullets_received')),
             'deflected': _int(get('deflected_bullets')),
-            'absorbed': 0,
             'confiscations': _int(get('confiscated_weapons')),
             'jams': _int(get('jammed_weapons')),
             'deaths': _int(get('deaths')),

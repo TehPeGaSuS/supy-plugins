@@ -39,7 +39,7 @@ from datetime import datetime
 from supybot.test import *
 import supybot.schedule as schedule
 import supybot.drivers as drivers
-from supybot import ircdb, ircmsgs
+from supybot import ircdb, ircmsgs, ircutils, registry
 
 from . import data
 from . import db
@@ -454,6 +454,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             p['stats'].update(killed=3, golden_killed=1, missed=1, empty_shots=2, humans_shot=0,
                               wild_shots=4, bullets_received=5, deaths=1, deflected=2,
                               jams=2, confiscations=1, best_time_ms=3500, reflex_ms=9000)
+        conf.supybot.plugins.DuckHuntPro.maxLineLength.setValue(2000)   # one line per \n
         text = self._stats(setup)
         lvl = data.LEVELS[data.levelForXp(70)]            # level 3
         self.assertIn('ammo: 4/6', text)
@@ -501,13 +502,15 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             db.giveItem(p, 'sight', now, duration=None, uses=1)
             db.giveItem(p, 'silencer', now, duration=86400)
             db.giveItem(p, 'water_bucket', now, duration=3600, value='bob')
+        conf.supybot.plugins.DuckHuntPro.maxLineLength.setValue(2000)
         text = self._stats(setup)
         self.assertIn('gun reliability: 85%\x0303+7%\x03\x0304-42%\x03', text)
         self.assertIn('theor. accuracy: 55%\x0304-27%\x03\x0303+15%\x03', text)
         self.assertIn('Inventory', text)
         self.assertIn('Grease \x0314/\x03 Sight \x0314/\x03 Silencer', text)
         self.assertIn('Effects', text)
-        self.assertIn('Bedazzled \x0314/\x03 Sand \x0314/\x03 Soggy', text)
+        # (in the order they were received, as the original lists them)
+        self.assertIn('Sand \x0314/\x03 Bedazzled \x0314/\x03 Soggy', text)
 
     def testDuckstatsAnotherPlayerGoesToTheAsker(self):
         cb = self._cb()
@@ -648,40 +651,42 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertNotError('duckstats')
         self.assertNotError('lastduck')
 
-    def testRestartReschedulesFutureFlight(self):
+    def testRestartDropsThePreviousRunsFlights(self):
+        # The original plans the day afresh at post-init: the flights of the
+        # previous run are not kept.
         cb = self._cb()
         network = self.irc.network
-        cname = self.channel.lower()
         future = time.time() + 3600
         chan = cb.db.channel(network, self.channel)
         chan['planned_flights'] = [future]
+        chan['planned_soarings'] = ['23:59']
         cb.db.save()
-        name = "DuckHuntPro:flight:%s:%s:%r" % (network, cname, future)
-        try:
-            schedule.removeEvent(name)
-        except KeyError:
-            pass
+        name = "DuckHuntPro:flight:%s:%s:%r" % (network, self.channel.lower(), future)
         cb._reschedulePlannedFlights(self.irc)
-        self.assertTrue(name in schedule.schedule.events,
-                         'Future flight was not rescheduled after reload.')
-        schedule.removeEvent(name)
+        self.assertNotIn(name, schedule.schedule.events)
+        self.assertEqual(chan['planned_flights'], [])
+        self.assertEqual(chan['planned_soarings'], [])
 
-    def testRestartPlansFreshDayWhenNoFutureFlights(self):
+    def testPostInitPlansEveryEnabledChannel(self):
         cb = self._cb()
-        network = self.irc.network
-        cname = self.channel.lower()
-        chan = cb.db.channel(network, self.channel)
-        chan['planned_flights'] = []
-        cb.db.save()
-        planName = "DuckHuntPro:plan:%s:%s" % (network, cname)
+        chan = cb.db.channel(self.irc.network, self.channel)
+        cb._postInitDone = False
         try:
-            schedule.removeEvent(planName)
-        except KeyError:
-            pass
-        cb._reschedulePlannedFlights(self.irc)
-        self.assertTrue(planName in schedule.schedule.events,
-                         'No fresh plan was scheduled for a channel with no future flights.')
-        schedule.removeEvent(planName)
+            cb._setPostInitDone()
+            self.assertTrue(cb._postInitDone)
+            self.assertEqual(len(chan['planned_soarings']),
+                             conf.supybot.plugins.DuckHuntPro.ducksPerDay())
+        finally:
+            cb._cancelFlights(self.irc.network, self.channel)
+
+    def testJoiningDoesNotPlanFlights(self):
+        # Only post-init, midnight and switching the game on plan flights.
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        self.irc.feedMsg(ircmsgs.join(self.channel, prefix=self.prefix.replace(
+            self.nick, self.irc.nick, 1)))
+        self.assertEqual(chan.get('planned_soarings'), [])
+        self.assertEqual(chan.get('planned_flights'), [])
 
     def testSpawnDuckAnnouncesAndTracksGolden(self):
         cb = self._cb()
@@ -795,15 +800,55 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         body = cb._renderWeb(path)
         self.assertTrue('No quarterly reset' in body)
 
-    def testRenderWebShopPlaceholder(self):
+    def testRenderWebShopIsTheOriginalsPage(self):
         cb = self._cb()
-        cb.db.player(self.irc.network, self.channel, self.nick)
-        cb.db.save()
-        path = '/%s/%s/shop' % (
+        conf.supybot.plugins.DuckHuntPro.shopCosts.sight.setValue(42)
+        body = cb._renderWeb('/shop')
+        self.assertIn('<title>Duck Hunt - shop</title>', body)
+        self.assertIn('<th style="width: 90px;">XP cost</th>', body)
+        self.assertIn('<td>Sight</td>', body)
+        self.assertIn('/ 3.</td>\n\t      <td>42</td>', body)
+        self.assertEqual(body.count('<td>Mechanical duck</td>'), 1)
+        body = cb._renderWeb('/shop/fr')
+        self.assertIn('<td>Lunette de visée</td>', body)
+        self.assertIn('Coût en xp', body)
+        self.assertIn('<a href="/duckhuntpro/shop/en">Read it in English</a>', body)
+        self.assertIn('<a href="/duckhuntpro/shop/fr">Lisez-le en Français</a>',
+                      cb._renderWeb('/shop/en'))
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertEqual(cb._renderWeb('/shop'), body)
+        self._assertRendersNotFound(cb, '/shop/de')
+        self._assertRendersNotFound(cb, '/%s/%s/shop' % (
             urllib.parse.quote(self.irc.network, safe=''),
-            urllib.parse.quote(self.channel, safe=''))
-        body = cb._renderWeb(path)
-        self.assertTrue('Phase 2' in body)
+            urllib.parse.quote(self.channel, safe='')))
+
+    def testRenderWebLevelsIsTheOriginalsProgressionTable(self):
+        cb = self._cb()
+        body = cb._renderWeb('/levels/en')
+        self.assertIn('<title>Duck Hunt - levels and bonuses</title>', body)
+        self.assertIn('Players begin at level 1 with 0 xp points.', body)
+        self.assertIn('<a href="/duckhuntpro/levels/fr">Lisez-le en Français</a>', body)
+        row = lambda *cells: '\t    <tr>\n%s\t    </tr>\n' % ''.join(
+            '\t      <td>%s</td>\n' % c for c in cells)
+        self.assertIn(row(0, '&le; -5', 'machine gun', '55%', '85%', 6, 1, '0%', '0%', -1, -1, -4),
+                      body)
+        self.assertIn(row(7, 270, 'assault rifle', '65%', '93%', 4, 3, '15%', '8%', -1, -1, -4),
+                      body)
+        self.assertEqual(body.count('<tr>'), 1 + 41)        # the title box and 41 levels
+        fr = cb._renderWeb('/levels/fr')
+        self.assertIn('Duck Hunt - niveaux et bonus', fr)
+        self.assertIn('fusil de précision', fr)
+        self.assertIn('<a href="/duckhuntpro/levels/en">Read it in English</a>', fr)
+        # The table follows levelGrantings.
+        value = conf.supybot.plugins.DuckHuntPro.levelGrantings
+        original = list(value())
+        try:
+            rows = list(original)
+            rows[7] = '350,77,8,15,7,4,3,-1,-1,-4'
+            value.setValue(rows)
+            self.assertIn('<td>77%</td>', cb._renderWeb('/levels'))
+        finally:
+            value.setValue(original)
 
     def testRenderWebUnknownChannelRaises404(self):
         cb = self._cb()
@@ -894,7 +939,10 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         costs = [data.ITEM_COSTS[k] for k in data.SHOP_ITEMS]
         self.assertEqual(len(costs), 23)
         texts = self._shopRun()
-        self.assertEqual(texts, [self._msg('m265', 'DuckHuntPro', *(costs + ['shop']))])
+        # (too long for one line: split as the original's split_line does)
+        self.assertEqual(texts, messages.splitLine(
+            self._msg('m265', 'DuckHuntPro', *(costs + ['shop'])), 435))
+        self.assertEqual(len(texts), 2)
         self.assertEqual(self._xp(), 1000)
         # Listing is not a shop "activity" in Tcl (last_activity untouched).
         self.assertTrue(self._player()['last_activity'] is None)
@@ -936,14 +984,15 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(texts, [self._msg('m287', self.nick, costs, self._word(costs, 'fr'),
                                            lang='fr')])
 
-    def testShopRefusesWhenTooPoorButStillCountsAsActivity(self):
+    def testShopRefusalIsNotSaved(self):
         # 3 xp - 7 < 0 (the default floor).
         texts = self._shopRun('1', xp=3, setup=lambda p: p.update(clip_ammo=0))
         self.assertEqual(texts, [self._msg('m266', self.nick)])
         p = self._player()
         self.assertEqual((p['xp'], p['clip_ammo']), (3, 0))
-        # Tcl stamps last_activity before the xp floor test.
-        self.assertTrue(p['last_activity'] is not None)
+        # Tcl stamps last_activity before the xp floor test, but only writes
+        # its database after a purchase: the stamp is lost.
+        self.assertTrue(p['last_activity'] is None)
 
     def testShopMinXpFloorIsConfigurable(self):
         # The floor test comes first, whatever the item: with the default
@@ -1367,11 +1416,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         texts = self._shopRun('12', xp=272)
         self.assertEqual(texts, [self._msg('m297', self.nick)])
 
-    def testShopUseDuringADuckAddsToTheReflexTime(self):
+    def testShopUseDuringADuckAddsToTheReflexTimeOnlyWithAPurchase(self):
         cb = self._cb()
         self._putDuck()
         cb._activeDuck[self._key()][0]['spawned_at'] = time.time() - 5
-        self._shopRun()
+        self._shopRun()             # just looking: the original doesn't save
+        self.assertEqual(self._player()['stats']['reflex_ms'], 0)
+        self._shopRun('7')
         self.assertTrue(5000 <= self._player()['stats']['reflex_ms'] < 9000)
         cb._removeDuck(self.irc.network, self.channel)
 
@@ -1534,7 +1585,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def _texts(self, sent, command='PRIVMSG'):
         return [text for c, _, text in sent if c == command]
 
-    def testJammedGunStillEatsSandAndSabotage(self):
+    def testJammedGunKeepsSandAndSabotage(self):
         cb = self._cb()
         player = cb.db.player(self.irc.network, self.channel, self.nick)
         player['jammed'] = True
@@ -1543,9 +1594,11 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb.db.save()
         sent = self._bangSent()
         self.assertTrue(any('JAMMED GUN' in x for x in self._texts(sent)), sent)
+        # The original removes them, but doesn't save on this path: they are
+        # still there for the next shot.
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
-        self.assertTrue(db.itemActive(player, 'sand', time.time()) is None)
-        self.assertTrue(db.itemActive(player, 'sabotage', time.time()) is None)
+        self.assertTrue(db.itemActive(player, 'sand', time.time()) is not None)
+        self.assertTrue(db.itemActive(player, 'sabotage', time.time()) is not None)
 
     def testWildFireCostsTheMissAndTheWildFirePenalty(self):
         cb = self._cb()
@@ -1890,7 +1943,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def testLastduckSaysNothingMoreForAnUnknownOutcome(self):
         cb = self._cb()
         chan = cb.db.channel(self.irc.network, self.channel)
-        chan['last_duck_at'] = time.time() - 100
+        chan['last_duck_at'] = int(time.time()) - 100   # (whole seconds, as the original)
         chan['last_duck_killer'] = chan['last_duck_outcome'] = None
         self.assertEqual(self._texts(self._cmd('lastduck')),
                          [messages.tcl('en', 'm144', messages.adaptTimeResolution(100000, False, 'en'))])
@@ -2091,7 +2144,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertRegexp('bang', 'soggy')
         player = cb.db.getPlayer(self.irc.network, self.channel, self.nick)
         # the bucket stops the shot before any jam roll or ammo use
-        self.assertEqual(player['clip_ammo'], data.LEVELS[1].clip_size)
+        self.assertIn(player['clip_ammo'], (None, data.LEVELS[1].clip_size))
         self.assertFalse(player['jammed'])
 
     def testApAmmoDoublesDamageAgainstGoldenDuck(self):
@@ -2213,8 +2266,9 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._rng = ScriptedRNG([100, 100, 0, 0, 100, 0])  # deflect fails, defense succeeds
         self.assertNotError('bang')
         bobP = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
-        self.assertEqual(bobP['stats']['absorbed'], 1)
+        self.assertEqual(bobP['stats']['bullets_received'], 1)
         self.assertEqual(bobP['stats']['deaths'], 0)
+        self.assertEqual(bobP['stats']['deflected'], 0)
 
     def testAccidentRicochetIntoDuckKillsItWithLuckyBonus(self):
         cb = self._cb()
@@ -2843,11 +2897,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(calls, ['bread_expired', 'bread_expired'])
         self.assertEqual(len(chan['bread']), 1)
 
-    def testCountingBreadDoesNotRemoveExpiredPieces(self):
+    def testBreadCountIncludesPiecesNotRemovedYet(self):
+        # Like the original's llength: an expired piece counts until the
+        # minute tick removes it.
         chan = self._cb().db.channel(self.irc.network, self.channel)
         now = time.time()
         chan['bread'] = [{'expires_at': now - 5}, {'expires_at': now + 600}]
-        self.assertEqual(db.activeBreadCount(chan, now), 1)
+        self.assertEqual(db.breadCount(chan), 2)
         self.assertEqual(len(chan['bread']), 2)
 
     def testMidnightReplansEnabledChannelsAndSchedulesTheNextMidnight(self):
@@ -3058,7 +3114,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(self._notices('duckexport bogus'),
                          [messages.tcl('en', 'm206', 'bogus', ' '.join(valid))])
         self.assertEqual(self._notices('duckexport xp level'),
-                         [messages.tcl('en', 'm205', 'duckexport')])
+                         messages.splitLine(messages.tcl('en', 'm205', 'duckexport'), 435))
 
     def _tclDb(self):
         import tempfile
@@ -3430,9 +3486,11 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             cb._statsText(cb.db.getPlayer(self.irc.network, self.channel, 'new'))
         self._cmd('duckfusion %s new old' % self.channel)
         lines = [l for l in self._logLines(directory) if l]
-        after = cb._statsText(cb.db.getPlayer(self.irc.network, self.channel, 'new'))
+        after = cb._statsText(cb.db.getPlayer(self.irc.network, self.channel, 'new'), merged=True)
         stamp = self._stamped(lines[0])
         self.assertEqual(lines, [messages.tcl('en', 'm420', stamp, 'old', before[0], 'new', before[1], 'new', after)])
+        # the result has no nick field, as in the original
+        self.assertEqual(after, '1 0 6 2 55 0 0 0 0 0 0 0 0 0 0 -1 0 {} 0 -1')
 
     def testAutomaticMergeLine(self):
         directory = self._enableLogs()
@@ -3600,6 +3658,364 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb.db.save()
         self.assertEqual(player2['xp'], 0)
         self.assertEqual(cb.db.getPlayer('networkone', self.channel, self.nick)['xp'], 500)
+
+
+    # -----------------------------------------------------------------
+    # Parity with Duck_Hunt.tcl v2.11 (second audit)
+    # -----------------------------------------------------------------
+
+    def _feedAll(self, commands, prefix=None, private=False):
+        """Feeds several commands, then collects what the bot sent (for
+        commands expected to stay silent, without waiting on each)."""
+        for command in commands:
+            if private:
+                msg = ircmsgs.privmsg(self.irc.nick, command, prefix=prefix or self.prefix)
+            else:
+                msg = ircmsgs.privmsg(self.channel, '%s: %s' % (self.irc.nick, command),
+                                      prefix=prefix or self.prefix)
+            self.irc.feedMsg(msg)
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            time.sleep(0.05)
+            drivers.run()
+        return self._sent()
+
+    def testDisabledChannelIgnoresTheGameCommands(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, 'bob')['gun_state'] = 'confiscated'
+        cb.db.save()
+        self._addOnlineNick('bob')
+        self._putDuck()
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        self._sent()                    # the "switched off" announcement
+        try:
+            sent = self._feedAll(['bang', 'duckreload', 'duckstats', 'shop', 'shop 7',
+                                  'lastduck', 'unarm bob', 'rearm bob'])
+            self.assertEqual(sent, [])
+            self.assertTrue(self._player() is None)
+            self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')['gun_state'],
+                             'confiscated')
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+
+    def testStaffCommandsAreSilentForOthers(self):
+        # (__no_testcap__: the test harness grants every capability otherwise)
+        sent = self._feedAll(['duckexport', 'ducklist', 'lastduck', 'duckdelete'],
+                             prefix='stranger!x@__no_testcap__', private=True)
+        self.assertEqual(sent, [])
+
+    def testPrivateLastduckSyntax(self):
+        for command in ('lastduck', 'lastduck %s extra' % self.channel):
+            self.assertEqual(self._notices(command, private=True),
+                             [messages.tcl('en', 'm145', 'lastduck')])
+
+    def testUnarmStaticWithoutANickIsAnUnknownNick(self):
+        sent = self._cmd('unarm -static')
+        self.assertEqual(self._texts(sent), [messages.tcl('en', 'm67', self.nick, '', self.channel)])
+
+    def testRearmTakesTheWholeArgument(self):
+        sent = self._cmd('rearm two words')
+        self.assertEqual(self._texts(sent),
+                         [messages.tcl('en', 'm67', self.nick, 'two words', self.channel)])
+
+    def testDucklistSearchIsAWildcardAndExtraWordsAreIgnored(self):
+        self._players(alice=1, alfred=2, bob=3)
+        self.assertEqual(self._notices('ducklist %s a*e' % self.channel),
+                         [messages.tcl('en', 'm125', 2, 'alfred alice')])
+        self.assertEqual(self._notices('ducklist %s bo extra words' % self.channel),
+                         [messages.tcl('en', 'm124', 'bob')])
+
+    def testExportCriterionIsCaseSensitive(self):
+        valid = list(self._cb()._EXPORT_CRITERIA)
+        valid.insert(len(valid) - 1, 'or')
+        self.assertEqual(self._notices('duckexport XP'),
+                         messages.splitLine(messages.tcl('en', 'm206', 'XP', ' '.join(valid)), 435))
+
+    def testExportKarmaAndItemsAreWrittenAsTheOriginalDoes(self):
+        cb = self._cb()
+        p = cb.db.player(self.irc.network, self.channel, 'alice')
+        p['stats']['killed'] = 3
+        db.giveItem(p, 'sight', time.time(), duration=None, uses=1)
+        db.giveItem(p, 'grease', 2000000000, duration=86400)
+        cb.db.save()
+        lines = self._export()
+        row = [l for l in lines if l.startswith('alice')][0]
+        self.assertRegex(row, r' 100 +tourist +\{- 7 1\} \{2000086400 6 -\}\s*$')
+
+    def testSplitLineCutsAtSpacesAndCarriesTheStyles(self):
+        text = '\x02\x0304,1start ' + ' '.join('word%d' % i for i in range(120))
+        lines = messages.splitLine(text, 435)
+        self.assertTrue(len(lines) > 1)
+        self.assertTrue(all(len(line) <= 435 for line in lines))
+        self.assertTrue(lines[1].startswith('\x02\x0304,01word'), repr(lines[1][:12]))
+        self.assertEqual(ircutils.stripFormatting(' '.join(lines)),
+                         ircutils.stripFormatting(text))
+        self.assertEqual(messages.splitLine('one\ntwo', 435), ['one', 'two'])
+        self.assertEqual(messages.splitLine('', 435), [''])
+        # No space in the second half: cut at the limit, but never in a colour code.
+        lines = messages.splitLine('x' * 20 + '\x0312' + 'y' * 20, 22)
+        self.assertEqual(lines[0], 'x' * 20)
+
+    def testLongMessagesAreSplit(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.maxLineLength.setValue(50)
+        cb._out(self.irc, self.channel, self.nick, ' '.join(['abcdefgh'] * 20), 'public')
+        sent = self._sent()
+        self.assertTrue(len(sent) > 3)
+        self.assertTrue(all(len(text) <= 50 for _, _, text in sent))
+
+    def testColoursAreOnlyStrippedForAPlusCChannel(self):
+        cb = self._cb()
+        self.irc.state.channels[self.channel].modes['c'] = None
+        try:
+            cb._out(self.irc, self.channel, self.nick, '\x0304red', 'public')
+            cb._out(self.irc, self.channel, self.nick, '\x0304red', 'notice')
+            self.assertEqual(self._sent(), [('PRIVMSG', self.channel, 'red'),
+                                            ('NOTICE', self.nick, '\x0304red')])
+        finally:
+            del self.irc.state.channels[self.channel].modes['c']
+
+    def testRefusedShotsAreNotSaved(self):
+        cb = self._cb()
+        self._putDuck()
+        cb._activeDuck[self._key()][0]['spawned_at'] = time.time() - 5
+        try:
+            for setup in (lambda p: p.update(gun_state='confiscated'),
+                          lambda p: db.giveItem(p, 'water_bucket', time.time(),
+                                                duration=3600, value='bob'),
+                          lambda p: p.update(jammed=True)):
+                p = cb.db.player(self.irc.network, self.channel, self.nick)
+                p['stats']['reflex_ms'] = 0
+                p['last_activity'] = None
+                setup(p)
+                cb.db.save()
+                self._bangSent()
+                p = self._player()
+                self.assertEqual((p['stats']['reflex_ms'], p['last_activity']), (0, None))
+                cb.db.channel(self.irc.network, self.channel)['players'].clear()
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+
+    def testAnExpiredItemMakesTheOriginalSave(self):
+        cb = self._cb()
+        self._putDuck()
+        cb._activeDuck[self._key()][0]['spawned_at'] = time.time() - 5
+        p = cb.db.player(self.irc.network, self.channel, self.nick)
+        db.giveItem(p, 'water_bucket', time.time(), duration=3600, value='bob')
+        db.giveItem(p, 'grease', time.time() - 100000, duration=86400)    # expired
+        cb.db.save()
+        try:
+            self._bangSent()
+            p = self._player()
+            self.assertTrue(p['stats']['reflex_ms'] >= 5000)
+            self.assertNotIn('grease', p['items'])
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+
+    def testLookingAtTheShopCreatesNoProfile(self):
+        self._cmd('shop')
+        self.assertTrue(self._player() is None)
+        self._cmd('shop 99')
+        self.assertTrue(self._player() is None)
+
+    def testItemsStillWorkDuringTheirExpirySecond(self):
+        now = time.time()
+        p = db._newPlayer('x')
+        db.giveItem(p, 'grease', now - 86400, duration=86400)
+        self.assertTrue(db.itemActive(p, 'grease', now) is not None)
+        self.assertTrue(db.itemActive(p, 'grease', now + 1) is None)
+
+    def testAccidentIsLoggedOnceForARicochetChain(self):
+        directory = self._enableLogs()
+        cb = self._cb()
+        self._addHunter('bob', xp=1000)        # a level with deflection
+        self._addHunter('carol')
+        cb._pickAccidentVictim = lambda irc, channel, network, source: (
+            'bob' if source == self.nick else 'carol')
+        self._putDuck()
+        # jam(no), miss, accident(yes), deflect(yes), towards the duck(no),
+        # accident(yes), deflect(no), defense(no)
+        cb._rng = ScriptedRNG([100, 100, 0, 0, 100, 0, 100, 100])
+        try:
+            self._bangSent()
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+        text = '\n'.join(self._logLines(directory))
+        self.assertEqual(text.count('accident:'), 1, text)
+        self.assertIn('accident: bob *PEWWW* carol *ARGH*', text)
+
+    def testMaxRicochetsIsASetting(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.maxRicochets.setValue(0)
+        self._addHunter('bob')
+        self._putDuck()
+        cb._rng = ScriptedRNG([100, 100, 0, 0])
+        try:
+            self._bangSent()
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+        bob = cb.db.getPlayer(self.irc.network, self.channel, 'bob')
+        self.assertEqual(bob['stats']['bullets_received'], 0)
+
+    def testAccidentChancesCanBeZero(self):
+        conf.supybot.plugins.DuckHuntPro.chancesToHitSomeoneElse.upTo10.setValue(0)
+        conf.supybot.plugins.DuckHuntPro.ducksPerDay.setValue(0)
+        cb = self._cb()
+        self._addHunter('bob')
+        self._putDuck()
+        cb._rng = ScriptedRNG([100, 100, 0, 0])
+        try:
+            self._bangSent()
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')
+                         ['stats']['bullets_received'], 0)
+
+    def testStrayBulletExemptionByDefaultAndPerChannel(self):
+        self.assertEqual(conf.supybot.plugins.DuckHuntPro.strayBulletExemptCapability(),
+                         'duckhuntpro.exempt')
+        cb = self._cb()
+        self._addHunter('bob')
+        self._addHunter('carol')
+        real = ircdb.checkCapability
+        channelCap = ircdb.makeChannelCapability(self.channel, 'duckhuntpro.exempt')
+        ircdb.checkCapability = lambda prefix, cap, *a, **kw: (
+            cap == channelCap and prefix.startswith('bob!'))
+        state = self.irc.state
+        state.nickToHostmask = lambda nick: '%s!u@h' % nick
+        try:
+            cb._rng = ScriptedRNG([0])        # (carol is the only candidate left)
+            self.assertEqual(cb._pickAccidentVictim(self.irc, self.channel,
+                                                    self.irc.network, 'nobody'), 'carol')
+        finally:
+            ircdb.checkCapability = real
+            del state.nickToHostmask
+
+    def testLevelGrantingsCanBeChanged(self):
+        value = conf.supybot.plugins.DuckHuntPro.levelGrantings
+        original = list(value())
+        try:
+            rows = list(original)
+            rows[1] = '20,99,0,0,15,6,2,-1,-1,-4'
+            value.setValue(rows)
+            self.assertEqual(data.LEVELS[1].accuracy, 99)
+            self.assertRaises(registry.InvalidRegistryValue, value.set, '1,2,3')
+        finally:
+            value.setValue(original)
+        self.assertEqual(data.LEVELS[1].accuracy, 55)
+
+    def testDailyHandBackNeedsAnAutomaticConfiscation(self):
+        cb = self._cb()
+        p = cb.db.player(self.irc.network, self.channel, 'bob')
+        p['gun_state'] = 'confiscated'
+        conf.supybot.plugins.DuckHuntPro.gunConfiscationWhenShootingSomeone.setValue(False)
+        conf.supybot.plugins.DuckHuntPro.gunConfiscationOnWildFire.setValue(False)
+        cb._fireGunHandBack(self.irc.network, self.channel)
+        self.assertEqual(p['gun_state'], 'confiscated')
+        conf.supybot.plugins.DuckHuntPro.gunConfiscationOnWildFire.setValue(True)
+        cb._fireGunHandBack(self.irc.network, self.channel)
+        self.assertEqual(p['gun_state'], 'armed')
+
+    def testDailyHandBackCoversChannelsWithPlayers(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, '#elsewhere', 'bob')
+        for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:handback:')]:
+            cb._unschedule(name)
+        cb._reschedulePlannedFlights(self.irc)
+        self.assertTrue(any(n.startswith('DuckHuntPro:handback:%s:#elsewhere:' % self.irc.network)
+                            for n in cb._scheduled))
+
+    def testEscapeLogsTheHandBackFirstInMode2(self):
+        directory = self._enableLogs()
+        conf.supybot.plugins.DuckHuntPro.gunHandBackMode.setValue(2)
+        cb = self._putDuck()
+        cb._duckEscapes(self.irc.network, self.channel,
+                        cb._activeDuck[self._key()][0]['spawned_at'])
+        lines = [l for l in self._logLines(directory) if l]
+        self.assertIn('hand back confiscated guns', lines[0])
+        self.assertIn('duck gone', lines[1])
+
+    def testBreadCapCountsPiecesNotRemovedYet(self):
+        cb = self._cb()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['bread'] = [{'expires_at': time.time() - 5}] * (data.MAX_BREAD_ON_CHAN - 1) \
+            + [{'expires_at': time.time() + 600}]
+        cb.db.save()
+        texts = self._shopRun('21')
+        self.assertEqual(texts, [self._msg('m387', self.nick, data.MAX_BREAD_ON_CHAN, self.channel)])
+
+    def testBreadIsNotReplannedBeforePostInit(self):
+        cb = self._cb()
+        cb._postInitDone = False
+        try:
+            self._shopRun('21')
+            chan = cb.db.channel(self.irc.network, self.channel)
+            self.assertEqual(len(chan['bread']), 1)
+            self.assertEqual(chan.get('planned_soarings'), [])
+        finally:
+            cb._postInitDone = True
+
+    def testBreadExpiresOnChannelsWhereTheGameIsOff(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        self._sent()
+        chan = cb.db.channel(self.irc.network, self.channel)
+        chan['bread'] = [{'expires_at': time.time() - 5}]
+        cb._expireBread()
+        self.assertEqual(chan['bread'], [])
+
+    def testPendingTransfersGoOnAnyPart(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        self._sent()
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb.doPart(self.irc, ircmsgs.part(self.channel, prefix='new!x@y'))
+        self.assertTrue(cb.db.getPendingTransfer(self.irc.network, self.channel, 'new') is None)
+
+    def testDuckDetectorMovesARenamedHoldersStatsFirst(self):
+        cb = self._cb()
+        old = cb.db.player(self.irc.network, self.channel, 'oldnick')
+        old['xp'] = 77
+        db.giveItem(old, 'duck_detector', time.time(), duration=None, uses=1)
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'oldnick', 'NewNick')
+        self._addOnlineNick('NewNick')
+        cb._spawnDuck(self.irc, self.channel)
+        try:
+            notices = [(t, x) for c, t, x in self._sent() if c == 'NOTICE']
+            self.assertEqual(notices, [('NewNick', messages.tcl('en', 'm351', 'NewNick',
+                                                                  self.channel))])
+            self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'oldnick') is None)
+            new = cb.db.getPlayer(self.irc.network, self.channel, 'newnick')
+            self.assertEqual(new['xp'], 77)
+            self.assertNotIn('duck_detector', new['items'])
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+
+    def testStatsTextHasTheOriginalsFields(self):
+        cb = self._cb()
+        p = cb.db.player(self.irc.network, self.channel, 'Alice')
+        p.update(xp=30, last_activity=1700000000)
+        p['stats'].update(killed=2, golden_killed=1, best_time_ms=1500)
+        db.giveItem(p, 'sight', time.time(), duration=None, uses=1)
+        self.assertEqual(cb._statsText(p),
+                         '1 0 6 2 30 2 0 0 0 0 0 0 0 0 0 1.500 0 Alice {{- 7 1}} 1 1700000000')
+        self.assertEqual(cb._statsText(p, merged=True),
+                         '1 0 6 2 30 2 0 0 0 0 0 0 0 0 0 1.500 0 {{- 7 1}} 1 1700000000')
+        self._addOnlineNick('Ghost')
+        self.assertEqual(cb._statsText(None, 'ghost', self.irc, self.channel),
+                         '1 0 6 2 0 0 0 0 0 0 0 0 0 0 0 -1 0 Ghost {} 0 -1')
+
+    def testMergeOrdersItemsByTheOriginalsIds(self):
+        cb = self._cb()
+        now = time.time()
+        src = cb.db.player(self.irc.network, self.channel, 'src')
+        dst = cb.db.player(self.irc.network, self.channel, 'dst')
+        db.giveItem(src, 'sight', now, duration=None, uses=1)                 # 7
+        db.giveItem(dst, 'liability_insurance', now, duration=172800)         # 19
+        db.giveItem(dst, 'ap_ammo', now, duration=86400)                      # 3
+        cb.db.mergeStats(self.irc.network, self.channel, 'dst', 'src')
+        merged = cb.db.getPlayer(self.irc.network, self.channel, 'dst')
+        self.assertEqual(list(merged['items']), ['liability_insurance', 'ap_ammo', 'sight'])
 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:

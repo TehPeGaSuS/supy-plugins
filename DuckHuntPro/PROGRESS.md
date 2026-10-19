@@ -7,6 +7,33 @@ describe a simplified design that no longer exists (admin group, single
 antiflood window, `shop buy`, simplified fusion); `README.md` is the
 current description.
 
+## Second parity audit (2026-10-19)
+
+A function-by-function re-audit against Duck_Hunt.tcl v2.11 found and fixed:
+the game commands now ignore channels where `enabled` is off; long lines are
+split as `split_line` does (`maxLineLength`, the README wrongly said Limnoria
+did it); refused shots, unarmed reloads and shop visits without a purchase are
+not saved (a `_Draft` restores the profile), so sand/sabotage survive a jammed
+shot; the `accident` log fragment is written once per chain; the duck detector
+moves a renamed holder's stats first; `strayBulletExemptCapability` defaults to
+`duckhuntpro.exempt` (exempted_flags "b"), also per channel; `maxRicochets` and
+`levelGrantings` are settings and accident chances/`ducksPerDay` accept 0; the
+daily hand-back needs an automatic confiscation and covers every channel with
+players; bread counts every listed piece, expires on all channels and never
+replans before post-init; flights are planned afresh at post-init (not restored,
+not on join); stats lists in warnings/logs have the original's 21/20 fields and
+Tcl list format; export karma/items as the original writes them; items are
+listed in the order obtained (merge: by item id); expiry second inclusive; +c
+stripping only for channel messages; pending transfers dropped on any part;
+private `lastduck` syntax (m145), `unarm -static` alone, `rearm` whole argument,
+`ducklist` glob, case-sensitive export criterion; staff commands silent without
+permission; the `absorbed` counter (not in the original) is gone. 335 tests.
+The web dashboard's shop page (a Phase 2 placeholder until then) is now the
+original's shop_en/shop_fr.html, and its progression_table_en/fr.html is served
+too (`webpages.py`): global at /duckhuntpro/shop and /duckhuntpro/levels (/en,
+/fr; the English page links to the French one and back), with the shopCosts
+prices and the levelGrantings table. The per-channel shop route is gone.
+
 ## Parity port (2026-10-02/03)
 
 Done, each with tests (291 passing under `limnoria-test`):

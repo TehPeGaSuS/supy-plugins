@@ -48,7 +48,104 @@ def colorizeValue(value):
 
 
 def lvl2rank(level, lang='en'):
-    return tclList(lang, 'm134')[level]
+    ranks = tclList(lang, 'm134')
+    return ranks[level] if 0 <= level < len(ranks) else ''     # (Tcl's lindex)
+
+
+_STYLE_CODES = re.compile(r'\x03([0-9]{0,2}(,[0-9]{0,2})?)?')
+_STYLE_TAGS = re.compile(r'\x02|\x03(?:[0-9]{0,2}(?:,[0-9]{0,2})?)?|\x1f|\x16|\x0f')
+_COLOR_AT = re.compile(r'\x03([0-9]{1,2}(,[0-9]{1,2})?)')
+
+
+def _blank(text):
+    """Whether nothing but spaces is left once the formatting is removed."""
+    text = _STYLE_CODES.sub('', text)
+    for code in '\x02\x1f\x16\x0f':
+        text = text.replace(code, '')
+    return text.strip() == ''
+
+
+def _padColor(value):
+    return '0' + value if int(value) < 10 and not value.startswith('0') else value
+
+
+def splitLine(data, limit):
+    """Duck_Hunt.tcl's split_line: cuts `data` into lines of at most
+    `limit` - 1 characters, at a space when the nearest one is in the second
+    half of the line (else wherever, but never inside a colour code), with
+    newlines forcing a cut. Each line starts with the bold/underline/reverse
+    and colour state the previous one ended in."""
+    limit -= 1
+    if len(data) <= limit:
+        return [''] if data == '' else data.split('\n')
+    middle = int(limit / 2.0 + 0.5)
+    output = []
+    while True:
+        cut = data.find('\n')
+        if cut == -1 or cut > limit:
+            cut = data.rfind(' ', 0, limit + 2)
+            if cut == -1 or cut < middle:
+                newCut = -1
+                for i in range(6):
+                    test = limit - i
+                    if 0 <= test < len(data) and data[test] == '\x03' \
+                            and _COLOR_AT.match(data, test):
+                        newCut = test - 1
+                cut = limit if newCut == -1 else newCut
+        part, data = data[:cut + 1], data[cut + 1:]
+        if not _blank(part):
+            output.append(part.rstrip())
+        if _blank(data):
+            break
+        bold = underline = reverse = False
+        fg = bg = None
+        for tag in _STYLE_TAGS.findall(part):
+            if tag == '\x02':
+                bold = not bold
+            elif tag == '\x1f':
+                underline = not underline
+            elif tag == '\x16':
+                reverse = not reverse
+            elif tag == '\x0f':
+                bold = underline = reverse = False
+                fg = bg = None
+            else:
+                colors = tag[1:].split(',')
+                fg = colors[0] or None
+                bg = colors[1] if len(colors) > 1 and colors[1] and fg else None
+                if fg is not None:
+                    fg = _padColor(fg)
+                if bg is not None:
+                    bg = _padColor(bg)
+        start = ('\x02' if bold else '') + ('\x1f' if underline else '') \
+            + ('\x16' if reverse else '')
+        if fg is not None:
+            start += '\x03' + fg + (',' + bg if bg is not None else '')
+        data = start + data
+    return output
+
+
+def _tclWord(value):
+    """One element of a Tcl list as Tcl writes it (braced when needed)."""
+    text = str(value)
+    if text == '':
+        return '{}'
+    if re.search(r'[\s{}\[\]$"\\;]', text) or text.startswith('#'):
+        depth = 0
+        for c in text:
+            depth += {'{': 1, '}': -1}.get(c, 0)
+            if depth < 0:
+                break
+        if depth == 0 and not text.endswith('\\'):
+            return '{%s}' % text
+        return re.sub(r'([\s{}\[\]$"\\;])', r'\\\1', text)
+    return text
+
+
+def tclListText(values):
+    """A Python list (of strings, numbers or lists) written as a Tcl list."""
+    return ' '.join(_tclWord(tclListText(v) if isinstance(v, (list, tuple)) else v)
+                    for v in values)
 
 
 def adaptTimeResolution(milliseconds, short=False, lang='en', skipZeroSeconds=False):
