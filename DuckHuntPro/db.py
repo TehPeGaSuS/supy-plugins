@@ -256,14 +256,14 @@ class Database:
             return chan['players'].get(nick.lower())
 
     def topPlayers(self, network, channelName, n=3):
-        """Returns up to `n` players ranked by xp (kills as tiebreaker),
+        """Returns up to `n` players ranked by ducks shot (xp as tiebreaker),
         highest first. Empty list if the channel has no players yet."""
         chan = self.getChannel(network, channelName)
         if not chan:
             return []
         with self.lock:
             players = list(chan['players'].values())
-        players.sort(key=lambda p: (p['xp'], p['stats']['killed']), reverse=True)
+        players.sort(key=lambda p: (p['stats']['killed'], p['xp']), reverse=True)
         return players[:n]
 
     def archiveAndReset(self, network, channelName):
@@ -279,7 +279,7 @@ class Database:
                  'golden_killed': p['stats']['golden_killed']}
                 for p in chan['players'].values()
             ]
-            standings.sort(key=lambda s: (s['xp'], s['killed']), reverse=True)
+            standings.sort(key=lambda s: (s['killed'], s['xp']), reverse=True)
             chan.setdefault('archives', []).append({
                 'archived_at': time.time(),
                 'standings': standings,

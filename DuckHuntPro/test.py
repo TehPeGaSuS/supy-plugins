@@ -704,34 +704,57 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         # Clean up the escape timer this spawned.
         cb._removeDuck(self.irc.network, self.channel)
 
-    def testDuckshootersRanksByXp(self):
+    def testDuckshootersIsOneLineRankedByDucks(self):
         cb = self._cb()
         network = self.irc.network
-        cb.db.player(network, self.channel, 'alice')['xp'] = 100
-        cb.db.player(network, self.channel, 'bob')['xp'] = 200
+        cb.db.player(network, self.channel, 'alice')['xp'] = 900     # rich, but no duck
+        bob = cb.db.player(network, self.channel, 'bob')
+        bob['xp'] = 200
+        bob['stats']['killed'] = 7
+        carol = cb.db.player(network, self.channel, 'carol')
+        carol['xp'] = 300                                            # 7 ducks too: xp decides
+        carol['stats']['killed'] = 7
         cb.db.save()
-        self.assertNotError('duckshooters')
-        m = self.irc.takeMsg()
-        self.assertTrue(m is not None and 'bob' in str(m))
-        m = self.irc.takeMsg()
-        self.assertTrue(m is not None and 'alice' in str(m))
+        self.assertEqual(self._texts(self._cmd('duckshooters')),
+                         [self.nick + ': Top shooters: #1: carol - 7 ducks (300 xp), '
+                          '#2: bob - 7 ducks (200 xp), #3: alice - 0 ducks (900 xp)'])
 
     def testDuckshootersEmptyChannel(self):
         self.assertRegexp('duckshooters', 'yet')
 
-    def testDuckshootersCountIsConfigurable(self):
+    def testDuckshootersCountIsConfigurableUpToTen(self):
         cb = self._cb()
         network = self.irc.network
-        for i, nick in enumerate(['alice', 'bob', 'carol', 'dave', 'erin']):
-            cb.db.player(network, self.channel, nick)['xp'] = 100 + i
+        nicks = ['hunter%02d' % i for i in range(12)]
+        for i, nick in enumerate(nicks):
+            cb.db.player(network, self.channel, nick)['stats']['killed'] = i
         cb.db.save()
-        conf.supybot.plugins.DuckHuntPro.topShootersCount.setValue(5)
-        m = self.getMsg('duckshooters')  # header
-        rest = self._drainWait(minCount=5)
-        lines = [m.args[1]] + [r.args[1] for r in rest]
-        self.assertEqual(len(lines), 6)  # header + 5 shooters
-        self.assertTrue(any('erin' in line for line in lines))  # highest xp
-        self.assertTrue(any('alice' in line for line in lines))  # lowest xp, still in top 5
+        setting = conf.supybot.plugins.DuckHuntPro.topShootersCount
+        self.assertEqual(setting(), 10)
+        self.assertRaises(registry.InvalidRegistryValue, setting.setValue, 11)
+        self.assertRaises(registry.InvalidRegistryValue, setting.setValue, 0)
+        text = ' '.join(self._texts(self._cmd('duckshooters')))
+        self.assertIn('#1: hunter11', text)
+        self.assertIn('#10: hunter02', text)
+        self.assertNotIn('hunter01', text)
+        setting.setValue(2)
+        text = ' '.join(self._texts(self._cmd('duckshooters')))
+        self.assertIn('#2: hunter10', text)
+        self.assertNotIn('#3', text)
+
+    def testDuckshootersWrapsLongListsLikeTheGameDoes(self):
+        cb = self._cb()
+        network = self.irc.network
+        for i in range(10):
+            cb.db.player(network, self.channel, 'averyveryverylongnickname%02d' % i)['stats']['killed'] = i
+        cb.db.save()
+        lines = self._texts(self._cmd('duckshooters'))
+        self.assertTrue(len(lines) >= 2)
+        limit = conf.supybot.plugins.DuckHuntPro.maxLineLength() - len(self.nick) - 2
+        self.assertTrue(all(len(line) <= limit + len(self.nick) + 2 for line in lines))
+        self.assertFalse(any('(more)' in line for line in lines))
+        self.assertIn('#1: averyveryverylongnickname09', lines[0])
+        self.assertIn('#10: averyveryverylongnickname00', lines[-1])
 
     def testNextQuarterResetCalculation(self):
         cb = self._cb()
@@ -789,6 +812,51 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             urllib.parse.quote(self.channel, safe=''))
         body = cb._renderWeb(path)
         self.assertTrue('42' in body)
+
+    def testWebChannelPagesHaveTheOriginalsLookAndBothLanguages(self):
+        cb = self._cb()
+        player = cb.db.player(self.irc.network, self.channel, 'A<b>')
+        player['xp'] = 300
+        player['stats']['killed'] = 4
+        player['stats']['best_time_ms'] = 1234
+        cb.db.save()
+        path = '/%s/%s/' % (urllib.parse.quote(self.irc.network, safe=''),
+                            urllib.parse.quote(self.channel, safe=''))
+        body = cb._renderWeb(path + 'leaderboard')
+        self.assertIn('<title>Duck Hunt - leaderboard - %s</title>' % self.channel, body)
+        self.assertIn('<th>Best<br />reflex</th>', body)
+        self.assertIn('<td style="text-align: left;">A&lt;b&gt;</td>', body)
+        self.assertIn('<td>1.234 s</td>', body)
+        self.assertIn('<td>%s</td>' % data.levelForXp(300), body)
+        self.assertIn('<td style="text-align: left;">%s</td>'
+                      % messages.lvl2rank(data.levelForXp(300), 'en'), body)
+        self.assertIn('href="/duckhuntpro%sleaderboard/fr">Lisez-le en Français' % path, body)
+        self.assertIn('href="/duckhuntpro/en">All channels</a>', body)
+        body = cb._renderWeb(path + 'leaderboard/fr')
+        self.assertIn('<title>Duck Hunt - classement - %s</title>' % self.channel, body)
+        self.assertIn('<th>Chasseur</th>', body)
+        self.assertIn('href="/duckhuntpro%sleaderboard/en">Read it in English' % path, body)
+        # the channel's own language picks the default
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        self.assertIn('<th>Chasseur</th>', cb._renderWeb(path + 'leaderboard'))
+        conf.supybot.plugins.DuckHuntPro.language.setValue('en')
+        body = cb._renderWeb(path + 'champions')
+        self.assertIn('<td colspan="5">No quarterly reset has happened here yet.</td>', body)
+        cb._fireQuarterlyReset()
+        self._drain()
+        body = cb._renderWeb(path + 'champions')
+        self.assertIn('Final standings of the season that ended on', body)
+        self.assertIn('<td>300</td>', body)
+        self.assertIn('<td>4</td>', body)
+        body = cb._renderWeb('/')
+        self.assertIn('<title>Duck Hunt</title>', body)
+        self.assertIn('href="/duckhuntpro%sleaderboard/en">leaderboard</a>' % path, body)
+        self.assertIn('<td>1</td>', body)              # one player there
+        self.assertIn('href="/duckhuntpro/fr">Lisez-le en Français', body)
+        self.assertIn('<th>Canal</th>', cb._renderWeb('/fr'))
+        self.assertIn('href="/duckhuntpro/en">Read it in English', cb._renderWeb('/fr'))
+        for bad in ('/xx', path + 'leaderboard/xx', path + 'leaderboard/en/x', '/shop/xx'):
+            self._assertRendersNotFound(cb, bad)
 
     def testRenderWebChampionsBeforeAnyReset(self):
         cb = self._cb()

@@ -107,9 +107,16 @@ conf.registerGlobalValue(DuckHuntPro, 'quarterlyResetEnabled',
     registry.Boolean(True, """Whether to automatically archive and reset every
     channel's standings on the 1st of January/April/July/October."""))
 
+class TopShootersCount(registry.PositiveInteger):
+    """Value must be an integer between 1 and 10."""
+    def setValue(self, v):
+        if not 1 <= v <= 10:
+            self.error()
+        super().setValue(v)
+
 conf.registerChannelValue(DuckHuntPro, 'topShootersCount',
-    registry.PositiveInteger(3, """How many players `duckshooters` shows,
-    ranked by xp (kills as tiebreaker)."""))
+    TopShootersCount(10, """How many players `duckshooters` shows (1 to 10),
+    ranked by ducks shot (xp as tiebreaker)."""))
 
 conf.registerGroup(DuckHuntPro, 'web')
 

@@ -2,7 +2,6 @@ import builtins
 import contextlib
 import copy
 import fnmatch
-import html
 import os
 import random
 import re
@@ -151,88 +150,63 @@ class DuckHuntPro(callbacks.Plugin):
             httpserver.unhook('duckhuntpro')
             self._httpRunning = False
 
-    def _htmlPage(self, title, body):
-        return (
-            '<!DOCTYPE html><html><head><meta charset="utf-8">'
-            '<title>%s</title></head><body><h1>%s</h1>%s</body></html>'
-        ) % (html.escape(title), html.escape(title), body)
+    def _webLang(self, parts, channel=None):
+        """The language of a web page: the trailing /en or /fr, else the
+        channel's (or the bot's) language setting. None if it is not one."""
+        if parts and parts[-1] in webpages.TEXTS:
+            return parts[-1]
+        if parts:
+            return None
+        return self._lang(channel)
 
     def _renderWeb(self, path):
         parts = [urllib.parse.unquote(p) for p in path.split('/') if p]
-        if not parts:
-            return self._renderWebIndex()
-        if parts[0] in ('shop', 'levels') and len(parts) <= 2:
-            lang = parts[1] if len(parts) == 2 else self._lang(None)
-            if lang in webpages.TEXTS:
+        if len(parts) <= 1 and parts != ['shop'] and parts != ['levels']:
+            lang = self._webLang(parts)
+            if lang:
+                return webpages.renderIndex(lang, [
+                    (network, cname, len(self.db.getChannel(network, cname)['players']))
+                    for network in self.db.networks() for cname in self.db.channels(network)])
+        elif parts[0] in ('shop', 'levels') and len(parts) <= 2:
+            lang = self._webLang(parts[1:])
+            if lang:
                 if parts[0] == 'shop':
                     return webpages.renderShop(lang, [self._shopCost(k) for k in data.SHOP_ITEMS])
                 return webpages.renderLevels(lang, data.LEVELS)
-        if len(parts) == 3:
-            network, channel, page = parts
-            if page == 'leaderboard':
-                return self._renderWebLeaderboard(network, channel)
-            if page == 'champions':
-                return self._renderWebChampions(network, channel)
+        elif len(parts) in (3, 4) and parts[2] in ('leaderboard', 'champions'):
+            network, channel, page = parts[:3]
+            if self.db.getChannel(network, channel) is not None:
+                with self._network(network):
+                    lang = self._webLang(parts[3:], channel)
+                    if lang and page == 'leaderboard':
+                        return self._renderWebLeaderboard(lang, network, channel)
+                    if lang:
+                        return self._renderWebChampions(lang, network, channel)
         raise _WebNotFound()
 
-    def _renderWebIndex(self):
-        rows = []
-        for network in self.db.networks():
-            for cname in self.db.channels(network):
-                netQ = urllib.parse.quote(network, safe='')
-                chanQ = urllib.parse.quote(cname, safe='')
-                rows.append(
-                    '<li>%s %s -- <a href="/duckhuntpro/%s/%s/leaderboard">leaderboard</a>'
-                    ' / <a href="/duckhuntpro/%s/%s/champions">champions</a></li>' % (
-                        html.escape(network), html.escape(cname),
-                        netQ, chanQ, netQ, chanQ))
-        body = '<ul>%s</ul>' % ''.join(rows) if rows else '<p>No games recorded yet.</p>'
-        body = ('<p><a href="/duckhuntpro/shop">Shop</a> (<a href="/duckhuntpro/shop/en">en</a>'
-                ' / <a href="/duckhuntpro/shop/fr">fr</a>) -- <a href="/duckhuntpro/levels">'
-                'Levels and bonuses</a> (<a href="/duckhuntpro/levels/en">en</a>'
-                ' / <a href="/duckhuntpro/levels/fr">fr</a>)</p>' + body)
-        return self._htmlPage('DuckHuntPro', body)
-
-    def _renderWebLeaderboard(self, network, channel):
+    def _renderWebLeaderboard(self, lang, network, channel):
         chan = self.db.getChannel(network, channel)
-        if chan is None:
-            raise _WebNotFound()
         players = self.db.topPlayers(network, channel, n=len(chan['players']))
         rows = []
         for i, p in enumerate(players, 1):
-            rows.append(
-                '<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td>'
-                '<td>%d</td><td>%d</td></tr>' % (
-                    i, html.escape(p['display_nick']), data.levelForXp(p['xp']),
-                    p['xp'], p['stats']['killed'], p['stats']['golden_killed']))
-        table = (
-            '<table border="1" cellpadding="4"><tr><th>#</th><th>Nick</th>'
-            '<th>Level</th><th>XP</th><th>Killed</th><th>Golden</th></tr>%s</table>'
-        ) % (''.join(rows) if rows else '<tr><td colspan="6">No players yet.</td></tr>')
-        title = 'DuckHuntPro leaderboard -- %s %s' % (network, channel)
-        return self._htmlPage(title, table)
+            st = p['stats']
+            level = data.levelForXp(p['xp'])
+            rows.append({
+                'rank': i, 'nick': p['display_nick'], 'level': level,
+                'grade': messages.lvl2rank(level, lang), 'xp': p['xp'],
+                'killed': st['killed'], 'golden': st['golden_killed'], 'missed': st['missed'],
+                'wild': st['wild_shots'], 'humans': st['humans_shot'],
+                'best': None if st['best_time_ms'] is None else st['best_time_ms'] / 1000.0})
+        return webpages.renderLeaderboard(lang, network, channel, rows)
 
-    def _renderWebChampions(self, network, channel):
-        chan = self.db.getChannel(network, channel)
-        if chan is None:
-            raise _WebNotFound()
+    def _renderWebChampions(self, lang, network, channel):
         archive = self.db.lastArchive(network, channel)
         if not archive:
-            return self._htmlPage(
-                'DuckHuntPro champions -- %s %s' % (network, channel),
-                '<p>No quarterly reset has happened here yet.</p>')
+            return webpages.renderChampions(lang, network, channel, None, [])
         when = datetime.fromtimestamp(archive['archived_at']).strftime('%Y-%m-%d')
-        rows = []
-        for i, s in enumerate(archive['standings'], 1):
-            rows.append('<tr><td>%d</td><td>%s</td><td>%d</td><td>%d</td></tr>' % (
-                i, html.escape(s['nick']), s['xp'], s['killed']))
-        table = (
-            '<p>Season ending %s</p>'
-            '<table border="1" cellpadding="4"><tr><th>#</th><th>Nick</th>'
-            '<th>XP</th><th>Killed</th></tr>%s</table>'
-        ) % (html.escape(when), ''.join(rows))
-        title = 'DuckHuntPro champions -- %s %s' % (network, channel)
-        return self._htmlPage(title, table)
+        standings = [(s['nick'], s['xp'], s['killed'], s.get('golden_killed', 0))
+                     for s in archive['standings']]
+        return webpages.renderChampions(lang, network, channel, when, standings)
 
     # -----------------------------------------------------------------
     # Quarterly stats reset
@@ -2097,8 +2071,9 @@ class DuckHuntPro(callbacks.Plugin):
 
     def duckshooters(self, irc, msg, args, channel):
         """[<channel>]
-        Shows the top shooters (ranked by xp, kills as tiebreaker) on this
-        channel's current season. How many is set by topShootersCount.
+        Shows the top shooters (ranked by ducks shot, xp as tiebreaker) on this
+        channel's current season, on one line. How many is set by
+        topShootersCount (at most 10).
         """
         lang = self.registryValue('language', channel)
         count = self.registryValue('topShootersCount', channel)
@@ -2106,11 +2081,14 @@ class DuckHuntPro(callbacks.Plugin):
         if not top:
             irc.reply(messages.get(lang, 'shooters_empty'))
             return
-        irc.reply(messages.get(lang, 'shooters_header'))
-        for i, p in enumerate(top, 1):
-            irc.reply(messages.get(lang, 'shooters_line', rank=i, nick=p['display_nick'],
-                                    level=data.levelForXp(p['xp']), xp=p['xp'],
-                                    killed=p['stats']['killed']))
+        text = messages.get(lang, 'shooters_header') + ' ' + ', '.join(
+            messages.get(lang, 'shooters_entry', rank=i, nick=p['display_nick'],
+                         xp=p['xp'], killed=p['stats']['killed'])
+            for i, p in enumerate(top, 1))
+        # one line, wrapped the way the game's own messages are
+        limit = max(9, self.registryValue('maxLineLength') - len(msg.nick) - 2)
+        for line in messages.splitLine(text, limit):
+            irc.reply(line)
     duckshooters = wrap(duckshooters, ['channel'])
 
     def duckchampions(self, irc, msg, args, channel):

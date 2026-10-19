@@ -7,6 +7,7 @@ words are the original's, in its HTML.
 """
 
 import html
+import urllib.parse
 
 # (name, description) per shop id, in id order.
 ITEMS = {
@@ -126,6 +127,22 @@ TEXTS = {
                           'ammo<br />/ clip', 'ammo clips', 'armor', 'deflection',
                           'xp penalty<br />/ miss', 'xp penalty<br />/ wild shot',
                           'xp penalty<br />/ accident'),
+        'indexTitle': 'Duck Hunt',
+        'indexHeaders': ('Network', 'Channel', 'Players', 'Pages'),
+        'indexNote': '<a href="/duckhuntpro/shop/en">Shop</a> &nbsp;&middot;&nbsp; '
+                     '<a href="/duckhuntpro/levels/en">Levels and bonuses</a>',
+        'indexEmpty': 'No game recorded yet.',
+        'leaderboard': 'leaderboard', 'champions': 'champions',
+        'leaderboardTitle': 'Duck Hunt - leaderboard - %s',
+        'leaderboardHeaders': ('#', 'Hunter', 'Level', 'Rank', 'xp', 'Ducks', 'Golden<br />ducks',
+                               'Missed<br />shots', 'Wild<br />shots', 'Hunters<br />shot',
+                               'Best<br />reflex'),
+        'leaderboardEmpty': 'No hunter yet.',
+        'championsTitle': 'Duck Hunt - champions - %s',
+        'championsNote': 'Final standings of the season that ended on %s.',
+        'championsHeaders': ('#', 'Hunter', 'xp', 'Ducks', 'Golden<br />ducks'),
+        'championsEmpty': 'No quarterly reset has happened here yet.',
+        'backToIndex': 'All channels',
         'other': 'fr',
         'switch': 'Lisez-le en Français',
     },
@@ -139,6 +156,22 @@ TEXTS = {
                           'balles<br />/ chargeur', 'chargeurs', 'armure', 'déflexion',
                           "pénalité d'xp<br />tir manqué", "pénalité d'xp<br />tir sauvage",
                           "pénalité d'xp<br />accident"),
+        'indexTitle': 'Duck Hunt',
+        'indexHeaders': ('Réseau', 'Canal', 'Joueurs', 'Pages'),
+        'indexNote': '<a href="/duckhuntpro/shop/fr">Shop</a> &nbsp;&middot;&nbsp; '
+                     '<a href="/duckhuntpro/levels/fr">Niveaux et bonus</a>',
+        'indexEmpty': 'Aucune partie enregistrée pour le moment.',
+        'leaderboard': 'classement', 'champions': 'champions',
+        'leaderboardTitle': 'Duck Hunt - classement - %s',
+        'leaderboardHeaders': ('#', 'Chasseur', 'Niveau', 'Grade', 'xp', 'Canards',
+                               'Canards<br />dorés', 'Tirs<br />manqués', 'Tirs<br />sauvages',
+                               'Chasseurs<br />touchés', 'Meilleur<br />réflexe'),
+        'leaderboardEmpty': 'Aucun chasseur pour le moment.',
+        'championsTitle': 'Duck Hunt - champions - %s',
+        'championsNote': 'Classement final de la saison terminée le %s.',
+        'championsHeaders': ('#', 'Chasseur', 'xp', 'Canards', 'Canards<br />dorés'),
+        'championsEmpty': "Aucune remise à zéro trimestrielle n'a encore eu lieu ici.",
+        'backToIndex': 'Tous les canaux',
         'other': 'en',
         'switch': 'Read it in English',
     },
@@ -149,13 +182,13 @@ _PAGE = """<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
 <head>
 	<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 	<meta http-equiv="Content-Language" content="%(lang)s">
- 	<meta name="author" content="Menz Agitat">
+ 	<meta name="author" content="DuckHuntPro">
  	<meta name="description" content="%(title)s">
  	<title>%(title)s</title>
 </head>
 
 <body style="color: rgb(226, 234, 228); background-color: rgb(56, 56, 56); font-family: Ubuntu,sans-serif; font-size: 12px;" alink="#ffb81a" link="#ffd700" vlink="#e2ac09">
-	<div style="text-align: right;" lang="%(other)s"><a href="/duckhuntpro/%(page)s/%(other)s">%(switch)s</a></div>
+	<div style="text-align: right;" lang="%(other)s">%(back)s<a href="%(switchHref)s">%(switch)s</a></div>
 	<br />
 	<div style="text-align: center; font-weight: bold;">
 		<table style="text-align: left; width: 847px; height: 47px; margin-left: auto; margin-right: auto;" border="1" cellpadding="1" cellspacing="1">
@@ -178,18 +211,23 @@ _PAGE = """<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
 	<br />
 	<br />
 	<div style="text-align: center;">
-		<font style="font-family: Tahoma; color: rgb(146, 151, 147);" size="-2">Duck Hunt v2.11&nbsp;&nbsp;&nbsp; &copy;2015-2016 Menz Agitat &nbsp;&middot;&nbsp; DuckHuntPro</font>
+		<font style="font-family: Tahoma; color: rgb(146, 151, 147);" size="-2">DuckHuntPro &nbsp;&middot;&nbsp; Based on Duck Hunt for Eggdrop by Menz Agitat</font>
 	</div>
 </body>
 </html>
 """
 
 
-def _page(lang, page, title, headers, rows, note='', width=''):
+def _page(lang, page, title, headers, rows, note='', width='', back=False):
+    """`page` is the path under /duckhuntpro/ without the language ('' for
+    the index); `back` adds a link to the index before the language switch."""
     texts = TEXTS[lang]
     return _PAGE % {
-        'lang': lang, 'other': texts['other'], 'switch': texts['switch'], 'page': page,
-        'title': title, 'width': width, 'rows': ''.join(rows),
+        'lang': lang, 'other': texts['other'], 'switch': texts['switch'],
+        'switchHref': '/duckhuntpro/%s%s' % (page + '/' if page else '', texts['other']),
+        'back': ('<a href="/duckhuntpro/%s">%s</a> &nbsp;&middot;&nbsp; '
+                 % (lang, texts['backToIndex']) if back else ''),
+        'title': html.escape(title), 'width': width, 'rows': ''.join(rows),
         'note': ('\t<div style="text-align: center;">\n\t\t%s\n\t</div>\n\t<br />\n' % note
                  if note else '\t<br />\n'),
         'headers': ''.join('\t      <th%s>%s</th>\n' % (style, h) for style, h in headers)}
@@ -227,3 +265,67 @@ def renderLevels(lang, levels):
                     % ''.join('\t      <td>%s</td>\n' % cell for cell in cells))
     return _page(lang, 'levels', texts['levelsTitle'], (('', h) for h in texts['levelsHeaders']),
                  rows, note=texts['levelsNote'])
+
+
+def _cells(cells, left=()):
+    return '\t    <tr>\n%s\t    </tr>\n' % ''.join(
+        '\t      <td%s>%s</td>\n' % (' style="text-align: left;"' if i in left else '', cell)
+        for i, cell in enumerate(cells))
+
+
+def _empty(lang, key, span):
+    return '\t    <tr>\n\t      <td colspan="%d">%s</td>\n\t    </tr>\n' % (span, TEXTS[lang][key])
+
+
+def channelPath(network, channel):
+    """The URL path piece for a channel's pages."""
+    return '%s/%s' % (urllib.parse.quote(network, safe=''), urllib.parse.quote(channel, safe=''))
+
+
+def renderIndex(lang, channels):
+    """The front page: `channels` is a list of (network, channel, players)."""
+    texts = TEXTS[lang]
+    rows = []
+    for network, channel, players in channels:
+        path = channelPath(network, channel)
+        links = ('<a href="/duckhuntpro/%s/leaderboard/%s">%s</a> &nbsp;&middot;&nbsp; '
+                 '<a href="/duckhuntpro/%s/champions/%s">%s</a>'
+                 % (path, lang, texts['leaderboard'], path, lang, texts['champions']))
+        rows.append(_cells((html.escape(network), html.escape(channel), players, links), left=(0, 1)))
+    if not rows:
+        rows.append(_empty(lang, 'indexEmpty', 4))
+    return _page(lang, '', texts['indexTitle'], (('', h) for h in texts['indexHeaders']), rows,
+                 note=texts['indexNote'])
+
+
+def renderLeaderboard(lang, network, channel, players):
+    """`players` is a list of dicts with rank, nick, level, grade, xp, killed,
+    golden, missed, wild, humans and best (the best reflex in seconds, or
+    None), already in order."""
+    texts = TEXTS[lang]
+    rows = []
+    for p in players:
+        best = '-' if p['best'] is None else '%.3f s' % p['best']
+        rows.append(_cells((p['rank'], html.escape(p['nick']), p['level'], html.escape(p['grade']),
+                            p['xp'], p['killed'], p['golden'], p['missed'], p['wild'],
+                            p['humans'], best), left=(1, 3)))
+    if not rows:
+        rows.append(_empty(lang, 'leaderboardEmpty', 11))
+    return _page(lang, '%s/leaderboard' % channelPath(network, channel),
+                 texts['leaderboardTitle'] % channel,
+                 (('', h) for h in texts['leaderboardHeaders']), rows, back=True)
+
+
+def renderChampions(lang, network, channel, when, standings):
+    """`when` is the season's end as text (None if there was no season yet);
+    `standings` the archived (nick, xp, killed, golden) rows in order."""
+    texts = TEXTS[lang]
+    rows = []
+    for rank, (nick, xp, killed, golden) in enumerate(standings, 1):
+        rows.append(_cells((rank, html.escape(nick), xp, killed, golden), left=(1,)))
+    if not rows:
+        rows.append(_empty(lang, 'championsEmpty', 5))
+    note = texts['championsNote'] % html.escape(when) if when else ''
+    return _page(lang, '%s/champions' % channelPath(network, channel),
+                 texts['championsTitle'] % channel,
+                 (('', h) for h in texts['championsHeaders']), rows, note=note, back=True)

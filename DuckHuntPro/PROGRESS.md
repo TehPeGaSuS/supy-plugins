@@ -205,10 +205,11 @@ literally named `reload` was silently shadowed by the core Owner plugin's
 
 **Gathered requirements, built this session (2026-07-27).**
 
-1. **`duckshooters` -- top 3 best shooters.** `Database.topPlayers()` sorts
-   by xp with kills as tiebreaker (decision made: xp, since it's the
-   primary progression currency and what levels derive from -- kills alone
-   would undercount golden-duck value). Returns just the top N.
+1. **`duckshooters` -- top shooters.** `Database.topPlayers()` sorts by
+   ducks shot with xp as tiebreaker (changed 2026-10-19 at the user's
+   request; it was xp with kills as tiebreaker before). Since 2026-10-19
+   the command answers on one line, `#1: nick - 42 ducks (1234 xp), ...`,
+   up to 10 players, wrapped like the game's own messages.
 2. **Quarterly stats reset**, 1st of Jan/Apr/Jul/Oct at local midnight.
    Implemented as a self-rescheduling one-shot `schedule.addEvent` chain
    (`_scheduleQuarterlyReset`/`_fireQuarterlyReset`/`_nextQuarterReset`),
