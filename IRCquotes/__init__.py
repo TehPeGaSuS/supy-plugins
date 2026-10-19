@@ -36,7 +36,7 @@ Per-channel quotes database with voting and an optional periodic
 import supybot
 import supybot.world as world
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __author__ = supybot.Author('PeGaSuS', 'PeGaSuS',
     '25697531+TehPeGaSuS@users.noreply.github.com')
