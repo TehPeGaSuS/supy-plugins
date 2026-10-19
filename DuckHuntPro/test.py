@@ -39,7 +39,7 @@ from datetime import datetime
 from supybot.test import *
 import supybot.schedule as schedule
 import supybot.drivers as drivers
-from supybot import ircdb, ircmsgs, ircutils, registry
+from supybot import ircdb, irclib, ircmsgs, ircutils, registry
 
 from . import data
 from . import db
@@ -4016,6 +4016,111 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb.db.mergeStats(self.irc.network, self.channel, 'dst', 'src')
         merged = cb.db.getPlayer(self.irc.network, self.channel, 'dst')
         self.assertEqual(list(merged['items']), ['liability_insurance', 'ap_ammo', 'sight'])
+
+
+    # -----------------------------------------------------------------
+    # Per-channel settings: two channels with different values
+    # -----------------------------------------------------------------
+
+    OTHER = '#other'
+
+    def _perChannel(self, name, channel, value):
+        """What `config channel <channel> ...<name> <value>` stores."""
+        setting = getattr(conf.supybot.plugins.DuckHuntPro, name)
+        setting.get(':' + self.irc.network).get(channel).setValue(value)
+
+    def _joinOther(self):
+        self.irc.state.channels[self.OTHER] = irclib.ChannelState()
+        self.irc.state.channels[self.OTHER].addUser(self.irc.nick)
+        self.addCleanup(self.irc.state.channels.pop, self.OTHER, None)
+        return self._cb().db.channel(self.irc.network, self.OTHER)
+
+    def _otherCmd(self, command):
+        msg = ircmsgs.privmsg(self.OTHER, '%s: %s' % (self.irc.nick, command),
+                              prefix=self.prefix)
+        self.irc.feedMsg(msg)
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            time.sleep(0.05)
+            drivers.run()
+        return self._sent()
+
+    def testDucksPerDayAndSleepHoursArePerChannelInPlannedMode(self):
+        cb = self._cb()
+        self._joinOther()
+        self._perChannel('ducksPerDay', self.channel, 5)
+        self._perChannel('ducksPerDay', self.OTHER, 40)
+        self._perChannel('duckSleepHours', self.OTHER,
+                         ' '.join(str(h) for h in range(24) if h != 3))
+        try:
+            mine = cb._planDay(self.irc.network, self.channel)
+            other = cb._planDay(self.irc.network, self.OTHER)
+            self.assertEqual(len(mine), 5)
+            self.assertEqual(len(other), 40)
+            self.assertTrue(any(not t.startswith('03:') for t in mine))
+            self.assertTrue(all(t.startswith('03:') for t in other))
+        finally:
+            cb._cancelFlights(self.irc.network, self.channel)
+            cb._cancelFlights(self.irc.network, self.OTHER)
+
+    def testDucksPerDayIsPerChannelInPerMinuteMode(self):
+        cb = self._cb()
+        self._joinOther()
+        conf.supybot.plugins.DuckHuntPro.method.setValue(1)
+        conf.supybot.plugins.DuckHuntPro.duckSleepHours.setValue('')
+        self._perChannel('ducksPerDay', self.channel, 5)
+        self._perChannel('ducksPerDay', self.OTHER, 40)
+        cb._rng = ScriptedRNG([10, 10])      # 10 > 5 here, 10 <= 40 there
+        try:
+            cb._checkBushes()
+            self.assertTrue(self._key() not in cb._activeDuck)
+            self.assertTrue((self.irc.network.lower(), self.OTHER) in cb._activeDuck)
+            self.assertEqual([t for _, t, _ in self._sent()], [self.OTHER])
+        finally:
+            cb._removeDuck(self.irc.network, self.OTHER)
+
+    def testEscapeTimeAndGoldenShareArePerChannel(self):
+        cb = self._cb()
+        self._joinOther()
+        self._perChannel('escapeTime', self.channel, 10)
+        self._perChannel('escapeTime', self.OTHER, 100)
+        self._perChannel('approxGoldenDucksPerDay', self.channel, 0)
+        self._perChannel('approxGoldenDucksPerDay', self.OTHER, 18)   # every duck
+        self._perChannel('goldenDuckMinHP', self.OTHER, 9)
+        self._perChannel('goldenDuckMaxHP', self.OTHER, 9)
+        now = time.time()
+        self.assertEqual(cb._currentEscapeTime(self.irc.network, self.channel, now), 10)
+        self.assertEqual(cb._currentEscapeTime(self.irc.network, self.OTHER, now), 100)
+        cb._rng = ScriptedRNG([50, 50])      # the same golden roll on both
+        try:
+            cb._spawnDuck(self.irc, self.channel)
+            cb._spawnDuck(self.irc, self.OTHER)
+            mine = cb._activeDuck[self._key()][0]
+            other = cb._activeDuck[(self.irc.network.lower(), self.OTHER)][0]
+            self.assertFalse(mine['is_golden'])
+            self.assertTrue(other['is_golden'])
+            self.assertEqual(other['hp_total'], 9)
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+            cb._removeDuck(self.irc.network, self.OTHER)
+
+    def testLanguageAndShopArePerChannel(self):
+        cb = self._cb()
+        self._joinOther()
+        self._perChannel('language', self.OTHER, 'fr')
+        self._perChannel('shopEnabled', self.OTHER, False)
+        cb._rng = ScriptedRNG([])
+        try:
+            cb._spawnDuck(self.irc, self.channel)
+            cb._spawnDuck(self.irc, self.OTHER)
+            sent = dict((t, x) for _, t, x in self._sent())
+            self.assertEqual(sent[self.channel], messages.tcl('en', 'm135'))
+            self.assertEqual(sent[self.OTHER], messages.tcl('fr', 'm135'))
+        finally:
+            cb._removeDuck(self.irc.network, self.channel)
+            cb._removeDuck(self.irc.network, self.OTHER)
+        self.assertEqual(self._otherCmd('shop'), [])            # no shop there
+        self.assertTrue(self._cmd('shop'))                       # but here
 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab textwidth=79:
