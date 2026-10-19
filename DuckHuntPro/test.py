@@ -340,6 +340,18 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(player['xp'], data.BASE_XP_GOLDEN_DUCK * 2)
         self.assertEqual(player['stats']['golden_killed'], 1)
 
+    def testJamMessageNamesTheConfiguredReloadCommand(self):
+        cb = self._cb()
+        cb._rng = ScriptedRNG([0])
+        text = ' '.join(self._texts(self._cmd('bang', setup=lambda p: self._tidy(p))))
+        self.assertIn('you must type \x02duckreload\x02 to unjam it', text)
+        conf.supybot.plugins.DuckHuntPro.reloadCommand.setValue('rl')
+        cb._rng = ScriptedRNG([0])
+        text = ' '.join(self._texts(self._cmd('bang', setup=lambda p: self._tidy(p))))
+        self.assertIn('you must type \x02rl\x02 to unjam it', text)
+        self.assertIn("tu dois taper \x02rl\x02 pour la décoincer",
+                      messages.tcl('fr', 'm8', 'n', 'rl', 'a', 'c'))
+
     def testJamBlocksShotAndDoesNotConsumeAmmo(self):
         cb = self._cb()
         cb._rng = ScriptedRNG([0])  # jam roll succeeds
@@ -511,6 +523,18 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn('Effects', text)
         # (in the order they were received, as the original lists them)
         self.assertIn('Sand \x0314/\x03 Bedazzled \x0314/\x03 Soggy', text)
+
+    def testDuckstatsIsFramedByAHeaderAndAFooter(self):
+        self._cb().db.player(self.irc.network, self.channel, 'Bob')
+        sent = self._cmd('duckstats bob')
+        self.assertEqual([c for c, _, _ in sent], ['NOTICE'] * len(sent))
+        self.assertEqual(sent[0][2], '\x0307\x02Duckstats for Bob\x02\x03')
+        self.assertEqual(sent[-1][2], "\x0307\x02End of Bob's duckstats\x02\x03")
+        self.assertTrue(len(sent) > 2)
+        conf.supybot.plugins.DuckHuntPro.language.setValue('fr')
+        sent = self._cmd('duckstats')
+        self.assertEqual(sent[0][2], '\x0307\x02Duckstats de %s\x02\x03' % self.nick)
+        self.assertEqual(sent[-1][2], '\x0307\x02Fin des duckstats de %s\x02\x03' % self.nick)
 
     def testDuckstatsAnotherPlayerGoesToTheAsker(self):
         cb = self._cb()
@@ -716,8 +740,9 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         carol['stats']['killed'] = 7
         cb.db.save()
         self.assertEqual(self._texts(self._cmd('duckshooters')),
-                         [self.nick + ': Top shooters: #1: carol - 7 ducks (300 xp), '
-                          '#2: bob - 7 ducks (200 xp), #3: alice - 0 ducks (900 xp)'])
+                         ["%s: %s's top shooters: #1: carol - 7 ducks (300 xp), "
+                          '#2: bob - 7 ducks (200 xp), #3: alice - 0 ducks (900 xp)'
+                          % (self.nick, self.channel)])
 
     def testDuckshootersEmptyChannel(self):
         self.assertRegexp('duckshooters', 'yet')
@@ -1984,7 +2009,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
                          [self.nick + ': ' + messages.get('fr', 'shooters_empty')])
         self.assertEqual(self._texts(self._cmd('duckchampions')),
                          [self.nick + ': ' + messages.get('fr', 'champions_empty')])
-        self.assertIn('Meilleurs', messages.get('fr', 'shooters_header'))
+        self.assertEqual(messages.get('fr', 'shooters_header', channel='#c'),
+                         'Meilleurs chasseurs de #c :')
         self.assertNotEqual(messages.get('fr', 'quarterly_reset'), messages.get('en', 'quarterly_reset'))
 
     def testLastduckSaysWhoShotTheLastDuck(self):

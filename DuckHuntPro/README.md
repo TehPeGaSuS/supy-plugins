@@ -117,6 +117,7 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | Setting | Scope | Default | Description |
 |---|---|---|---|
 | `enabled` | channel, network | `False` | Enables the duck hunt game in this channel. The channel is told when it is switched on or off. |
+| `reloadCommand` | channel, network | `duckreload` | How the jam message names the reload command ("you must type duckreload to unjam it"), for when players use an alias such as `aka add rl "DuckHuntPro duckreload"`. |
 | `language` | channel, network | `en` | Language used for this channel's game messages: en or fr (the original script's two catalogues). |
 | `ducksPerDay` | channel, network | `18` | Approximate number of ducks that fly per day. |
 | `approxGoldenDucksPerDay` | channel, network | `1` | Approximate number of golden (multi-hit) ducks per day; must not exceed ducksPerDay, since golden ducks are counted within it. |
@@ -134,7 +135,7 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `devoiceOnMiss` | channel, network | `False` | Devoices a player who misses a shot at a duck. |
 | `postInitDelay` | global | `60` | Seconds to wait after the plugin loads before planning the day's duck flights, to give the bot time to join all its channels. |
 | `quarterlyResetEnabled` | global | `True` | Whether to automatically archive and reset every channel's standings on the 1st of January/April/July/October. |
-| `topShootersCount` | channel, network | `10` | How many players `duckshooters` shows (1 to 10), ranked by ducks shot (xp as tiebreaker), on one line: `#1: nick - 42 ducks (1234 xp), #2: ...`, wrapped at maxLineLength. |
+| `topShootersCount` | channel, network | `10` | How many players `duckshooters` shows (1 to 10), ranked by ducks shot (xp as tiebreaker), on one line: `#chan's top shooters: #1: nick - 42 ducks (1234 xp), #2: ...`, wrapped at maxLineLength. |
 | `web.enable` | global | `False` | Enables the built-in web dashboard served through Limnoria's HTTP server, in the original's style: the index at /duckhuntpro/, each channel's leaderboard (level, rank, xp, ducks, misses, accidents, best reflex) and champions at /duckhuntpro/<network>/<channel>/<page>, and the original's shop and progression pages at /duckhuntpro/shop and /duckhuntpro/levels. Every page exists in English and French: add /en or /fr, or get the channel's (or the bot's) `language`; each page links to the other language. |
 | `minXpForShopping` | channel, network | `0` | The lowest a player's xp balance is allowed to go after a shop purchase; a purchase that would drop them below this floor is refused. |
 | `shopEnabled` | channel, network | `True` | Whether the shop command is available at all (Duck_Hunt.tcl's shop_enabled; when off the command does nothing). |

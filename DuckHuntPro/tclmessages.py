@@ -24,7 +24,7 @@ EN = {'m0': 'Deallocating %s resources...',
        '\x0314|\x03 Chargers: \x02%s\x02',
  'm7': '%s > \x0314*CLACK*\x03     \x0304JAMMED GUN\x03',
  'm338': "\x02*BOOM*\x02     Your gun just exploded because of %s's sabotage.",
- 'm8': '%s > \x0314*CLACK*\x03     Your gun is jammed, you must reload to unjam it... \x0314|\x03 '
+ 'm8': '%s > \x0314*CLACK*\x03     Your gun is jammed, you must type \x02%s\x02 to unjam it... \x0314|\x03 '
        'Ammo: \x02%s\x02 \x0314|\x03 Chargers: \x02%s\x02',
  'm290': '%s > \x0314*CLICK*\x03     Trigger locked.',
  'm334': ' \x0304[bedazzled by %s]\x03',
@@ -870,7 +870,7 @@ FR = {'m0': 'Désallocation des ressources de %s...',
        '\x0314|\x03 Charg. : \x02%s\x02',
  'm7': '%s > \x0314*CLAC*\x03     \x0304ARME ENRAYÉE\x03 \x0314|\x03',
  'm338': "\x02*BOOM*\x02     Ton arme vient d'exploser à cause du sabotage de %s.",
- 'm8': "%s > \x0314*CLAC*\x03     Ton arme s'est enrayée, tu dois recharger pour la décoincer... "
+ 'm8': "%s > \x0314*CLAC*\x03     Ton arme s'est enrayée, tu dois taper \x02%s\x02 pour la décoincer... "
        '\x0314|\x03 Mun. : \x02%s\x02 \x0314|\x03 Charg. : \x02%s\x02',
  'm290': '%s > \x0314*CLIC*\x03     Gâchette verrouillée.',
  'm334': ' \x0304[ébloui par %s]\x03',

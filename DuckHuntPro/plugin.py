@@ -1496,7 +1496,8 @@ class DuckHuntPro(callbacks.Plugin):
         if sabotage or self._rng.uniform(0, 100) < jam:
             player['jammed'] = True
             stats['jams'] += 1
-            out(t('m8', nick, self._displayAmmo(player, lvl, channel),
+            out(t('m8', nick, self.registryValue('reloadCommand', channel),
+                  self._displayAmmo(player, lvl, channel),
                   self._displayClips(player, lvl, channel)) + sabotageMsg + sandMsg)
             self._huntLog(channel, 'jam', nick, now=now, network=network)
             if sabotage and self.registryValue('kickWhenSabotaged', channel):
@@ -2066,7 +2067,10 @@ class DuckHuntPro(callbacks.Plugin):
                  st['deaths'], p(st['deaths'], t('m59'), t('m60')),
                  st['deflected'], p(st['deflected'], t('m61'), t('m62')),
                  neutralized, p(neutralized, t('m63'), t('m64'))) + itemsText + effectsText
+        shown = player['display_nick'] if known else target
+        self._out(irc, channel, msg.nick, messages.get(lang, 'stats_top', nick=shown), 'notice')
         self._out(irc, channel, msg.nick, text, 'notice')
+        self._out(irc, channel, msg.nick, messages.get(lang, 'stats_bottom', nick=shown), 'notice')
     duckstats = wrap(duckstats, ['channel', optional('somethingWithoutSpaces')])
 
     def duckshooters(self, irc, msg, args, channel):
@@ -2081,7 +2085,7 @@ class DuckHuntPro(callbacks.Plugin):
         if not top:
             irc.reply(messages.get(lang, 'shooters_empty'))
             return
-        text = messages.get(lang, 'shooters_header') + ' ' + ', '.join(
+        text = messages.get(lang, 'shooters_header', channel=channel) + ' ' + ', '.join(
             messages.get(lang, 'shooters_entry', rank=i, nick=p['display_nick'],
                          xp=p['xp'], killed=p['stats']['killed'])
             for i, p in enumerate(top, 1))
