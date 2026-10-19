@@ -127,7 +127,7 @@ class DuckHuntPro(callbacks.Plugin):
     # Web dashboard
     # -----------------------------------------------------------------
 
-    def _doWebConf(self, _):
+    def _doWebConf(self):
         if self.registryValue('web.enable') and not self._httpRunning:
             self._startHttp()
         elif not self.registryValue('web.enable') and self._httpRunning:

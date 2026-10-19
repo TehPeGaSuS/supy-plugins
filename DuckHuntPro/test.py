@@ -872,6 +872,20 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         cb._stopHttp()
         self.assertFalse(cb._httpRunning)
 
+    def testSettingWebEnableStartsAndStopsTheServer(self):
+        # `config supybot.plugins.DuckHuntPro.web.enable True` goes through
+        # the registry callback, which Limnoria calls with no arguments.
+        cb = self._cb()
+        setting = conf.supybot.plugins.DuckHuntPro.web.enable
+        self.assertFalse(cb._httpRunning)
+        try:
+            setting.setValue(True)
+            self.assertTrue(cb._httpRunning)
+            setting.setValue(False)
+            self.assertFalse(cb._httpRunning)
+        finally:
+            setting.setValue(False)
+
     def testRenderWebUnknownPageRaises404(self):
         cb = self._cb()
         cb.db.player(self.irc.network, self.channel, self.nick)
