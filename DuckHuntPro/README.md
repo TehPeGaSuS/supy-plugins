@@ -96,7 +96,7 @@ the daily `.bak` is the only undo.
   channel-wide (`floodGlobal` 30:600), with the original's throttled warnings.
 - **Quarterly reset** (extra, not in the original): on 1 Jan/Apr/Jul/Oct each
   channel's standings are archived for `duckchampions` and xp/stats are zeroed.
-  `quarterlyResetEnabled` turns it off.
+  `quarterlyResetEnabled` turns it off, bot-wide or per channel.
 - **Hunting logs** (`huntingLogs`, off by default): one line per game action in
   `<channel>_<yyyymmdd>.log`, in `huntingLogDirectory`
   (default `<data>/DuckHuntPro/logs/`).
@@ -134,7 +134,7 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `devoiceOnWildFire` | channel, network | `True` | Devoices a player who fires with no duck in sight. |
 | `devoiceOnMiss` | channel, network | `False` | Devoices a player who misses a shot at a duck. |
 | `postInitDelay` | global | `60` | Seconds to wait after the plugin loads before planning the day's duck flights, to give the bot time to join all its channels. |
-| `quarterlyResetEnabled` | global | `True` | Whether to automatically archive and reset every channel's standings on the 1st of January/April/July/October. |
+| `quarterlyResetEnabled` | channel, network | `True` | Whether to automatically archive and reset this channel's standings on the 1st of January/April/July/October. A channel value takes precedence over the bot-wide one, so a channel can opt out (or in). |
 | `topShootersCount` | channel, network | `10` | How many players `duckshooters` shows (1 to 10), ranked by ducks shot (xp as tiebreaker), on one line: `#chan's top shooters: #1: nick - 42 ducks (1234 xp), #2: ...`, wrapped at maxLineLength. |
 | `web.enable` | global | `False` | Enables the built-in web dashboard served through Limnoria's HTTP server, in the original's style: the index at /duckhuntpro/, each channel's leaderboard (level, rank, xp, ducks, misses, accidents, best reflex) and champions at /duckhuntpro/<network>/<channel>/<page>, and the original's shop and progression pages at /duckhuntpro/shop and /duckhuntpro/levels. Every page exists in English and French: add /en or /fr, or get the channel's (or the bot's) `language`; each page links to the other language. |
 | `minXpForShopping` | channel, network | `0` | The lowest a player's xp balance is allowed to go after a shop purchase; a purchase that would drop them below this floor is refused. |

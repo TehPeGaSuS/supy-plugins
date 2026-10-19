@@ -106,8 +106,7 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduleMinuteTick()
         self._scheduleAmmoRefill()
         self._scheduleBackup()
-        if self.registryValue('quarterlyResetEnabled'):
-            self._scheduleQuarterlyReset()
+        self._scheduleQuarterlyReset()
         # removeCallback() compares with `is`, and `self._doWebConf` is a new
         # bound method each time: keep one object so die() can remove it, and
         # drop any left behind by a previous load (an unload could not).
@@ -229,16 +228,20 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduleEvent(name, at, self._fireQuarterlyReset, ())
 
     def _fireQuarterlyReset(self):
+        """Resets every channel whose quarterlyResetEnabled (the channel's
+        own value, else the bot-wide one) is on; the timer always runs so a
+        channel can be switched on later."""
         for network in self.db.networks():
             irc = self._getIrc(network)
             for cname in self.db.channels(network):
-                self.db.archiveAndReset(network, cname)
                 with self._network(network):
+                    if not self.registryValue('quarterlyResetEnabled', cname, network):
+                        continue
+                    self.db.archiveAndReset(network, cname)
                     if irc and cname in irc.state.channels and self.registryValue('enabled', cname):
                         lang = self._lang(cname)
                         irc.queueMsg(ircmsgs.privmsg(cname, messages.get(lang, 'quarterly_reset')))
-        if self.registryValue('quarterlyResetEnabled'):
-            self._scheduleQuarterlyReset()
+        self._scheduleQuarterlyReset()
 
     # -----------------------------------------------------------------
     # Scheduling helpers

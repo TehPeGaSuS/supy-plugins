@@ -108,9 +108,10 @@ conf.registerGlobalValue(DuckHuntPro, 'postInitDelay',
     registry.PositiveInteger(60, """Seconds to wait after the plugin loads before
     planning the day's duck flights, to give the bot time to join all its channels."""))
 
-conf.registerGlobalValue(DuckHuntPro, 'quarterlyResetEnabled',
-    registry.Boolean(True, """Whether to automatically archive and reset every
-    channel's standings on the 1st of January/April/July/October."""))
+conf.registerChannelValue(DuckHuntPro, 'quarterlyResetEnabled',
+    registry.Boolean(True, """Whether to automatically archive and reset this
+    channel's standings on the 1st of January/April/July/October. A channel
+    value takes precedence over the bot-wide one."""))
 
 class TopShootersCount(registry.PositiveInteger):
     """Value must be an integer between 1 and 10."""

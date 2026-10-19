@@ -4168,6 +4168,27 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             drivers.run()
         return self._sent()
 
+    def testQuarterlyResetIsPerChannel(self):
+        cb = self._cb()
+        self._joinOther()
+        for chan in (self.channel, self.OTHER):
+            cb.db.player(self.irc.network, chan, 'bob')['xp'] = 300
+        cb.db.save()
+        self._perChannel('quarterlyResetEnabled', self.OTHER, False)
+        cb._fireQuarterlyReset()
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')['xp'], 0)
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.OTHER, 'bob')['xp'], 300)
+        self.assertIsNone(cb.db.lastArchive(self.irc.network, self.OTHER))
+        self.assertEqual([t for _, t, _ in self._sent()], [self.channel])
+        # bot-wide off, one channel opting in
+        conf.supybot.plugins.DuckHuntPro.quarterlyResetEnabled.setValue(False)
+        self._perChannel('quarterlyResetEnabled', self.OTHER, True)
+        cb.db.getPlayer(self.irc.network, self.channel, 'bob')['xp'] = 50
+        cb._fireQuarterlyReset()
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')['xp'], 50)
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.OTHER, 'bob')['xp'], 0)
+        self._sent()
+
     def testDucksPerDayAndSleepHoursArePerChannelInPlannedMode(self):
         cb = self._cb()
         self._joinOther()
