@@ -886,6 +886,21 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         finally:
             setting.setValue(False)
 
+    def testDieRemovesTheWebEnableCallback(self):
+        # registry.removeCallback() compares with `is`, so the very object
+        # given to addCallback() must be the one removed, or a reloaded plugin
+        # leaves the old instance's callback behind.
+        cb = self._cb()
+        setting = conf.supybot.plugins.DuckHuntPro.web.enable
+        mine = [x for x in setting._callbacks if x[0] is cb._webConfCallback]
+        self.assertEqual(len(mine), 1)
+        setting.removeCallback(cb._webConfCallback)
+        try:
+            self.assertEqual([x for x in setting._callbacks
+                              if getattr(x[0], '__name__', '') == '_doWebConf'], [])
+        finally:
+            setting.addCallback(cb._webConfCallback)
+
     def testRenderWebUnknownPageRaises404(self):
         cb = self._cb()
         cb.db.player(self.irc.network, self.channel, self.nick)

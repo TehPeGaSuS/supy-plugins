@@ -109,12 +109,19 @@ class DuckHuntPro(callbacks.Plugin):
         self._scheduleBackup()
         if self.registryValue('quarterlyResetEnabled'):
             self._scheduleQuarterlyReset()
-        conf.supybot.plugins.DuckHuntPro.web.enable.addCallback(self._doWebConf)
+        # removeCallback() compares with `is`, and `self._doWebConf` is a new
+        # bound method each time: keep one object so die() can remove it, and
+        # drop any left behind by a previous load (an unload could not).
+        webEnable = conf.supybot.plugins.DuckHuntPro.web.enable
+        webEnable._callbacks = [x for x in webEnable._callbacks
+                                if getattr(x[0], '__name__', '') != '_doWebConf']
+        self._webConfCallback = self._doWebConf
+        webEnable.addCallback(self._webConfCallback)
         if self.registryValue('web.enable'):
             self._startHttp()
 
     def die(self):
-        conf.supybot.plugins.DuckHuntPro.web.enable.removeCallback(self._doWebConf)
+        conf.supybot.plugins.DuckHuntPro.web.enable.removeCallback(self._webConfCallback)
         self._stopHttp()
         for value, callback in self._enabledHooks.values():
             value.removeCallback(callback)
