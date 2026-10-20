@@ -238,9 +238,8 @@ MESSAGES = {
         'lastduck_flying': 'It is still in the air.',
         'lastduck_escaped': 'Tired of waiting, it flew away after {duration}.',
         'lastduck_fled': 'Frightened by so much noise, it fled after {duration}.',
-        'quarterly_reset': ("A new hunting season begins! Standings have been "
-                             "archived -- see 'duckchampions' for last season's "
-                             "top shooters."),
+        'quarterly_reset': 'A new hunting season begins! Standings have been archived.',
+        'quarterly_reset_champions': 'Champions: {entries}',
 
         'shop_unknown_item': "{item} isn't sold here. Try 'shop list'.",
         'shop_gun_confiscated': "{nick}'s weapon is confiscated -- the shop is closed to you.",
@@ -327,9 +326,8 @@ MESSAGES = {
         'champions_header': 'Champions de la saison terminée le {when} :',
         'champions_line': '#{rank} {nick} -- {xp} xp, {killed} tué(s)',
         'champions_empty': "Aucune remise à zéro trimestrielle n'a encore eu lieu ici.",
-        'quarterly_reset': ("Une nouvelle saison de chasse commence ! Le classement a été "
-                             "archivé -- voir 'duckchampions' pour les meilleurs chasseurs "
-                             "de la saison précédente."),
+        'quarterly_reset': 'Une nouvelle saison de chasse commence ! Le classement a été archivé.',
+        'quarterly_reset_champions': 'Champions : {entries}',
     },
 }
 

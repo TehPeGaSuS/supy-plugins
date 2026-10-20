@@ -241,6 +241,16 @@ class DuckHuntPro(callbacks.Plugin):
                     if irc and cname in irc.state.channels and self.registryValue('enabled', cname):
                         lang = self._lang(cname)
                         irc.queueMsg(ircmsgs.privmsg(cname, messages.get(lang, 'quarterly_reset')))
+                        archive = self.db.lastArchive(network, cname)
+                        standings = archive['standings'][:3] if archive else []
+                        if standings:
+                            entries = ', '.join(
+                                messages.get(lang, 'shooters_entry', rank=i, nick=s['nick'],
+                                             killed=s['killed'], xp=s['xp'])
+                                for i, s in enumerate(standings, 1))
+                            text = messages.get(lang, 'quarterly_reset_champions', entries=entries)
+                            for line in messages.splitLine(text, self.registryValue('maxLineLength')):
+                                irc.queueMsg(ircmsgs.privmsg(cname, line))
         self._scheduleQuarterlyReset()
 
     # -----------------------------------------------------------------

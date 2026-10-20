@@ -817,6 +817,33 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertTrue(archive is not None)
         self.assertEqual(archive['standings'][0]['xp'], 250)
 
+    def testQuarterlyResetAnnouncesTheChampionsInline(self):
+        cb = self._cb()
+        network = self.irc.network
+        for nick, killed, xp in (('alice', 9, 90), ('bob', 7, 120), ('carol', 3, 30), ('dave', 1, 10)):
+            p = cb.db.player(network, self.channel, nick)
+            p['xp'] = xp
+            p['stats']['killed'] = killed
+        cb.db.save()
+        self._drain()
+        cb._fireQuarterlyReset()
+        first = self.irc.takeMsg()
+        second = self.irc.takeMsg()
+        self.assertEqual(first.args[1], 'A new hunting season begins! Standings have been archived.')
+        self.assertEqual(second.args[1],
+                         'Champions: #1: alice - 9 ducks (90 xp), #2: bob - 7 ducks (120 xp), '
+                         '#3: carol - 3 ducks (30 xp)')
+        self.assertTrue(self.irc.takeMsg() is None, 'only the top three')
+
+    def testQuarterlyResetSaysNothingAboutChampionsWithNoPlayers(self):
+        cb = self._cb()
+        cb.db.getChannel(self.irc.network, self.channel)
+        self._drain()
+        cb._fireQuarterlyReset()
+        first = self.irc.takeMsg()
+        self.assertTrue(first is not None and 'season' in first.args[1])
+        self.assertTrue(self.irc.takeMsg() is None)
+
     def testDuckchampionsShowsLastArchive(self):
         cb = self._cb()
         network = self.irc.network
@@ -4191,7 +4218,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'bob')['xp'], 0)
         self.assertEqual(cb.db.getPlayer(self.irc.network, self.OTHER, 'bob')['xp'], 300)
         self.assertIsNone(cb.db.lastArchive(self.irc.network, self.OTHER))
-        self.assertEqual([t for _, t, _ in self._sent()], [self.channel])
+        self.assertEqual(set(t for _, t, _ in self._sent()), {self.channel})
         # bot-wide off, one channel opting in
         conf.supybot.plugins.DuckHuntPro.quarterlyResetEnabled.setValue(False)
         self._perChannel('quarterlyResetEnabled', self.OTHER, True)

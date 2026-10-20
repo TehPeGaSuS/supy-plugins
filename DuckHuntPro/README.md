@@ -95,8 +95,9 @@ the daily `.bak` is the only undo.
   15:120, `floodStats` 2:120, `floodLastduck` 1:300, `floodShop` 3:600) and
   channel-wide (`floodGlobal` 30:600), with the original's throttled warnings.
 - **Quarterly reset** (extra, not in the original): on 1 Jan/Apr/Jul/Oct each
-  channel's standings are archived for `duckchampions` and xp/stats are zeroed.
-  `quarterlyResetEnabled` turns it off, bot-wide or per channel.
+  channel's standings are archived for `duckchampions` and xp/stats are zeroed;
+  the channel is told and the top three are named. `quarterlyResetEnabled`
+  turns it off, bot-wide or per channel.
 - **Hunting logs** (`huntingLogs`, off by default): one line per game action in
   `<channel>_<yyyymmdd>.log`, in `huntingLogDirectory`
   (default `<data>/DuckHuntPro/logs/`).
