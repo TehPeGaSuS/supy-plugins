@@ -22,7 +22,7 @@ EN = {'m0': 'Deallocating %s resources...',
  'm343': ' \x0303[liability insurance]\x03',
  'm6': '%s > \x0314*CLICK*\x03     \x0304EMPTY MAGAZINE\x03%s \x0314|\x03 Ammo: \x02%s\x02 '
        '\x0314|\x03 Chargers: \x02%s\x02',
- 'm7': '%s > \x0314*CLACK*\x03     \x0304JAMMED GUN\x03',
+ 'm7': '%s > \x0314*CLACK*\x03     \x0304JAMMED GUN\x03, type \x02%s\x02 to unjam it',
  'm338': "\x02*BOOM*\x02     Your gun just exploded because of %s's sabotage.",
  'm8': '%s > \x0314*CLACK*\x03     Your gun is jammed, you must type \x02%s\x02 to unjam it... \x0314|\x03 '
        'Ammo: \x02%s\x02 \x0314|\x03 Chargers: \x02%s\x02',
@@ -868,7 +868,7 @@ FR = {'m0': 'Désallocation des ressources de %s...',
  'm343': ' \x0303[assurance resp. civile]\x03',
  'm6': '%s > \x0314*CLIC*\x03     \x0304CHARGEUR VIDE\x03%s \x0314|\x03 Mun. : \x02%s\x02 '
        '\x0314|\x03 Charg. : \x02%s\x02',
- 'm7': '%s > \x0314*CLAC*\x03     \x0304ARME ENRAYÉE\x03 \x0314|\x03',
+ 'm7': '%s > \x0314*CLAC*\x03     \x0304ARME ENRAYÉE\x03, tape \x02%s\x02 pour la décoincer',
  'm338': "\x02*BOOM*\x02     Ton arme vient d'exploser à cause du sabotage de %s.",
  'm8': "%s > \x0314*CLAC*\x03     Ton arme s'est enrayée, tu dois taper \x02%s\x02 pour la décoincer... "
        '\x0314|\x03 Mun. : \x02%s\x02 \x0314|\x03 Charg. : \x02%s\x02',

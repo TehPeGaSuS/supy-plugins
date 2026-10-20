@@ -366,6 +366,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testEmptyMagazineNamesTheReloadCommandWhileClipsRemain(self):
         cb = self._cb()
+        cb._rng = ScriptedRNG([100, 100, 100])   # no jam roll succeeds
         def empty(p):
             self._tidy(p)
             p['clip_ammo'] = 0
@@ -383,6 +384,13 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertNotIn('to reload', text)
         self.assertIn('CHARGEUR VIDE\x03, tape \x02rl\x02 pour recharger',
                       messages.tcl('fr', 'm6', 'n', messages.get('fr', 'reload_hint', command='rl'), 'a', 'c'))
+
+    def testShootingWithAJammedGunNamesTheReloadCommand(self):
+        conf.supybot.plugins.DuckHuntPro.reloadCommand.setValue('rl')
+        text = ' '.join(self._texts(self._cmd('bang', setup=lambda p: self._tidy(p, jammed=True))))
+        self.assertIn('JAMMED GUN\x03, type \x02rl\x02 to unjam it', text)
+        self.assertIn('ARME ENRAYÉE\x03, tape \x02rl\x02 pour la décoincer',
+                      messages.tcl('fr', 'm7', 'n', 'rl'))
 
     def testJamBlocksShotAndDoesNotConsumeAmmo(self):
         cb = self._cb()

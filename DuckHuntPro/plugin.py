@@ -1515,7 +1515,7 @@ class DuckHuntPro(callbacks.Plugin):
             liabilityMsg = t('m343')
 
         if player['jammed']:
-            out(t('m7', nick))
+            out(t('m7', nick, self.registryValue('reloadCommand', channel)))
             return False          # (so the sand and the sabotage are still there)
         if sabotage or self._rng.uniform(0, 100) < jam:
             player['jammed'] = True
