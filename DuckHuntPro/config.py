@@ -48,9 +48,9 @@ conf.registerChannelValue(DuckHuntPro, 'enabled',
     registry.Boolean(False, """Enables the duck hunt game in this channel. The channel is told when it is switched on or off."""))
 
 conf.registerChannelValue(DuckHuntPro, 'reloadCommand',
-    registry.String('duckreload', """How the jam message names the reload
-    command, for when players reach it through an alias (e.g. "rl" after
-    `aka add rl "DuckHuntPro duckreload"`)."""))
+    registry.String('duckreload', """How the jam and empty-magazine messages
+    name the reload command, for when players reach it through an alias (e.g.
+    "rl" after `aka add rl "DuckHuntPro duckreload"`)."""))
 
 conf.registerChannelValue(DuckHuntPro, 'language',
     registry.String('en', """Language used for this channel's game messages:

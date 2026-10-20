@@ -1531,7 +1531,11 @@ class DuckHuntPro(callbacks.Plugin):
         unlimitedClip = self.registryValue('unlimitedAmmoPerClip', channel)
         if player['clip_ammo'] <= 0 and not unlimitedClip:
             stats['empty_shots'] += 1
-            out(t('m6', nick, self._displayAmmo(player, lvl, channel),
+            hint = ''
+            if self.registryValue('unlimitedAmmoClips', channel) or player['clips_left']:
+                hint = messages.get(self._lang(channel), 'reload_hint',
+                                    command=self.registryValue('reloadCommand', channel))
+            out(t('m6', nick, hint, self._displayAmmo(player, lvl, channel),
                   self._displayClips(player, lvl, channel)))
             self._huntLog(channel, 'empty_shot', nick, now=now, network=network)
             return

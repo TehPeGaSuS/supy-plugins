@@ -118,7 +118,7 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | Setting | Scope | Default | Description |
 |---|---|---|---|
 | `enabled` | channel, network | `False` | Enables the duck hunt game in this channel. The channel is told when it is switched on or off. |
-| `reloadCommand` | channel, network | `duckreload` | How the jam message names the reload command ("you must type duckreload to unjam it"), for when players use an alias such as `aka add rl "DuckHuntPro duckreload"`. |
+| `reloadCommand` | channel, network | `duckreload` | How the jam and empty-magazine messages name the reload command ("you must type duckreload to unjam it", "EMPTY MAGAZINE, type duckreload to reload"), for when players use an alias such as `aka add rl "DuckHuntPro duckreload"`. |
 | `language` | channel, network | `en` | Language used for this channel's game messages: en or fr (the original script's two catalogues). |
 | `ducksPerDay` | channel, network | `18` | Approximate number of ducks that fly per day. |
 | `approxGoldenDucksPerDay` | channel, network | `1` | Approximate number of golden (multi-hit) ducks per day; must not exceed ducksPerDay, since golden ducks are counted within it. |

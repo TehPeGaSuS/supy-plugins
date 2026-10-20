@@ -206,13 +206,10 @@ MESSAGES = {
         'no_duck_nothing_there': "There's no duck to shoot at right now.",
         'duck_fled': 'The duck flew away, scared off by all the gunfire!',
         'duck_escaped': 'The duck flew off unharmed.',
-        'empty_clip': "{nick}'s gun is empty! Try 'reload'.",
-        'no_clips_left': "{nick} has no spare clips left to reload with.",
         'gun_jammed': "{nick}'s gun jams!",
+        'reload_hint': ', type \x02{command}\x02 to reload',
         'gun_confiscated': "{nick}'s gun has been confiscated!",
         'gun_not_armed': "{nick} doesn't have a gun -- it was confiscated.",
-        'reload_ok': '{nick} reloads.',
-        'reload_full': "{nick}'s clip is already full.",
         'level_up': '{nick} reached level {level}!',
         'accident_hit': '{shooter} accidentally hits {victim}! ({xp} xp for {shooter})',
         'accident_gun_confiscated': "{shooter}'s weapon is confiscated for the accident!",
@@ -312,6 +309,7 @@ MESSAGES = {
     # The plugin's own additions to the original (the season features); the
     # original's messages themselves are in tclmessages.py, in both languages.
     'fr': {
+        'reload_hint': ', tape \x02{command}\x02 pour recharger',
         'enabled_on': "Duck Hunt vient d'être activé sur {channel}. Préparez-vous et... Bonne chasse !",
         'enabled_off': "Duck Hunt a été désactivé sur {channel}. Les canards sont saufs... pour l'instant.",
         'lastduck_killer': 'Il a été abattu par {nick}.',

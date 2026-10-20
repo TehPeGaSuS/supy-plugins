@@ -364,6 +364,26 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn("tu dois taper \x02rl\x02 pour la décoincer",
                       messages.tcl('fr', 'm8', 'n', 'rl', 'a', 'c'))
 
+    def testEmptyMagazineNamesTheReloadCommandWhileClipsRemain(self):
+        cb = self._cb()
+        def empty(p):
+            self._tidy(p)
+            p['clip_ammo'] = 0
+            p['clips_left'] = 1
+        text = ' '.join(self._texts(self._cmd('bang', setup=empty)))
+        self.assertIn('EMPTY MAGAZINE\x03, type \x02duckreload\x02 to reload', text)
+        conf.supybot.plugins.DuckHuntPro.reloadCommand.setValue('rl')
+        text = ' '.join(self._texts(self._cmd('bang', setup=empty)))
+        self.assertIn(', type \x02rl\x02 to reload', text)
+        def dry(p):
+            empty(p)
+            p['clips_left'] = 0
+        text = ' '.join(self._texts(self._cmd('bang', setup=dry)))
+        self.assertIn('EMPTY MAGAZINE\x03 \x0314|', text, 'no hint without a clip to load')
+        self.assertNotIn('to reload', text)
+        self.assertIn('CHARGEUR VIDE\x03, tape \x02rl\x02 pour recharger',
+                      messages.tcl('fr', 'm6', 'n', messages.get('fr', 'reload_hint', command='rl'), 'a', 'c'))
+
     def testJamBlocksShotAndDoesNotConsumeAmmo(self):
         cb = self._cb()
         cb._rng = ScriptedRNG([0])  # jam roll succeeds
