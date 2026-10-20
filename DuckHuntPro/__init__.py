@@ -51,6 +51,7 @@ __contributors__ = {}
 __url__ = ''
 
 from . import data
+from . import tclmessages
 from . import messages
 from . import db
 from . import webpages
@@ -62,6 +63,7 @@ else:
     from imp import reload
 # In case we're being reloaded.
 reload(data)
+reload(tclmessages)
 reload(messages)
 reload(db)
 reload(webpages)
