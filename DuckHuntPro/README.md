@@ -88,7 +88,7 @@ the daily `.bak` is the only undo.
   method 1 rolls every minute. After a (re)start the day is planned afresh
   once `postInitDelay` is over; a channel joined later gets its flights at
   midnight or when its game is switched on, as in the original. Bread, decoys
-  and fake ducks work as in the original. Ammo is refilled daily at `autoRefillAmmoTime`.
+  and fake ducks work as in the original. Ammo is refilled daily at `autoRefillAmmoTime` (or several times a day, with a comma-separated list).
 - **Nick changes**: the stats follow a renamed player when they next act (the
   original's deferral against stat theft), using its exact merge rules.
 - **Antiflood**: per player and command (`floodShoot` 30:600, `floodReload`
@@ -152,17 +152,17 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `devoiceOnAccident` | channel, network | `True` | Devoices a player who accidentally hits someone else. |
 | `kickWhenShot` | channel, network | `True` | Whether a player who takes a stray hit (and neither deflects nor is defended by armor) gets kicked. |
 | `gunHandBackMode` | channel, network | `1` | How temporarily-confiscated weapons get returned: 1 = once daily at autoGunHandBackTime, 2 = whenever the channel's duck count drops back to zero (killed/escaped), 3 = never automatically (only the `rearm` command). Permanently-confiscated weapons (`unarm -static`) are never auto-returned by any mode. |
-| `autoGunHandBackTime` | channel, network | `00:00` | Local time (HH:MM) weapons are auto-returned each day, when gunHandBackMode is 1. |
+| `autoGunHandBackTime` | channel, network | `00:00` | Local time (HH:MM, 00:00-23:59) weapons are auto-returned each day, when gunHandBackMode is 1. A comma-separated list returns them several times a day. |
 | `method` | global | `2` | How duck flights are scheduled (the original's `method`): 1 = every minute each channel has a chance of a flight (random timing), 2 = the day's flight times are planned in advance, replanned at midnight and whenever bread is bought or expires. |
 | `showBreadReplanning` | channel, network | `True` | Log the new flight plan each time buying or losing bread replans the day (the original's show_bread_replanning). |
 | `preferredDisplayMode` | channel, network | `1` | Where the game's per-player replies go: 1 = PRIVMSG to the channel, anything else = NOTICE to the player (the original's preferred_display_mode). Duck flights, kills and accidents are always public. |
 | `maxLineLength` | global | `435` | Longer messages are split into several lines, cut at a space when possible, carrying their colours over (the original's max_line_length). Must be at least 9. |
 | `monochrome` | channel, network | `False` | Strip colours and other formatting from every message the game sends (it is always stripped on channels with mode +c). |
 | `kickOnWildFire` | channel, network | `False` | Kick players who shoot when there is no duck (the original's kick_on_wild_fire). |
-| `autoRefillAmmoTime` | global | `00:00` | Local time (HH:MM) at which every player's clips are refilled to their level's count each day (the original script's auto_refill_ammo_time). |
+| `autoRefillAmmoTime` | global | `00:00` | Local time (HH:MM) at which every player's clips are refilled to their level's count each day (the original script's auto_refill_ammo_time). A comma-separated list (`00:00,08:00,16:00`) refills several times a day. |
 | `huntingLogs` | global | `False` | Whether to keep the original's hunting logs: a plain-text trace of everything that happens (flights, shots, reloads, purchases, confiscations, stat transfers), one file per channel and day (the original script's hunting_logs). |
 | `huntingLogDirectory` | global | (empty) | Where the hunting logs go, as <channel>_<yyyymmdd>.log files. Empty means a logs directory under the plugin's data directory. |
-| `backupTime` | global | `00:03` | Local time (HH:MM) at which the database file is copied to a .bak file next to it each day (the original script's backup_time). |
+| `backupTime` | global | `00:03` | Local time (HH:MM, 00:00-23:59) at which the database file is copied to a .bak file next to it each day (the original script's backup_time). A comma-separated list (`00:03,12:03`) backs up several times a day. |
 | `anonymPrefix` | global | (empty) | The prefix your network gives to users who don't identify in time ("Anonyme" for nicks like Anonyme54720). Stats are never transferred automatically to such a nick. Case-sensitive; empty = off. |
 | `warnOnRename` | global | `False` | Log a notice when a player who changed nick already has stats under the new nick. |
 | `warnOnTakeover` | global | `True` | Log what happened (and the stats involved) when a nick change makes two profiles merge, one replace the other, or a profile get claimed. |

@@ -255,6 +255,18 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             for name in [n for n in cb._scheduled if n.startswith('DuckHuntPro:refill:')]:
                 cb._unschedule(name)
 
+    def testDailyTimesAcceptACommaSeparatedList(self):
+        cb = self._cb()
+        now = datetime(2026, 10, 20, 9, 15).timestamp()
+        nxt = datetime.fromtimestamp(cb._nextDailyTime('00:00,08:00,16:00', now))
+        self.assertEqual((nxt.day, nxt.hour, nxt.minute), (20, 16, 0))
+        nxt = datetime.fromtimestamp(cb._nextDailyTime('00:00, 08:00 ,16:00', now + 7 * 3600))
+        self.assertEqual((nxt.day, nxt.hour, nxt.minute), (21, 0, 0), 'wraps to tomorrow')
+        nxt = datetime.fromtimestamp(cb._nextDailyTime('junk,07:00', now))
+        self.assertEqual((nxt.day, nxt.hour), (21, 7), 'bad entries are skipped')
+        nxt = datetime.fromtimestamp(cb._nextDailyTime('junk', now))
+        self.assertEqual((nxt.day, nxt.hour), (21, 0), 'nothing valid: midnight')
+
     def testBackupIsScheduledDailyAtTheConfiguredTime(self):
         cb = self._cb()
         self.assertEqual(cb.registryValue('backupTime'), '00:03')

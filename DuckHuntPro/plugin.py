@@ -793,18 +793,29 @@ class DuckHuntPro(callbacks.Plugin):
     # -----------------------------------------------------------------
 
     def _nextDailyTime(self, raw, now=None):
-        """Timestamp of the next local HH:MM (from the config string `raw`,
-        00:00 if it can't be parsed) strictly after `now`."""
+        """Timestamp of the next local HH:MM strictly after `now`. `raw` is a
+        config string holding one time or a comma-separated list of them
+        (e.g. "00:00,08:00,16:00"): the earliest upcoming one wins. Entries
+        that can't be parsed are ignored; with none left, 00:00 is used."""
         now = now if now is not None else time.time()
-        try:
-            hh, mm = (int(x) for x in raw.split(':', 1))
-            datetime(2000, 1, 1, hh, mm)
-        except (ValueError, AttributeError):
-            hh, mm = 0, 0
-        dt = datetime.fromtimestamp(now).replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if dt.timestamp() <= now:
-            dt = dt + timedelta(days=1)
-        return dt.timestamp()
+        times = []
+        for part in str(raw or '').split(','):
+            try:
+                hh, mm = (int(x) for x in part.strip().split(':', 1))
+                datetime(2000, 1, 1, hh, mm)
+            except ValueError:
+                continue
+            times.append((hh, mm))
+        if not times:
+            times = [(0, 0)]
+        today = datetime.fromtimestamp(now)
+        candidates = []
+        for hh, mm in times:
+            dt = today.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if dt.timestamp() <= now:
+                dt = dt + timedelta(days=1)
+            candidates.append(dt.timestamp())
+        return min(candidates)
 
     def _nextHandBackTime(self, channelName, now=None):
         return self._nextDailyTime(

@@ -203,8 +203,9 @@ conf.registerChannelValue(DuckHuntPro, 'gunHandBackMode',
     are never auto-returned by any mode."""))
 
 conf.registerChannelValue(DuckHuntPro, 'autoGunHandBackTime',
-    registry.String('00:00', """Local time (HH:MM) weapons are auto-returned
-    each day, when gunHandBackMode is 1."""))
+    registry.String('00:00', """Local time (HH:MM, 00:00-23:59) weapons are
+    auto-returned each day, when gunHandBackMode is 1. A comma-separated list
+    (e.g. 00:00,12:00) returns them several times a day."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'method',
     registry.Integer(2, """How duck flights are scheduled (the original's `method`):
@@ -236,9 +237,10 @@ conf.registerChannelValue(DuckHuntPro, 'kickOnWildFire',
     (the original's kick_on_wild_fire)."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'autoRefillAmmoTime',
-    registry.String('00:00', """Local time (HH:MM) at which every player's
-    clips are refilled to their level's count each day (the original script's
-    auto_refill_ammo_time)."""))
+    registry.String('00:00', """Local time (HH:MM, 00:00-23:59) at which every
+    player's clips are refilled to their level's count each day (the original script's
+    auto_refill_ammo_time). Several times a day are possible as a
+    comma-separated list, e.g. 00:00,08:00,16:00."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'huntingLogs',
     registry.Boolean(False, """Whether to keep the original's hunting logs: a
@@ -251,9 +253,10 @@ conf.registerGlobalValue(DuckHuntPro, 'huntingLogDirectory',
     files. Empty means a logs directory under the plugin's data directory."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'backupTime',
-    registry.String('00:03', """Local time (HH:MM) at which the database file is
-    copied to a .bak file next to it each day (the original script's
-    backup_time)."""))
+    registry.String('00:03', """Local time (HH:MM, 00:00-23:59) at which the
+    database file is copied to a .bak file next to it each day (the original
+    script's backup_time). A comma-separated list (e.g. 00:03,12:03) backs up
+    several times a day."""))
 
 conf.registerGlobalValue(DuckHuntPro, 'anonymPrefix',
     registry.String('', """The prefix your network gives to users who don't
