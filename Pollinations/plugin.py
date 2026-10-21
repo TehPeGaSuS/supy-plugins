@@ -645,6 +645,8 @@ class Pollinations(callbacks.Plugin):
                 return None
             results = self._search_results(data.get("results") if isinstance(data, dict) else None,
                                            limit, self.registryValue("search_snippet_length", channel))
+            self.log.info("SearXNG search (time_range=%s): %d results",
+                          attempt.get("time_range", "any"), len(results))
             if len(results) >= min(3, limit):
                 break
         return ("", results)
@@ -722,6 +724,9 @@ class Pollinations(callbacks.Plugin):
             if not found or not (found[0] or found[1]):
                 continue
             answer, results = found
+            # What the model is given, so a bad answer can be traced to bad results
+            self.log.info("Search %s for %r: %s", backend, text,
+                          " | ".join(title[:60] or url for title, url, _snippet in results) or "(answer only)")
             # Short marker of which backend answered: [T]avily, [S]earXNG
             tag = "[%s] " % backend[0].upper()
             urls = [url for _title, url, _snippet in results[:self.registryValue("search_sources", msg.channel)]]
@@ -739,10 +744,13 @@ class Pollinations(callbacks.Plugin):
                      "For anything live, such as the current time or date somewhere, never "
                      "use clocks or dates from these results: work it out from the current "
                      "date and time given above (convert UTC to the place's time zone). "
-                     "Otherwise answer only from these results. If they do not answer the "
-                     "question, say you could not find it. Answer as if you knew it yourself: "
-                     "never mention the results, the sources or what is 'listed here', and "
-                     "do not write the [n] numbers." % sources)
+                     "Otherwise answer only from these results. If they point to an answer, "
+                     "for example a headline saying who won, give it (with its date if the "
+                     "date matters) rather than refusing; only if nothing in them answers the "
+                     "question, say briefly that you could not find it. Answer as if you knew "
+                     "it yourself: never mention the results, the sources or what is 'listed "
+                     "here', do not write the [n] numbers, and never ask the user questions or "
+                     "offer to look anything up." % sources)
             self._chat(irc, msg, text, "search_text_model", "search_text_fallback_model",
                        "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix, tag=tag,
                        reasoning_setting="search_reasoning_effort")

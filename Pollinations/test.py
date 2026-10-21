@@ -168,6 +168,8 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual(chats[0]['model'], chats[1]['model'])
         system = '\n'.join(m['content'] for m in chats[0]['messages'] if m['role'] == 'system')
         self.assertIn("never mention the results", system)
+        self.assertIn("never ask the user questions", system)
+        self.assertIn("rather than refusing", system)
 
     def testChatHasNoReasoningEffort(self):
         with patch.object(self.plugin.session, 'post', return_value=_chat_response('Hi.')) as post:
