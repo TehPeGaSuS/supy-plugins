@@ -41,9 +41,11 @@ Generate images from text descriptions.
 Answers using live web search. Backends are tried in the order of `search_backend`:
 - `tavily`: [Tavily](https://tavily.com) search (free plan: 1000 credits/month, 1 per basic search). Replies with Tavily's own short answer, or with `tavily_rewrite` on, `search_text_model` writes it from the results.
 - `searxng`: your own [SearXNG](https://docs.searxng.org) instance (free, no quota); `search_text_model` writes the answer from the results.
-- `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`). It replies itself, so put it last.
+- `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`), e.g. `sonar`.
 
-Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Tavily and Pollinations searches are capped per UTC day (`search_daily_limit`); after that SearXNG answers alone, uncapped since it is free. Each user also waits `search_cooldown` between searches. The counts are saved in `data/Pollinations-search.json`, so they survive restarts.
+A backend that fails or has reached its daily limit is skipped and the next one answers, e.g. `pollinations tavily searxng`: sonar for the first `pollinations_daily_limit` searches of the day, then Tavily for `tavily_daily_limit` more, then SearXNG; if sonar fails (outage, no paid pollen left) Tavily and then SearXNG answer instead.
+
+Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Pollinations and Tavily searches each have a daily limit (UTC), SearXNG has none since it is free. Each user also waits `search_cooldown` between searches. The counts are saved in `data/Pollinations-search.json`, so they survive restarts.
 
 Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per channel, default 1) is how many chunks are sent at once before `(N more messages)`, e.g. `config channel #chan supybot.reply.mores.instant 3`.  
 **Examples:**
@@ -86,7 +88,7 @@ All settings can be configured per-channel using:
 | `text_model` | "openai" | Primary text model for chat completions (see [Recommended models](#recommended-models)) |
 | `text_fallback_model` | "openai-fast" | Space-separated list of fallback models tried when the primary fails persistently (429/5xx) |
 | `search_enabled` | True | Set to False to disable `search` (per channel or globally) |
-| `search_backend` | "tavily searxng" | Backends tried in order: `tavily`, `searxng`, `pollinations` (paid, last) |
+| `search_backend` | "tavily searxng" | Backends tried in order: `tavily`, `searxng`, `pollinations` (paid). A failed or capped backend is skipped |
 | `tavily_api_key` | "" | Tavily API key (global, private). Empty skips `tavily` |
 | `tavily_depth` | "basic" | `basic`, `fast`, `ultra-fast` (1 credit) or `advanced` (2 credits) |
 | `tavily_answer` | "basic" | Tavily's own answer: `basic` (short) or `advanced` (longer); same credit cost |
@@ -102,7 +104,8 @@ All settings can be configured per-channel using:
 | `search_sources` | 1 | Source URLs appended to the answer (0 for none) |
 | `search_shorten_urls` | True | Shorten source URLs with is.gd |
 | `search_timeout` | 15 | Timeout in seconds for tavily/searxng requests |
-| `search_daily_limit` | 30 | Tavily + Pollinations searches per UTC day across all channels (global, 0 for no limit); SearXNG is not counted. 30 fits Tavily's free plan |
+| `pollinations_daily_limit` | 20 | Searches per UTC day answered by the paid `pollinations` backend (global, 0 for no limit) |
+| `tavily_daily_limit` | 30 | Tavily searches per UTC day (global, 0 for no limit). 30 fits Tavily's free plan |
 | `search_cooldown` | 30 | Seconds between searches per user (0 to disable) |
 | `search_model` | "sonar" | Model for the `pollinations` backend (must support web search, see `models search`; paid) |
 | `search_prompt` | "IRC bot: answer in one plain-text line, max 300 chars. Direct answer first, then key context…" (352 chars, so it can be set again with one IRC `config` line) | Instructions for `search` only (e.g. no citations/markdown) |

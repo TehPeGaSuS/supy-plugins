@@ -191,7 +191,7 @@ conf.registerChannelValue(
     "search_backend",
     registry.SpaceSeparatedListOfStrings(
         ["tavily", "searxng"],
-        _("""Backends tried in order by 'search': tavily, searxng, pollinations. tavily and searxng do the search for free; pollinations uses the paid search_model and, since it replies itself, only makes sense last."""),
+        _("""Backends tried in order by 'search': tavily, searxng, pollinations (the paid search_model). A backend that fails or reached its daily limit (pollinations_daily_limit, tavily_daily_limit) is skipped and the next one answers; SearXNG has no limit. Example: pollinations tavily searxng."""),
     ),
 )
 
@@ -334,10 +334,19 @@ conf.registerChannelValue(
 
 conf.registerGlobalValue(
     Pollinations,
-    "search_daily_limit",
+    "pollinations_daily_limit",
+    registry.NonNegativeInteger(
+        20,
+        _("""Maximum searches per UTC day answered by the paid 'pollinations' search backend (search_model), across all channels (0 for no limit). Once reached it is skipped and the next backend answers."""),
+    ),
+)
+
+conf.registerGlobalValue(
+    Pollinations,
+    "tavily_daily_limit",
     registry.NonNegativeInteger(
         30,
-        _("""Maximum tavily and pollinations searches per UTC day across all channels (0 for no limit); once reached, those backends are skipped and searxng answers alone. 30 keeps Tavily's free 1000 credits/month."""),
+        _("""Maximum Tavily searches per UTC day across all channels (0 for no limit). 30 keeps Tavily's free 1000 credits/month. Once reached it is skipped and the next backend answers."""),
     ),
 )
 

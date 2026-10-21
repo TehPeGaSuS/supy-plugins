@@ -323,12 +323,15 @@ class Pollinations(callbacks.Plugin):
             text = "%s: %s" % (msg.nick, response_text) if prefix else response_text
             irc.reply(text, prefixNick=False, to=channel)
 
-    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix="", tag="", reasoning_setting=None):
+    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix="", tag="", reasoning_setting=None, quiet_failure=False):
+        """Ask the model and reply. Returns True once something was said on
+        IRC. With quiet_failure, a failed request (no model answered, network
+        error) says nothing and returns False, so a caller can try elsewhere."""
         channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         
         if not self.active_requests.acquire(blocking=False):
             irc.reply("I am processing too many requests right now. Please try again in a moment.", prefixNick=False)
-            return
+            return True
             
         try:
             if self.registryValue("nick_include", msg.channel):
@@ -402,7 +405,7 @@ class Pollinations(callbacks.Plugin):
                     irc.reply("Response filtered by content policy (%s)" % details, prefixNick=False)
                 else:
                     irc.reply("Response filtered by content policy", prefixNick=False)
-                return
+                return True
 
             # --- fallback attempts on failure ---
             if content is None:
@@ -433,33 +436,46 @@ class Pollinations(callbacks.Plugin):
                                 irc.reply("Response filtered by content policy (%s)" % details, prefixNick=False)
                             else:
                                 irc.reply("Response filtered by content policy", prefixNick=False)
-                            return
+                            return True
                         error = fb_error  # track last error for logging
 
             if content is None:
                 self.log.warning("All text models failed. Last error: %s" % (error,))
+                if quiet_failure:
+                    return False
                 irc.reply("The AI service is currently unavailable, please try again in a moment.", prefixNick=False)
-                return
+                return True
 
             self._send_reply(irc, msg, channel, content, suffix, tag)
 
             with self.dict_lock:
                 self.last_reply_time[msg.channel] = time.time()
+            return True
         
         except requests.exceptions.Timeout:
+            if quiet_failure:
+                self.log.warning("Text request timed out")
+                return False
             irc.reply("Request timed out.", prefixNick=False)
-            return
+            return True
         except requests.exceptions.RetryError:
+            if quiet_failure:
+                self.log.warning("Text service overloaded")
+                return False
             irc.reply("The AI service is overloaded right now, please try again in a moment.", prefixNick=False)
-            return
+            return True
         except requests.exceptions.RequestException as e:
             self.log.warning(f"Network error: {repr(e)}")
+            if quiet_failure:
+                return False
             irc.reply("Network error.", prefixNick=False)
-            return
+            return True
         except Exception as e:
             self.log.error(f"Unexpected error in _chat: {repr(e)}")
+            if quiet_failure:
+                return False
             irc.reply("Unexpected error.", prefixNick=False)
-            return
+            return True
         finally:
             self.active_requests.release()
 
@@ -515,9 +531,10 @@ class Pollinations(callbacks.Plugin):
         return conf.supybot.directories.data.dirize("Pollinations-search.json")
 
     def _load_search_stats(self):
-        # capped: today's searches on the backends search_daily_limit covers
-        stats = {"day": None, "searches": 0, "capped": 0, "month": None,
-                 "tavily_credits": 0, "tavily_searches": 0}
+        # pollinations_today/tavily_today: today's searches answered by the
+        # backends that have a daily limit
+        stats = {"day": None, "searches": 0, "pollinations_today": 0, "tavily_today": 0,
+                 "month": None, "tavily_credits": 0, "tavily_searches": 0}
         try:
             with open(self._search_stats_path()) as f:
                 saved = json.load(f)
@@ -555,7 +572,8 @@ class Pollinations(callbacks.Plugin):
         today, month = time.strftime("%Y-%m-%d", now), time.strftime("%Y-%m", now)
         stats = self._search_stats
         if stats["day"] != today:
-            stats["day"], stats["searches"], stats["capped"] = today, 0, 0
+            stats["day"], stats["searches"] = today, 0
+            stats["pollinations_today"], stats["tavily_today"] = 0, 0
         if stats["month"] != month:
             stats["month"], stats["tavily_credits"], stats["tavily_searches"] = month, 0, 0
 
@@ -571,7 +589,7 @@ class Pollinations(callbacks.Plugin):
             self._roll_search_stats()
             self._search_stats["tavily_credits"] += credits
             self._search_stats["tavily_searches"] += 1
-            self._search_stats["capped"] += 1
+            self._search_stats["tavily_today"] += 1
             self._save_search_stats()
 
     def _search_tavily(self, query, channel):
@@ -671,12 +689,20 @@ class Pollinations(callbacks.Plugin):
             self._search_last[msg.prefix] = now
         return True
 
-    def _search_capped(self):
-        """True when today's tavily/pollinations searches hit search_daily_limit."""
-        limit = self.registryValue("search_daily_limit")
+    def _search_capped(self, backend):
+        """True when today's searches on backend (tavily or pollinations)
+        reached its <backend>_daily_limit."""
+        limit = self.registryValue("%s_daily_limit" % backend)
         with self.dict_lock:
             self._roll_search_stats()
-            return bool(limit) and self._search_stats["capped"] >= limit
+            return bool(limit) and self._search_stats["%s_today" % backend] >= limit
+
+    def _count_pollinations(self, delta):
+        with self.dict_lock:
+            self._roll_search_stats()
+            count = self._search_stats["pollinations_today"] + delta
+            self._search_stats["pollinations_today"] = max(0, count)
+            self._save_search_stats()
 
     def _search_refund(self):
         with self.dict_lock:
@@ -704,18 +730,22 @@ class Pollinations(callbacks.Plugin):
             irc.queueMsg(ircmsgs.privmsg(channel, thinking))
 
         capped = False
-        for backend in backends:
-            # Tavily credits and paid search models count against the daily
-            # limit; SearXNG is free and only skipped when it fails.
-            if backend in ("tavily", "pollinations") and self._search_capped():
+        for i, backend in enumerate(backends):
+            # Tavily credits and paid search models have their own daily
+            # limits; SearXNG is free and only skipped when it fails.
+            if backend in ("tavily", "pollinations") and self._search_capped(backend):
                 capped = True
                 continue
             if backend == "pollinations":
-                with self.dict_lock:
-                    self._search_stats["capped"] += 1
-                    self._save_search_stats()
-                self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", tag="[P] ", reasoning_setting="search_reasoning_effort")
-                return
+                # The model replies itself; if it fails and another backend
+                # follows, stay quiet, give the search back and move on.
+                self._count_pollinations(1)
+                if self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt",
+                              "search_use_prompt", tag="[P] ", reasoning_setting="search_reasoning_effort",
+                              quiet_failure=i < len(backends) - 1):
+                    return
+                self._count_pollinations(-1)
+                continue
             if backend == "tavily":
                 found = self._search_tavily(text, msg.channel)
             elif backend == "searxng":
@@ -760,8 +790,7 @@ class Pollinations(callbacks.Plugin):
 
         self._search_refund()
         if capped:
-            irc.reply("Daily search limit reached (%d). It resets at 00:00 UTC."
-                      % self.registryValue("search_daily_limit"), prefixNick=False)
+            irc.reply("Daily search limit reached. It resets at 00:00 UTC.", prefixNick=False)
         else:
             irc.reply("Web search is unavailable right now, please try again later.", prefixNick=False)
 
@@ -776,11 +805,14 @@ class Pollinations(callbacks.Plugin):
         with self.dict_lock:
             self._roll_search_stats()
             stats = dict(self._search_stats)
-        limit = self.registryValue("search_daily_limit")
-        capped_names = [b.capitalize() for b in self.registryValue("search_backend", msg.channel)
-                        if b.lower() in ("tavily", "pollinations")] or ["Tavily"]
-        parts = ["Today: %d searches, %d/%s %s" % (
-            stats["searches"], stats["capped"], limit or "unlimited", "+".join(capped_names))]
+        today = "Today: %d searches" % stats["searches"]
+        for backend in self.registryValue("search_backend", msg.channel):
+            backend = backend.lower()
+            if backend in ("pollinations", "tavily"):
+                limit = self.registryValue("%s_daily_limit" % backend)
+                today += ", %s %d/%s" % (backend.capitalize(), stats["%s_today" % backend],
+                                         limit or "unlimited")
+        parts = [today]
         key = self.registryValue("tavily_api_key")
         if key:
             parts.append("Tavily this month (bot): %s credits in %d searches" % (
