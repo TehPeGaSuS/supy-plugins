@@ -243,6 +243,25 @@ conf.registerGlobalValue(
 
 conf.registerChannelValue(
     Pollinations,
+    "searxng_recent_range",
+    registry.String(
+        "week",
+        _("""SearXNG time_range (day, week, month, year) used first when the question has one of searxng_recent_words; if that finds fewer than 3 results the search is repeated without it. Empty to disable."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "searxng_recent_words",
+    registry.SpaceSeparatedListOfStrings(
+        ["last", "latest", "today", "yesterday", "tonight", "now", "current", "currently",
+         "recent", "recently", "newest"],
+        _("""Words that make a SearXNG search ask for recent pages first (see searxng_recent_range)."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
     "search_text_model",
     registry.String(
         "openai-fast",

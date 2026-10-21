@@ -605,23 +605,36 @@ class Pollinations(callbacks.Plugin):
         base = self.registryValue("searxng_url").strip().rstrip("/")
         if not base:
             return None
-        try:
-            response = self.session.get(
-                base + "/search",
-                params={"q": query, "format": "json", "categories": "general"},
-                timeout=self.registryValue("search_timeout", channel),
-            )
-            if response.status_code != 200:
-                # 403 here usually means the json format is not enabled in settings.yml
-                self.log.warning("SearXNG search error %s", response.status_code)
+        limit = self.registryValue("search_results", channel)
+        params = {"q": query, "format": "json", "categories": "general"}
+        # "who won the last race": search engines do not know what "last"
+        # means, so ask for recent pages first and widen if that is too thin.
+        time_range = self.registryValue("searxng_recent_range", channel).strip()
+        words = set(re.findall(r"\w+", query.lower()))
+        recent_words = {w.lower() for w in self.registryValue("searxng_recent_words", channel)}
+        attempts = [params]
+        if time_range and words & recent_words:
+            attempts.insert(0, dict(params, time_range=time_range))
+        results = None
+        for attempt in attempts:
+            try:
+                response = self.session.get(
+                    base + "/search",
+                    params=attempt,
+                    timeout=self.registryValue("search_timeout", channel),
+                )
+                if response.status_code != 200:
+                    # 403 here usually means the json format is not enabled in settings.yml
+                    self.log.warning("SearXNG search error %s", response.status_code)
+                    return None
+                data = response.json()
+            except (requests.exceptions.RequestException, ValueError) as e:
+                self.log.warning("SearXNG search failed: %r", e)
                 return None
-            data = response.json()
-        except (requests.exceptions.RequestException, ValueError) as e:
-            self.log.warning("SearXNG search failed: %r", e)
-            return None
-        results = self._search_results(data.get("results") if isinstance(data, dict) else None,
-                                       self.registryValue("search_results", channel),
-                                       self.registryValue("search_snippet_length", channel))
+            results = self._search_results(data.get("results") if isinstance(data, dict) else None,
+                                           limit, self.registryValue("search_snippet_length", channel))
+            if len(results) >= min(3, limit):
+                break
         return ("", results)
 
     def _search_allowed(self, irc, msg):

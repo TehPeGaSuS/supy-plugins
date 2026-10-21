@@ -164,6 +164,31 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual(get.call_args[0][0], 'http://127.0.0.1:8888/search')
         self.assertEqual(get.call_args[1]['params']['format'], 'json')
 
+    def testSearxngRecentRange(self):
+        three = _response(200, {'results': [
+            {'title': 'Marquez wins Japanese MotoGP', 'url': 'https://example.com/%d' % i, 'content': ''}
+            for i in range(3)]})
+        with conf.supybot.plugins.Pollinations.tavily_api_key.context(''), \
+                patch.object(self.plugin.session, 'post', return_value=_chat_response('Marquez.')), \
+                patch.object(self.plugin.session, 'get', return_value=three) as get:
+            self.assertResponse('pollinations search who won the last MotoGP?', '[S] Marquez. | https://example.com/0')
+            self.assertEqual(get.call_count, 1)
+            self.assertEqual(get.call_args[1]['params']['time_range'], 'week')
+            get.reset_mock()
+            self.assertResponse('pollinations search who is Valentino Rossi', '[S] Marquez. | https://example.com/0')
+            self.assertNotIn('time_range', get.call_args[1]['params'])
+
+    def testSearxngRecentRangeWidensWhenThin(self):
+        one = _response(200, {'results': [{'title': 'Old', 'url': 'https://example.com/old', 'content': ''}]})
+        three = _response(200, {'results': [
+            {'title': 'R', 'url': 'https://example.com/%d' % i, 'content': ''} for i in range(3)]})
+        with conf.supybot.plugins.Pollinations.tavily_api_key.context(''), \
+                patch.object(self.plugin.session, 'post', return_value=_chat_response('Ok.')), \
+                patch.object(self.plugin.session, 'get', side_effect=[one, three]) as get:
+            self.assertResponse('pollinations search latest kernel', '[S] Ok. | https://example.com/0')
+        self.assertEqual(get.call_args_list[0][1]['params']['time_range'], 'week')
+        self.assertNotIn('time_range', get.call_args_list[1][1]['params'])
+
     def testAllBackendsFailRefundsDailyCount(self):
         with patch.object(self.plugin.session, 'post', return_value=_response(500, {})), \
                 patch.object(self.plugin.session, 'get', return_value=_response(403, {})):

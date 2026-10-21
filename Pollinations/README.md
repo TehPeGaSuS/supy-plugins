@@ -92,6 +92,8 @@ All settings can be configured per-channel using:
 | `tavily_answer` | "basic" | Tavily's own answer: `basic` (short) or `advanced` (longer); same credit cost |
 | `tavily_rewrite` | False | If True, ignore Tavily's answer and let `search_text_model` write one from the results |
 | `searxng_url` | "" | SearXNG base URL with the json format enabled, e.g. `http://127.0.0.1:8888` (global). Empty skips `searxng` |
+| `searxng_recent_range` | "week" | For questions with a `searxng_recent_words` word, SearXNG is asked for pages from this period first (`day`/`week`/`month`/`year`); fewer than 3 results → searched again without it. Empty disables |
+| `searxng_recent_words` | "last latest today yesterday tonight now current currently recent recently newest" | Words that trigger `searxng_recent_range` |
 | `search_text_model` | "openai-fast" | Model that writes answers from tavily/searxng results |
 | `search_text_fallback_model` | "gpt-oss" | Space-separated fallbacks for `search_text_model` |
 | `search_results` | 5 | Results asked from the backend |
