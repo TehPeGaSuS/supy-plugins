@@ -449,6 +449,33 @@ class Pollinations(callbacks.Plugin):
 
     chat = wrap(chat, ["text"])
 
+    def _shorten_url(self, url):
+        """Return the is.gd short URL, or the original URL if that fails."""
+        try:
+            shorten_response = self.session.post(
+                "https://is.gd/create.php",
+                data={"format": "simple", "url": url},
+                timeout=5,
+            )
+            if shorten_response.status_code == 200:
+                candidate = shorten_response.text.strip()
+                # is.gd returns the short URL on success, but on
+                # failure it returns 200 with an error message like
+                # "Error, database insert failed". Only use the
+                # candidate if it actually looks like a URL.
+                if candidate.lower().startswith("http"):
+                    return candidate
+                self.log.warning(
+                    f"URL shortener returned non-URL body: {candidate[:120]}"
+                )
+            else:
+                self.log.warning(
+                    f"URL shortener returned status {shorten_response.status_code}"
+                )
+        except Exception as e:
+            self.log.warning(f"URL shortener failed: {e}")
+        return url
+
     @staticmethod
     def _search_results(items, limit):
         """Keep (title, url, snippet) for results that have a URL."""
@@ -583,6 +610,8 @@ class Pollinations(callbacks.Plugin):
                 continue
             answer, results = found
             urls = [url for _title, url, _snippet in results[:self.registryValue("search_sources", msg.channel)]]
+            if self.registryValue("search_shorten_urls", msg.channel):
+                urls = [self._shorten_url(url) for url in urls]
             suffix = (" | " + " ".join(urls)) if urls else ""
             if answer:
                 self._send_reply(irc, msg, channel, answer, suffix)
@@ -689,32 +718,7 @@ class Pollinations(callbacks.Plugin):
             
             if not final_url.startswith("image://"):
                 # final_url is the image URL
-                display_url = final_url
-                if shorten_urls:
-                    try:
-                        shorten_response = self.session.post(
-                            "https://is.gd/create.php",
-                            data={"format": "simple", "url": display_url},
-                            timeout=5,
-                        )
-                        if shorten_response.status_code == 200:
-                            candidate = shorten_response.text.strip()
-                            # is.gd returns the short URL on success, but on
-                            # failure it returns 200 with an error message like
-                            # "Error, database insert failed". Only use the
-                            # candidate if it actually looks like a URL.
-                            if candidate.lower().startswith("http"):
-                                display_url = candidate
-                            else:
-                                self.log.warning(
-                                    f"URL shortener returned non-URL body: {candidate[:120]}"
-                                )
-                        else:
-                            self.log.warning(
-                                f"URL shortener returned status {shorten_response.status_code}"
-                            )
-                    except Exception as e:
-                        self.log.warning(f"URL shortener failed: {e}")
+                display_url = self._shorten_url(final_url) if shorten_urls else final_url
                 irc.reply(display_url, prefixNick=False)
             else:
                 # error sentinel

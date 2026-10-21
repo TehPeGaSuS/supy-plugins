@@ -70,6 +70,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         'supybot.plugins.Pollinations.searxng_url': 'http://127.0.0.1:8888/',
         'supybot.plugins.Pollinations.search_thinking': '',
         'supybot.plugins.Pollinations.search_cooldown': 0,
+        'supybot.plugins.Pollinations.search_shorten_urls': False,
         'supybot.plugins.Pollinations.context_lines': 0,
         'supybot.plugins.Pollinations.nick_include': False,
     }
@@ -167,6 +168,41 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
                 patch.object(self.plugin.session, 'post', return_value=tavily):
             self.assertResponse('pollinations search one', 'Yes.')
             self.assertRegexp('pollinations search two', r'^Please wait \d+s before searching again\.$')
+
+    def testShortensSourceUrl(self):
+        tavily = _response(200, {'answer': 'Yes.', 'results': [
+            {'title': 'Long', 'url': 'https://example.com/a/very/long/path', 'content': ''}]})
+        isgd = Mock(status_code=200, text='https://is.gd/abc123\n')
+
+        def post(url, **kwargs):
+            return isgd if 'is.gd' in url else tavily
+
+        with conf.supybot.plugins.Pollinations.search_shorten_urls.context(True), \
+                patch.object(self.plugin.session, 'post', side_effect=post):
+            self.assertResponse('pollinations search long', 'Yes. | https://is.gd/abc123')
+
+    def testHideSources(self):
+        tavily = _response(200, {'answer': 'Yes.', 'results': [
+            {'title': 'kernel.org', 'url': 'https://kernel.org/', 'content': ''}]})
+        with conf.supybot.plugins.Pollinations.search_sources.context(0), \
+                patch.object(self.plugin.session, 'post', return_value=tavily):
+            self.assertResponse('pollinations search kernel', 'Yes.')
+
+    def testLongAnswerSplitByMoresInstant(self):
+        answer = ' '.join(['word%d' % i for i in range(150)])
+        tavily = _response(200, {'answer': answer, 'results': []})
+        with conf.supybot.reply.mores.instant.context(3), \
+                patch.object(self.plugin.session, 'post', return_value=tavily):
+            replies = [self.getMsg('pollinations search long').args[1]]
+            m = self.irc.takeMsg()
+            while m is not None:
+                replies.append(m.args[1])
+                m = self.irc.takeMsg()
+        self.assertGreater(len(replies), 1)
+        joined = ' '.join(replies)
+        self.assertIn('word0', replies[0])
+        self.assertIn('word149', joined)
+        self.assertNotIn('more message', joined)
 
     def testSearchUsage(self):
         usage = _response(200, {'account': {'current_plan': 'Researcher',

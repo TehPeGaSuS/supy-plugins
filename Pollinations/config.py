@@ -270,6 +270,15 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Pollinations,
+    "search_shorten_urls",
+    registry.Boolean(
+        True,
+        _("""Shorten search source URLs with is.gd."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
     "search_timeout",
     registry.PositiveInteger(
         15,
