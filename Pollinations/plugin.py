@@ -363,8 +363,11 @@ class Pollinations(callbacks.Plugin):
             text_model = self.registryValue(model_setting, msg.channel)
             api_token = self.registryValue("api_token", msg.channel)
 
+            # Models do not know today's date; search answers in particular
+            # need it to tell live facts from stale page snapshots.
+            now = time.strftime("%A, %Y-%m-%d %H:%M UTC", time.gmtime())
             messages = [
-                {"role": "system", "content": prompt}
+                {"role": "system", "content": "%s\nCurrent date and time: %s." % (prompt, now)}
             ]
 
             if context:
@@ -703,9 +706,13 @@ class Pollinations(callbacks.Plugin):
             sources = "\n\n".join(
                 "[%d] %s (%s)\n%s" % (i, title, url, snippet)
                 for i, (title, url, snippet) in enumerate(results, 1))
-            extra = ("Web search results for the user's question, found just now:\n\n%s\n\n"
-                     "Answer only from these results. If they do not answer the question, "
-                     "say you could not find it. Do not write the [n] numbers." % sources)
+            extra = ("Web search results for the user's question. They are saved copies of "
+                     "pages and may be days old:\n\n%s\n\n"
+                     "For anything live, such as the current time or date somewhere, never "
+                     "use clocks or dates from these results: work it out from the current "
+                     "date and time given above (convert UTC to the place's time zone). "
+                     "Otherwise answer only from these results. If they do not answer the "
+                     "question, say you could not find it. Do not write the [n] numbers." % sources)
             self._chat(irc, msg, text, "search_text_model", "search_text_fallback_model",
                        "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix, tag=tag)
             return

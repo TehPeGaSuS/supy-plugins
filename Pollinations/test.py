@@ -124,6 +124,8 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         system = '\n'.join(m['content'] for m in chat['messages'] if m['role'] == 'system')
         self.assertIn('[1] kernel.org (https://kernel.org/)', system)
         self.assertIn('Latest stable: 6.17', system)
+        self.assertIn('Current date and time: %s' % time.strftime('%A, %Y-%m-%d', time.gmtime()), system)
+        self.assertIn('never use clocks or dates from these results', system)
 
     def testFallsBackToSearxng(self):
         searx = _response(200, {'results': [
