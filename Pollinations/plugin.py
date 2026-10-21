@@ -504,7 +504,18 @@ class Pollinations(callbacks.Plugin):
             with open(self._search_stats_path()) as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
-                stats.update({k: saved[k] for k in stats if k in saved})
+                # The file may be edited by hand: take counts written as
+                # "5" or 5.0, drop anything that is not a number.
+                for k in stats:
+                    if k not in saved:
+                        continue
+                    if k in ("day", "month"):
+                        stats[k] = str(saved[k]) if saved[k] else None
+                        continue
+                    try:
+                        stats[k] = max(0, int(float(saved[k])))
+                    except (TypeError, ValueError):
+                        self.log.warning("Ignoring bad %s in search stats: %r", k, saved[k])
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as e:

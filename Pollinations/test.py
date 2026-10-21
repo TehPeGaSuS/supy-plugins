@@ -280,6 +280,21 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual(saved['tavily_credits'], 1)
         self.assertEqual(saved['day'], time.strftime('%Y-%m-%d', time.gmtime()))
 
+    def testHandEditedStatsFile(self):
+        with open(self.plugin._search_stats_path(), 'w') as f:
+            f.write('{"day": "2026-10-21", "searches": "5", "capped": 5.0, "month": "2026-10",'
+                    ' "tavily_credits": "x", "tavily_searches": "5"}')
+        stats = self.plugin._load_search_stats()
+        self.assertEqual(stats, {'day': '2026-10-21', 'searches': 5, 'capped': 5, 'month': '2026-10',
+                                 'tavily_credits': 0, 'tavily_searches': 5})
+        # and a search on top of it counts normally
+        self.plugin._search_stats = stats
+        with self.plugin.dict_lock:
+            self.plugin._roll_search_stats()
+        tavily = _response(200, {'answer': 'Yes.', 'results': [], 'usage': {'credits': 1}})
+        with patch.object(self.plugin.session, 'post', return_value=tavily):
+            self.assertResponse('pollinations search one', '[T] Yes.')
+
     def testNewMonthResetsCredits(self):
         with self.plugin.dict_lock:
             self.plugin._search_stats.update(day='2000-01-31', searches=5, capped=5, month='2000-01',
