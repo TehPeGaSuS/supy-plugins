@@ -300,7 +300,7 @@ conf.registerGlobalValue(
     "search_daily_limit",
     registry.NonNegativeInteger(
         30,
-        _("""Maximum 'search' uses per UTC day across all channels (0 for no limit). 30 keeps Tavily's free 1000 credits/month."""),
+        _("""Maximum tavily and pollinations searches per UTC day across all channels (0 for no limit); once reached, those backends are skipped and searxng answers alone. 30 keeps Tavily's free 1000 credits/month."""),
     ),
 )
 

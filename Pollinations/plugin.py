@@ -497,7 +497,8 @@ class Pollinations(callbacks.Plugin):
         return conf.supybot.directories.data.dirize("Pollinations-search.json")
 
     def _load_search_stats(self):
-        stats = {"day": None, "searches": 0, "month": None,
+        # capped: today's searches on the backends search_daily_limit covers
+        stats = {"day": None, "searches": 0, "capped": 0, "month": None,
                  "tavily_credits": 0, "tavily_searches": 0}
         try:
             with open(self._search_stats_path()) as f:
@@ -525,7 +526,7 @@ class Pollinations(callbacks.Plugin):
         today, month = time.strftime("%Y-%m-%d", now), time.strftime("%Y-%m", now)
         stats = self._search_stats
         if stats["day"] != today:
-            stats["day"], stats["searches"] = today, 0
+            stats["day"], stats["searches"], stats["capped"] = today, 0, 0
         if stats["month"] != month:
             stats["month"], stats["tavily_credits"], stats["tavily_searches"] = month, 0, 0
 
@@ -541,6 +542,7 @@ class Pollinations(callbacks.Plugin):
             self._roll_search_stats()
             self._search_stats["tavily_credits"] += credits
             self._search_stats["tavily_searches"] += 1
+            self._search_stats["capped"] += 1
             self._save_search_stats()
 
     def _search_tavily(self, query, channel):
@@ -606,11 +608,10 @@ class Pollinations(callbacks.Plugin):
         return ("", results)
 
     def _search_allowed(self, irc, msg):
-        """Apply the per-user cooldown and the daily cap; reply and return
-        False when the search may not run. Counts the search when allowed."""
+        """Apply the per-user cooldown; reply and return False when the
+        search may not run. Counts the search when allowed."""
         now = time.time()
         cooldown = self.registryValue("search_cooldown", msg.channel)
-        limit = self.registryValue("search_daily_limit")
         with self.dict_lock:
             last = self._search_last.get(msg.prefix, 0)
             if cooldown and now - last < cooldown:
@@ -618,14 +619,18 @@ class Pollinations(callbacks.Plugin):
                 irc.reply("Please wait %ds before searching again." % wait, prefixNick=False)
                 return False
             self._roll_search_stats(now)
-            if limit and self._search_stats["searches"] >= limit:
-                irc.reply("Daily search limit reached (%d). It resets at 00:00 UTC." % limit, prefixNick=False)
-                return False
             self._search_stats["searches"] += 1
             self._save_search_stats()
             self._search_last = {k: v for k, v in self._search_last.items() if now - v < cooldown}
             self._search_last[msg.prefix] = now
         return True
+
+    def _search_capped(self):
+        """True when today's tavily/pollinations searches hit search_daily_limit."""
+        limit = self.registryValue("search_daily_limit")
+        with self.dict_lock:
+            self._roll_search_stats()
+            return bool(limit) and self._search_stats["capped"] >= limit
 
     def _search_refund(self):
         with self.dict_lock:
@@ -652,8 +657,17 @@ class Pollinations(callbacks.Plugin):
         if thinking:
             irc.queueMsg(ircmsgs.privmsg(channel, thinking))
 
+        capped = False
         for backend in backends:
+            # Tavily credits and paid search models count against the daily
+            # limit; SearXNG is free and only skipped when it fails.
+            if backend in ("tavily", "pollinations") and self._search_capped():
+                capped = True
+                continue
             if backend == "pollinations":
+                with self.dict_lock:
+                    self._search_stats["capped"] += 1
+                    self._save_search_stats()
                 self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", tag="[P] ")
                 return
             if backend == "tavily":
@@ -686,7 +700,11 @@ class Pollinations(callbacks.Plugin):
             return
 
         self._search_refund()
-        irc.reply("Web search is unavailable right now, please try again later.", prefixNick=False)
+        if capped:
+            irc.reply("Daily search limit reached (%d). It resets at 00:00 UTC."
+                      % self.registryValue("search_daily_limit"), prefixNick=False)
+        else:
+            irc.reply("Web search is unavailable right now, please try again later.", prefixNick=False)
 
     search = wrap(search, ["text"])
 
@@ -700,7 +718,10 @@ class Pollinations(callbacks.Plugin):
             self._roll_search_stats()
             stats = dict(self._search_stats)
         limit = self.registryValue("search_daily_limit")
-        parts = ["Today: %d/%s searches" % (stats["searches"], limit or "unlimited")]
+        capped_names = [b.capitalize() for b in self.registryValue("search_backend", msg.channel)
+                        if b.lower() in ("tavily", "pollinations")] or ["Tavily"]
+        parts = ["Today: %d searches, %d/%s %s" % (
+            stats["searches"], stats["capped"], limit or "unlimited", "+".join(capped_names))]
         key = self.registryValue("tavily_api_key")
         if key:
             parts.append("Tavily this month (bot): %s credits in %d searches" % (

@@ -80,7 +80,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         super().setUp()
         self.plugin = self.irc.getCallback('Pollinations')
         with self.plugin.dict_lock:
-            self.plugin._search_stats = {'day': None, 'searches': 0, 'month': None,
+            self.plugin._search_stats = {'day': None, 'searches': 0, 'capped': 0, 'month': None,
                                          'tavily_credits': 0, 'tavily_searches': 0}
 
     def testTavilyAnswerWithSource(self):
@@ -158,11 +158,39 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         post.assert_not_called()
         get.assert_not_called()
 
-    def testDailyLimit(self):
+    def testDailyLimitSkipsTavilyForSearxng(self):
+        tavily = _response(200, {'answer': 'Yes.', 'results': []})
+        searx = _response(200, {'results': [
+            {'title': 'Limnoria', 'url': 'https://limnoria.net/', 'content': 'A Python IRC bot'}]})
+
+        def post(url, **kwargs):
+            return tavily if 'tavily' in url else _chat_response('From SearXNG.')
+
+        with conf.supybot.plugins.Pollinations.search_daily_limit.context(1), \
+                patch.object(self.plugin.session, 'post', side_effect=post) as posted, \
+                patch.object(self.plugin.session, 'get', return_value=searx):
+            self.assertResponse('pollinations search one', '[T] Yes.')
+            self.assertResponse('pollinations search two', '[S] From SearXNG. | https://limnoria.net/')
+            self.assertResponse('pollinations search three', '[S] From SearXNG. | https://limnoria.net/')
+        tavily_calls = [c for c in posted.call_args_list if 'tavily' in c[0][0]]
+        self.assertEqual(len(tavily_calls), 1)
+        self.assertEqual(self.plugin._search_stats['capped'], 1)
+        self.assertEqual(self.plugin._search_stats['searches'], 3)
+
+    def testDailyLimitWithSearxngDown(self):
         tavily = _response(200, {'answer': 'Yes.', 'results': []})
         with conf.supybot.plugins.Pollinations.search_daily_limit.context(1), \
-                patch.object(self.plugin.session, 'post', return_value=tavily):
+                patch.object(self.plugin.session, 'post', return_value=tavily), \
+                patch.object(self.plugin.session, 'get', return_value=_response(502, {})):
             self.assertResponse('pollinations search one', '[T] Yes.')
+            self.assertResponse('pollinations search two',
+                                'Daily search limit reached (1). It resets at 00:00 UTC.')
+
+    def testDailyLimitCoversPollinations(self):
+        with conf.supybot.plugins.Pollinations.search_daily_limit.context(1), \
+                conf.supybot.plugins.Pollinations.search_backend.context(['pollinations']), \
+                patch.object(self.plugin.session, 'post', return_value=_chat_response('Paid.')):
+            self.assertResponse('pollinations search one', '[P] Paid.')
             self.assertResponse('pollinations search two',
                                 'Daily search limit reached (1). It resets at 00:00 UTC.')
 
@@ -234,6 +262,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual(self.plugin._search_stats['tavily_credits'], 3)
         self.assertEqual(self.plugin._search_stats['tavily_searches'], 2)
         self.assertEqual(self.plugin._search_stats['searches'], 2)
+        self.assertEqual(self.plugin._search_stats['capped'], 2)
 
     def testFailedTavilyCostsNothing(self):
         with patch.object(self.plugin.session, 'post', return_value=_response(432, {})), \
@@ -253,21 +282,22 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
 
     def testNewMonthResetsCredits(self):
         with self.plugin.dict_lock:
-            self.plugin._search_stats.update(day='2000-01-31', searches=5, month='2000-01',
+            self.plugin._search_stats.update(day='2000-01-31', searches=5, capped=5, month='2000-01',
                                              tavily_credits=999, tavily_searches=999)
             self.plugin._roll_search_stats()
             stats = dict(self.plugin._search_stats)
-        self.assertEqual((stats['searches'], stats['tavily_credits'], stats['tavily_searches']), (0, 0, 0))
+        self.assertEqual((stats['searches'], stats['capped'], stats['tavily_credits'],
+                          stats['tavily_searches']), (0, 0, 0, 0))
 
     def testSearchUsage(self):
         with self.plugin.dict_lock:
             self.plugin._roll_search_stats()
-            self.plugin._search_stats.update(searches=2, tavily_credits=3, tavily_searches=2)
+            self.plugin._search_stats.update(searches=5, capped=2, tavily_credits=3, tavily_searches=2)
         usage = _response(200, {'account': {'current_plan': 'Researcher',
                                             'plan_usage': 150, 'plan_limit': 1000}})
         with patch.object(self.plugin.session, 'get', return_value=usage) as get:
             self.assertResponse('searchusage',
-                                'Today: 2/30 searches | Tavily this month (bot): 3 credits in 2 searches'
+                                'Today: 5 searches, 2/30 Tavily | Tavily this month (bot): 3 credits in 2 searches'
                                 ' | Tavily account: 150/1000 credits used (850 left, plan Researcher; may lag)')
         self.assertEqual(get.call_args[0][0], 'https://api.tavily.com/usage')
 

@@ -43,7 +43,7 @@ Answers using live web search. Backends are tried in the order of `search_backen
 - `searxng`: your own [SearXNG](https://docs.searxng.org) instance (free, no quota); `search_text_model` writes the answer from the results.
 - `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`). It replies itself, so put it last.
 
-Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Uses are capped per UTC day (`search_daily_limit`) and per user (`search_cooldown`); the daily count is saved in `data/Pollinations-search.json`, so it survives restarts.
+Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Tavily and Pollinations searches are capped per UTC day (`search_daily_limit`); after that SearXNG answers alone, uncapped since it is free. Each user also waits `search_cooldown` between searches. The counts are saved in `data/Pollinations-search.json`, so they survive restarts.
 
 Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per channel, default 1) is how many chunks are sent at once before `(N more messages)`, e.g. `config channel #chan supybot.reply.mores.instant 3`.  
 **Examples:**
@@ -93,7 +93,7 @@ All settings can be configured per-channel using:
 | `search_sources` | 1 | Source URLs appended to the answer (0 for none) |
 | `search_shorten_urls` | True | Shorten source URLs with is.gd |
 | `search_timeout` | 15 | Timeout in seconds for tavily/searxng requests |
-| `search_daily_limit` | 30 | Searches per UTC day across all channels (global, 0 for no limit). 30 fits Tavily's free plan |
+| `search_daily_limit` | 30 | Tavily + Pollinations searches per UTC day across all channels (global, 0 for no limit); SearXNG is not counted. 30 fits Tavily's free plan |
 | `search_cooldown` | 30 | Seconds between searches per user (0 to disable) |
 | `search_model` | "sonar" | Model for the `pollinations` backend (must support web search, see `models search`; paid) |
 | `search_prompt` | "You are answering on IRC. Use live web search… plain text only, no sources/URLs/markdown…" | Instructions for `search` only (e.g. no citations/markdown) |
