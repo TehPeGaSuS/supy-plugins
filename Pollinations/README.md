@@ -43,7 +43,7 @@ Answers using live web search. Backends are tried in the order of `search_backen
 - `searxng`: your own [SearXNG](https://docs.searxng.org) instance (free, no quota); `search_text_model` writes the answer from the results.
 - `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`). It replies itself, so put it last.
 
-Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Uses are capped per UTC day (`search_daily_limit`) and per user (`search_cooldown`); the daily count lives in memory and restarts with the bot.
+Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Uses are capped per UTC day (`search_daily_limit`) and per user (`search_cooldown`); the daily count is saved in `data/Pollinations-search.json`, so it survives restarts.
 
 Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per channel, default 1) is how many chunks are sent at once before `(N more messages)`, e.g. `config channel #chan supybot.reply.mores.instant 3`.  
 **Examples:**
@@ -53,7 +53,7 @@ Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per ch
 ### Search Usage
 `searchusage` (owner only)
 
-Shows today's search count and, with a Tavily key, the credits used and left on the Tavily plan (`https://api.tavily.com/usage`). Tavily updates that count with a delay, so recent searches may not show yet; the `Today` count is the bot's own, live.
+Shows today's search count and, with a Tavily key, the Tavily credits the bot spent this month (counted from each response's `usage`, saved on disk, reset on the 1st UTC) and the account usage from `https://api.tavily.com/usage`. Tavily's own count lags behind, so the bot's count is the live one; it misses credits spent elsewhere with the same key (playground, other scripts).
 
 ### List Available Models
 `models [text|image|search] [low|med|high]`
@@ -83,7 +83,8 @@ All settings can be configured per-channel using:
 | `search_enabled` | True | Set to False to disable `search` (per channel or globally) |
 | `search_backend` | "tavily searxng" | Backends tried in order: `tavily`, `searxng`, `pollinations` (paid, last) |
 | `tavily_api_key` | "" | Tavily API key (global, private). Empty skips `tavily` |
-| `tavily_depth` | "basic" | `basic` (1 credit) or `advanced` (2 credits) |
+| `tavily_depth` | "basic" | `basic`, `fast`, `ultra-fast` (1 credit) or `advanced` (2 credits) |
+| `tavily_answer` | "basic" | Tavily's own answer: `basic` (short) or `advanced` (longer); same credit cost |
 | `tavily_rewrite` | False | If True, ignore Tavily's answer and let `search_text_model` write one from the results |
 | `searxng_url` | "" | SearXNG base URL with the json format enabled, e.g. `http://127.0.0.1:8888` (global). Empty skips `searxng` |
 | `search_text_model` | "openai-fast" | Model that writes answers from tavily/searxng results |

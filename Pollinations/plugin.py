@@ -6,6 +6,7 @@ import requests
 import random
 import time
 import os
+import json
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from collections import deque
@@ -59,7 +60,9 @@ class Pollinations(callbacks.Plugin):
         self._drop_notice_interval = 30
         self._text_models_cache = None  # (timestamp, set_of_names) or None
         self._text_models_cache_ttl = 600  # 10 minutes
-        self._search_day = (None, 0)  # (UTC date string, searches that day)
+        # Daily search count and the Tavily credits the bot spent this month,
+        # kept on disk so a restart does not reset them.
+        self._search_stats = self._load_search_stats()
         self._search_last = {}  # hostmask -> time of last search
 
         
@@ -489,17 +492,72 @@ class Pollinations(callbacks.Plugin):
                 ))
         return results[:limit]
 
+    @staticmethod
+    def _search_stats_path():
+        return conf.supybot.directories.data.dirize("Pollinations-search.json")
+
+    def _load_search_stats(self):
+        stats = {"day": None, "searches": 0, "month": None,
+                 "tavily_credits": 0, "tavily_searches": 0}
+        try:
+            with open(self._search_stats_path()) as f:
+                saved = json.load(f)
+            if isinstance(saved, dict):
+                stats.update({k: saved[k] for k in stats if k in saved})
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as e:
+            self.log.warning("Could not read search stats: %r", e)
+        return stats
+
+    def _save_search_stats(self):
+        """Write the stats; the caller holds dict_lock."""
+        try:
+            f = utils.file.AtomicFile(self._search_stats_path())
+            f.write(json.dumps(self._search_stats))
+            f.close()
+        except OSError as e:
+            self.log.warning("Could not save search stats: %r", e)
+
+    def _roll_search_stats(self, now=None):
+        """Start a new day or month in the stats; the caller holds dict_lock."""
+        now = time.gmtime(now)
+        today, month = time.strftime("%Y-%m-%d", now), time.strftime("%Y-%m", now)
+        stats = self._search_stats
+        if stats["day"] != today:
+            stats["day"], stats["searches"] = today, 0
+        if stats["month"] != month:
+            stats["month"], stats["tavily_credits"], stats["tavily_searches"] = month, 0, 0
+
+    def _record_tavily(self, data, depth):
+        """Add the credits a Tavily search used to this month's count."""
+        credits = None
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if isinstance(usage, dict):
+            credits = usage.get("credits")
+        if not isinstance(credits, (int, float)):
+            credits = 2 if depth == "advanced" else 1
+        with self.dict_lock:
+            self._roll_search_stats()
+            self._search_stats["tavily_credits"] += credits
+            self._search_stats["tavily_searches"] += 1
+            self._save_search_stats()
+
     def _search_tavily(self, query, channel):
         """Return (answer, results) from Tavily, or None if it is unusable."""
         key = self.registryValue("tavily_api_key")
         if not key:
             return None
         want_answer = not self.registryValue("tavily_rewrite", channel)
+        depth = self.registryValue("tavily_depth", channel)
         payload = {
             "query": query,
-            "search_depth": self.registryValue("tavily_depth", channel),
+            "search_depth": depth,
             "max_results": self.registryValue("search_results", channel),
-            "include_answer": want_answer,
+            "include_answer": self.registryValue("tavily_answer", channel) if want_answer else False,
+            # Reports the credits this request used, so the bot can count them
+            # instead of waiting for Tavily's /usage, which lags behind.
+            "include_usage": True,
         }
         try:
             response = self.session.post(
@@ -516,6 +574,7 @@ class Pollinations(callbacks.Plugin):
         except (requests.exceptions.RequestException, ValueError) as e:
             self.log.warning("Tavily search failed: %r", e)
             return None
+        self._record_tavily(data, depth)
         answer = ""
         if want_answer and isinstance(data, dict):
             answer = (data.get("answer") or "").strip()
@@ -550,7 +609,6 @@ class Pollinations(callbacks.Plugin):
         """Apply the per-user cooldown and the daily cap; reply and return
         False when the search may not run. Counts the search when allowed."""
         now = time.time()
-        today = time.strftime("%Y-%m-%d", time.gmtime(now))
         cooldown = self.registryValue("search_cooldown", msg.channel)
         limit = self.registryValue("search_daily_limit")
         with self.dict_lock:
@@ -559,21 +617,20 @@ class Pollinations(callbacks.Plugin):
                 wait = int(cooldown - (now - last)) + 1
                 irc.reply("Please wait %ds before searching again." % wait, prefixNick=False)
                 return False
-            day, count = self._search_day
-            if day != today:
-                count = 0
-            if limit and count >= limit:
+            self._roll_search_stats(now)
+            if limit and self._search_stats["searches"] >= limit:
                 irc.reply("Daily search limit reached (%d). It resets at 00:00 UTC." % limit, prefixNick=False)
                 return False
-            self._search_day = (today, count + 1)
+            self._search_stats["searches"] += 1
+            self._save_search_stats()
             self._search_last = {k: v for k, v in self._search_last.items() if now - v < cooldown}
             self._search_last[msg.prefix] = now
         return True
 
     def _search_refund(self):
         with self.dict_lock:
-            day, count = self._search_day
-            self._search_day = (day, max(0, count - 1))
+            self._search_stats["searches"] = max(0, self._search_stats["searches"] - 1)
+            self._save_search_stats()
 
     def search(self, irc, msg, args, text):
         """<query>
@@ -636,15 +693,18 @@ class Pollinations(callbacks.Plugin):
     def searchusage(self, irc, msg, args):
         """takes no arguments
 
-        Shows today's search count and the Tavily credits left this month.
+        Shows today's search count, the Tavily credits the bot spent this
+        month and the Tavily account usage.
         """
-        day, count = self._search_day
-        if day != time.strftime("%Y-%m-%d", time.gmtime()):
-            count = 0
+        with self.dict_lock:
+            self._roll_search_stats()
+            stats = dict(self._search_stats)
         limit = self.registryValue("search_daily_limit")
-        parts = ["Today: %d/%s searches" % (count, limit or "unlimited")]
+        parts = ["Today: %d/%s searches" % (stats["searches"], limit or "unlimited")]
         key = self.registryValue("tavily_api_key")
         if key:
+            parts.append("Tavily this month (bot): %s credits in %d searches" % (
+                stats["tavily_credits"], stats["tavily_searches"]))
             try:
                 response = self.session.get(
                     "https://api.tavily.com/usage",
@@ -657,10 +717,10 @@ class Pollinations(callbacks.Plugin):
                 account = None
             if isinstance(account, dict) and account.get("plan_limit") is not None:
                 used, total = account.get("plan_usage") or 0, account["plan_limit"]
-                parts.append("Tavily: %s/%s credits used (%s left, plan %s; Tavily's count may lag)" % (
+                parts.append("Tavily account: %s/%s credits used (%s left, plan %s; may lag)" % (
                     used, total, total - used, account.get("current_plan") or "?"))
             else:
-                parts.append("Tavily: usage unavailable")
+                parts.append("Tavily account: usage unavailable")
         irc.reply(" | ".join(parts), prefixNick=False)
 
     searchusage = wrap(searchusage, ["owner"])

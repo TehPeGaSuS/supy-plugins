@@ -30,6 +30,7 @@
 
 from supybot.test import *
 from unittest.mock import Mock, patch
+import time
 
 
 class PollinationsTestCase(PluginTestCase):
@@ -78,7 +79,9 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
     def setUp(self):
         super().setUp()
         self.plugin = self.irc.getCallback('Pollinations')
-        self.plugin._search_day = (None, 0)
+        with self.plugin.dict_lock:
+            self.plugin._search_stats = {'day': None, 'searches': 0, 'month': None,
+                                         'tavily_credits': 0, 'tavily_searches': 0}
 
     def testTavilyAnswerWithSource(self):
         tavily = _response(200, {
@@ -95,7 +98,8 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual(kwargs['headers']['Authorization'], 'Bearer tvly-test')
         self.assertEqual(kwargs['json']['query'], 'latest kernel')
         self.assertEqual(kwargs['json']['search_depth'], 'basic')
-        self.assertTrue(kwargs['json']['include_answer'])
+        self.assertEqual(kwargs['json']['include_answer'], 'basic')
+        self.assertTrue(kwargs['json']['include_usage'])
 
     def testTavilyRewriteUsesTextModel(self):
         tavily = _response(200, {
@@ -142,7 +146,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
                 patch.object(self.plugin.session, 'get', return_value=_response(403, {})):
             self.assertResponse('pollinations search anything',
                                 'Web search is unavailable right now, please try again later.')
-        self.assertEqual(self.plugin._search_day[1], 0)
+        self.assertEqual(self.plugin._search_stats['searches'], 0)
 
     def testEmptyKeyAndUrlSkipBackends(self):
         with conf.supybot.plugins.Pollinations.tavily_api_key.context(''), \
@@ -210,13 +214,61 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
             self.assertResponse('pollinations search kernel', '[P] Paid answer.')
         self.assertEqual(post.call_args[1]['json']['model'], 'sonar')
 
+    def testTavilyAnswerAdvanced(self):
+        tavily = _response(200, {'answer': 'Long answer.', 'results': []})
+        with conf.supybot.plugins.Pollinations.tavily_answer.context('advanced'), \
+                patch.object(self.plugin.session, 'post', return_value=tavily) as post:
+            self.assertResponse('pollinations search x', '[T] Long answer.')
+        self.assertEqual(post.call_args[1]['json']['include_answer'], 'advanced')
+        self.assertEqual(post.call_args[1]['json']['search_depth'], 'basic')
+
+    def testTavilyCreditsCounted(self):
+        reported = _response(200, {'answer': 'Yes.', 'results': [], 'usage': {'credits': 1}})
+        unreported = _response(200, {'answer': 'Yes.', 'results': []})
+        with patch.object(self.plugin.session, 'post', return_value=reported):
+            self.assertResponse('pollinations search one', '[T] Yes.')
+        # Without a usage field the depth decides: advanced costs 2
+        with conf.supybot.plugins.Pollinations.tavily_depth.context('advanced'), \
+                patch.object(self.plugin.session, 'post', return_value=unreported):
+            self.assertResponse('pollinations search two', '[T] Yes.')
+        self.assertEqual(self.plugin._search_stats['tavily_credits'], 3)
+        self.assertEqual(self.plugin._search_stats['tavily_searches'], 2)
+        self.assertEqual(self.plugin._search_stats['searches'], 2)
+
+    def testFailedTavilyCostsNothing(self):
+        with patch.object(self.plugin.session, 'post', return_value=_response(432, {})), \
+                patch.object(self.plugin.session, 'get', return_value=_response(403, {})):
+            self.assertResponse('pollinations search x',
+                                'Web search is unavailable right now, please try again later.')
+        self.assertEqual(self.plugin._search_stats['tavily_credits'], 0)
+
+    def testSearchStatsPersist(self):
+        tavily = _response(200, {'answer': 'Yes.', 'results': [], 'usage': {'credits': 1}})
+        with patch.object(self.plugin.session, 'post', return_value=tavily):
+            self.assertResponse('pollinations search one', '[T] Yes.')
+        saved = self.plugin._load_search_stats()
+        self.assertEqual(saved['searches'], 1)
+        self.assertEqual(saved['tavily_credits'], 1)
+        self.assertEqual(saved['day'], time.strftime('%Y-%m-%d', time.gmtime()))
+
+    def testNewMonthResetsCredits(self):
+        with self.plugin.dict_lock:
+            self.plugin._search_stats.update(day='2000-01-31', searches=5, month='2000-01',
+                                             tavily_credits=999, tavily_searches=999)
+            self.plugin._roll_search_stats()
+            stats = dict(self.plugin._search_stats)
+        self.assertEqual((stats['searches'], stats['tavily_credits'], stats['tavily_searches']), (0, 0, 0))
+
     def testSearchUsage(self):
+        with self.plugin.dict_lock:
+            self.plugin._roll_search_stats()
+            self.plugin._search_stats.update(searches=2, tavily_credits=3, tavily_searches=2)
         usage = _response(200, {'account': {'current_plan': 'Researcher',
                                             'plan_usage': 150, 'plan_limit': 1000}})
         with patch.object(self.plugin.session, 'get', return_value=usage) as get:
             self.assertResponse('searchusage',
-                                'Today: 0/30 searches | Tavily: 150/1000 credits used '
-                                "(850 left, plan Researcher; Tavily's count may lag)")
+                                'Today: 2/30 searches | Tavily this month (bot): 3 credits in 2 searches'
+                                ' | Tavily account: 150/1000 credits used (850 left, plan Researcher; may lag)')
         self.assertEqual(get.call_args[0][0], 'https://api.tavily.com/usage')
 
 

@@ -210,7 +210,16 @@ conf.registerChannelValue(
     "tavily_depth",
     registry.String(
         "basic",
-        _("""Tavily search_depth: basic (1 credit) or advanced (2 credits)."""),
+        _("""Tavily search_depth: basic, fast or ultra-fast (1 credit) or advanced (2 credits)."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "tavily_answer",
+    registry.String(
+        "basic",
+        _("""Length of Tavily's own answer: basic (short) or advanced (more detailed, longer). Does not change the credit cost."""),
     ),
 )
 
