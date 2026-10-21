@@ -137,7 +137,7 @@ conf.registerChannelValue(
     "search_enabled",
     registry.Boolean(
         True,
-        _("""Enable the 'search' command. Search models are paid, so turn this off to stop all search spending."""),
+        _("""Enable the 'search' command. Turn this off to stop all search spending."""),
     ),
 )
 
@@ -146,7 +146,7 @@ conf.registerChannelValue(
     "search_model",
     registry.String(
         "sonar",
-        _("""Model used by the 'search' command for live web search. Must support web_search (see 'models search'); requires an API token."""),
+        _("""Model used by the 'pollinations' search backend. Must support web_search (see 'models search'); paid, requires an API token."""),
     ),
 )
 
@@ -183,6 +183,115 @@ conf.registerChannelValue(
     registry.String(
         "gemini-search",
         _("""Space-separated fallback models for the 'search' command if search_model fails"""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_backend",
+    registry.SpaceSeparatedListOfStrings(
+        ["tavily", "searxng"],
+        _("""Backends tried in order by 'search': tavily, searxng, pollinations. tavily and searxng do the search for free; pollinations uses the paid search_model and, since it replies itself, only makes sense last."""),
+    ),
+)
+
+conf.registerGlobalValue(
+    Pollinations,
+    "tavily_api_key",
+    registry.String(
+        "",
+        _("""Tavily API key (tvly-...). Empty skips the tavily backend."""),
+        private=True,
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "tavily_depth",
+    registry.String(
+        "basic",
+        _("""Tavily search_depth: basic (1 credit) or advanced (2 credits)."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "tavily_rewrite",
+    registry.Boolean(
+        False,
+        _("""If off, reply with Tavily's own short answer. If on, ignore it and have search_text_model write the answer from the results (bot voice, costs one text call)."""),
+    ),
+)
+
+conf.registerGlobalValue(
+    Pollinations,
+    "searxng_url",
+    registry.String(
+        "",
+        _("""Base URL of a SearXNG instance with the json format enabled, e.g. http://127.0.0.1:8888. Empty skips the searxng backend."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_text_model",
+    registry.String(
+        "openai-fast",
+        _("""Text model that writes the answer from tavily/searxng results."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_text_fallback_model",
+    registry.String(
+        "gpt-oss",
+        _("""Space-separated fallback models for search_text_model"""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_results",
+    registry.PositiveInteger(
+        5,
+        _("""How many results to ask the search backend for."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_sources",
+    registry.NonNegativeInteger(
+        1,
+        _("""How many source URLs to append to a tavily/searxng answer (0 for none)."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_timeout",
+    registry.PositiveInteger(
+        15,
+        _("""Timeout in seconds for tavily/searxng requests"""),
+    ),
+)
+
+conf.registerGlobalValue(
+    Pollinations,
+    "search_daily_limit",
+    registry.NonNegativeInteger(
+        30,
+        _("""Maximum 'search' uses per UTC day across all channels (0 for no limit). 30 keeps Tavily's free 1000 credits/month."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
+    "search_cooldown",
+    registry.NonNegativeInteger(
+        30,
+        _("""Seconds a user must wait between 'search' uses (0 to disable)."""),
     ),
 )
 

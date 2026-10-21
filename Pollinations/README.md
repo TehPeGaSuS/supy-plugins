@@ -38,10 +38,20 @@ Generate images from text descriptions.
 ### Live Web Search
 `search <query>`
 
-Answers using live web search. Runs on a search-capable model (`search_model`, falling back to `search_fallback_model`). Requires an API token: all search models are paid-only.  
+Answers using live web search. Backends are tried in the order of `search_backend`:
+- `tavily`: [Tavily](https://tavily.com) search (free plan: 1000 credits/month, 1 per basic search). Replies with Tavily's own short answer, or with `tavily_rewrite` on, `search_text_model` writes it from the results.
+- `searxng`: your own [SearXNG](https://docs.searxng.org) instance (free, no quota); `search_text_model` writes the answer from the results.
+- `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`). It replies itself, so put it last.
+
+Answers from tavily/searxng end with `search_sources` source URLs. Uses are capped per UTC day (`search_daily_limit`) and per user (`search_cooldown`); the daily count lives in memory and restarts with the bot.  
 **Examples:**
 `search latest stable Linux kernel version`
 `search who won the match last night`
+
+### Search Usage
+`searchusage` (owner only)
+
+Shows today's search count and, with a Tavily key, the credits used and left on the Tavily plan (`https://api.tavily.com/usage`).
 
 ### List Available Models
 `models [text|image|search] [low|med|high]`
@@ -68,8 +78,20 @@ All settings can be configured per-channel using:
 | `prompt` | "You are $botnick the IRC bot. Be brief, helpful" | System prompt for the AI ($botnick = bot's nickname) |
 | `text_model` | "openai" | Primary text model for chat completions (see [Recommended models](#recommended-models)) |
 | `text_fallback_model` | "openai-fast" | Space-separated list of fallback models tried when the primary fails persistently (429/5xx) |
-| `search_enabled` | True | Set to False to disable `search` (per channel or globally). Search models are paid |
-| `search_model` | "sonar" | Model used by the `search` command (must support web search, see `models search`) |
+| `search_enabled` | True | Set to False to disable `search` (per channel or globally) |
+| `search_backend` | "tavily searxng" | Backends tried in order: `tavily`, `searxng`, `pollinations` (paid, last) |
+| `tavily_api_key` | "" | Tavily API key (global, private). Empty skips `tavily` |
+| `tavily_depth` | "basic" | `basic` (1 credit) or `advanced` (2 credits) |
+| `tavily_rewrite` | False | If True, ignore Tavily's answer and let `search_text_model` write one from the results |
+| `searxng_url` | "" | SearXNG base URL with the json format enabled, e.g. `http://127.0.0.1:8888` (global). Empty skips `searxng` |
+| `search_text_model` | "openai-fast" | Model that writes answers from tavily/searxng results |
+| `search_text_fallback_model` | "gpt-oss" | Space-separated fallbacks for `search_text_model` |
+| `search_results` | 5 | Results asked from the backend |
+| `search_sources` | 1 | Source URLs appended to the answer (0 for none) |
+| `search_timeout` | 15 | Timeout in seconds for tavily/searxng requests |
+| `search_daily_limit` | 30 | Searches per UTC day across all channels (global, 0 for no limit). 30 fits Tavily's free plan |
+| `search_cooldown` | 30 | Seconds between searches per user (0 to disable) |
+| `search_model` | "sonar" | Model for the `pollinations` backend (must support web search, see `models search`; paid) |
 | `search_prompt` | "You are answering on IRC. Use live web search… plain text only, no sources/URLs/markdown…" | Instructions for `search` only (e.g. no citations/markdown) |
 | `search_use_prompt` | False | If True, `search` also uses the main `prompt` (personality) before `search_prompt`; if False only `search_prompt` is used |
 | `search_thinking` | "Thinking..." | Line sent before a `search` answer; empty disables |

@@ -59,7 +59,9 @@ class Pollinations(callbacks.Plugin):
         self._drop_notice_interval = 30
         self._text_models_cache = None  # (timestamp, set_of_names) or None
         self._text_models_cache_ttl = 600  # 10 minutes
-        
+        self._search_day = (None, 0)  # (UTC date string, searches that day)
+        self._search_last = {}  # hostmask -> time of last search
+
         
     def doPrivmsg(self, irc, msg):
         if not irc.isChannel(msg.channel):
@@ -293,7 +295,24 @@ class Pollinations(callbacks.Plugin):
         content = re.sub(r"[ \t]{2,}", " ", content)
         return content.strip()
 
-    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None):
+    def _send_reply(self, irc, msg, channel, content, suffix=""):
+        content = self._clean_markdown(content)
+        if self.registryValue("nick_strip", msg.channel):
+            content = re.sub(r"^%s: " % (irc.nick), "", content)
+        content = content.rstrip() + suffix
+
+        prefix = self.registryValue("nick_prefix", msg.channel)
+        if self.registryValue("reply_intact", msg.channel):
+            for line in content.splitlines():
+                if line:
+                    text = "%s: %s" % (msg.nick, line) if prefix else line
+                    irc.queueMsg(ircmsgs.privmsg(channel, text))
+        else:
+            response_text = " ".join(content.splitlines())
+            text = "%s: %s" % (msg.nick, response_text) if prefix else response_text
+            irc.reply(text, prefixNick=False, to=channel)
+
+    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix=""):
         channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         
         if not self.active_requests.acquire(blocking=False):
@@ -348,6 +367,9 @@ class Pollinations(callbacks.Plugin):
             if context:
                 messages.append({"role": "system", "content": f"Recent conversation:\n{context}"})
 
+            if extra_system:
+                messages.append({"role": "system", "content": extra_system})
+
             messages.append({"role": "user", "content": text})
 
             # --- primary attempt ---
@@ -399,21 +421,7 @@ class Pollinations(callbacks.Plugin):
                 irc.reply("The AI service is currently unavailable, please try again in a moment.", prefixNick=False)
                 return
 
-            # --- format and send reply ---
-            content = self._clean_markdown(content)
-            if self.registryValue("nick_strip", msg.channel):
-                content = re.sub(r"^%s: " % (irc.nick), "", content)
-
-            prefix = self.registryValue("nick_prefix", msg.channel)
-            if self.registryValue("reply_intact", msg.channel):
-                for line in content.splitlines():
-                    if line:
-                        text = "%s: %s" % (msg.nick, line) if prefix else line
-                        irc.queueMsg(ircmsgs.privmsg(channel, text))
-            else:
-                response_text = " ".join(content.splitlines())
-                text = "%s: %s" % (msg.nick, response_text) if prefix else response_text
-                irc.reply(text, prefixNick=False, to=channel)
+            self._send_reply(irc, msg, channel, content, suffix)
 
             with self.dict_lock:
                 self.last_reply_time[msg.channel] = time.time()
@@ -441,17 +449,190 @@ class Pollinations(callbacks.Plugin):
 
     chat = wrap(chat, ["text"])
 
+    @staticmethod
+    def _search_results(items, limit):
+        """Keep (title, url, snippet) for results that have a URL."""
+        results = []
+        for item in items or []:
+            if isinstance(item, dict) and item.get("url"):
+                results.append((
+                    (item.get("title") or "").strip(),
+                    item["url"],
+                    " ".join((item.get("content") or "").split())[:400],
+                ))
+        return results[:limit]
+
+    def _search_tavily(self, query, channel):
+        """Return (answer, results) from Tavily, or None if it is unusable."""
+        key = self.registryValue("tavily_api_key")
+        if not key:
+            return None
+        want_answer = not self.registryValue("tavily_rewrite", channel)
+        payload = {
+            "query": query,
+            "search_depth": self.registryValue("tavily_depth", channel),
+            "max_results": self.registryValue("search_results", channel),
+            "include_answer": want_answer,
+        }
+        try:
+            response = self.session.post(
+                "https://api.tavily.com/search",
+                json=payload,
+                headers={"Authorization": "Bearer %s" % key},
+                timeout=self.registryValue("search_timeout", channel),
+            )
+            if response.status_code != 200:
+                # 432/433 mean the monthly plan or pay-as-you-go limit is used up
+                self.log.warning("Tavily search error %s: %s", response.status_code, response.text[:200])
+                return None
+            data = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.log.warning("Tavily search failed: %r", e)
+            return None
+        answer = ""
+        if want_answer and isinstance(data, dict):
+            answer = (data.get("answer") or "").strip()
+        results = self._search_results(data.get("results") if isinstance(data, dict) else None,
+                                       self.registryValue("search_results", channel))
+        return (answer, results)
+
+    def _search_searxng(self, query, channel):
+        """Return ("", results) from SearXNG, or None if it is unusable."""
+        base = self.registryValue("searxng_url").strip().rstrip("/")
+        if not base:
+            return None
+        try:
+            response = self.session.get(
+                base + "/search",
+                params={"q": query, "format": "json", "categories": "general"},
+                timeout=self.registryValue("search_timeout", channel),
+            )
+            if response.status_code != 200:
+                # 403 here usually means the json format is not enabled in settings.yml
+                self.log.warning("SearXNG search error %s", response.status_code)
+                return None
+            data = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.log.warning("SearXNG search failed: %r", e)
+            return None
+        results = self._search_results(data.get("results") if isinstance(data, dict) else None,
+                                       self.registryValue("search_results", channel))
+        return ("", results)
+
+    def _search_allowed(self, irc, msg):
+        """Apply the per-user cooldown and the daily cap; reply and return
+        False when the search may not run. Counts the search when allowed."""
+        now = time.time()
+        today = time.strftime("%Y-%m-%d", time.gmtime(now))
+        cooldown = self.registryValue("search_cooldown", msg.channel)
+        limit = self.registryValue("search_daily_limit")
+        with self.dict_lock:
+            last = self._search_last.get(msg.prefix, 0)
+            if cooldown and now - last < cooldown:
+                wait = int(cooldown - (now - last)) + 1
+                irc.reply("Please wait %ds before searching again." % wait, prefixNick=False)
+                return False
+            day, count = self._search_day
+            if day != today:
+                count = 0
+            if limit and count >= limit:
+                irc.reply("Daily search limit reached (%d). It resets at 00:00 UTC." % limit, prefixNick=False)
+                return False
+            self._search_day = (today, count + 1)
+            self._search_last = {k: v for k, v in self._search_last.items() if now - v < cooldown}
+            self._search_last[msg.prefix] = now
+        return True
+
+    def _search_refund(self):
+        with self.dict_lock:
+            day, count = self._search_day
+            self._search_day = (day, max(0, count - 1))
+
     def search(self, irc, msg, args, text):
         """<query>
-        Answer a question using live web search (needs a search-capable
-        model, see 'models search'). Example: search who won the match today
+        Answer a question using live web search (see the search_backend
+        setting). Example: search who won the match today
         """
+        channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         if not self.registryValue("search_enabled", msg.channel):
             irc.reply("Search is disabled.", prefixNick=False)
             return
-        self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", "search_thinking")
+        backends = [b.lower() for b in self.registryValue("search_backend", msg.channel)]
+        if not backends:
+            irc.reply("No search backend is configured.", prefixNick=False)
+            return
+        if not self._search_allowed(irc, msg):
+            return
+
+        thinking = self.registryValue("search_thinking", msg.channel).strip()
+        if thinking:
+            irc.queueMsg(ircmsgs.privmsg(channel, thinking))
+
+        for backend in backends:
+            if backend == "pollinations":
+                self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt")
+                return
+            if backend == "tavily":
+                found = self._search_tavily(text, msg.channel)
+            elif backend == "searxng":
+                found = self._search_searxng(text, msg.channel)
+            else:
+                self.log.warning("Unknown search backend: %s", backend)
+                continue
+            if not found or not (found[0] or found[1]):
+                continue
+            answer, results = found
+            urls = [url for _title, url, _snippet in results[:self.registryValue("search_sources", msg.channel)]]
+            suffix = (" | " + " ".join(urls)) if urls else ""
+            if answer:
+                self._send_reply(irc, msg, channel, answer, suffix)
+                return
+            sources = "\n\n".join(
+                "[%d] %s (%s)\n%s" % (i, title, url, snippet)
+                for i, (title, url, snippet) in enumerate(results, 1))
+            extra = ("Web search results for the user's question, found just now:\n\n%s\n\n"
+                     "Answer only from these results. If they do not answer the question, "
+                     "say you could not find it. Do not write the [n] numbers." % sources)
+            self._chat(irc, msg, text, "search_text_model", "search_text_fallback_model",
+                       "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix)
+            return
+
+        self._search_refund()
+        irc.reply("Web search is unavailable right now, please try again later.", prefixNick=False)
 
     search = wrap(search, ["text"])
+
+    def searchusage(self, irc, msg, args):
+        """takes no arguments
+
+        Shows today's search count and the Tavily credits left this month.
+        """
+        day, count = self._search_day
+        if day != time.strftime("%Y-%m-%d", time.gmtime()):
+            count = 0
+        limit = self.registryValue("search_daily_limit")
+        parts = ["Today: %d/%s searches" % (count, limit or "unlimited")]
+        key = self.registryValue("tavily_api_key")
+        if key:
+            try:
+                response = self.session.get(
+                    "https://api.tavily.com/usage",
+                    headers={"Authorization": "Bearer %s" % key}, timeout=10)
+                account = None
+                if response.status_code == 200:
+                    account = response.json().get("account")
+            except (requests.exceptions.RequestException, ValueError, AttributeError) as e:
+                self.log.warning("Tavily usage failed: %r", e)
+                account = None
+            if isinstance(account, dict) and account.get("plan_limit") is not None:
+                used, total = account.get("plan_usage") or 0, account["plan_limit"]
+                parts.append("Tavily: %s/%s credits used (%s left, plan %s)" % (
+                    used, total, total - used, account.get("current_plan") or "?"))
+            else:
+                parts.append("Tavily: usage unavailable")
+        irc.reply(" | ".join(parts), prefixNick=False)
+
+    searchusage = wrap(searchusage, ["owner"])
 
     def image(self, irc, msg, args, text):
         """Generate image from text prompt using Pollinations.ai"""
