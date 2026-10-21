@@ -148,6 +148,32 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
             system = '\n'.join(m['content'] for m in calls[1]['json']['messages'] if m['role'] == 'system')
             self.assertIn('TAIL', system)
 
+    def testReasoningEffortSentAndDroppedOn400(self):
+        tavily = _response(200, {'results': [{'title': 'T', 'url': 'https://example.com/', 'content': 'x'}]})
+        chats = []
+
+        def post(url, **kwargs):
+            if 'tavily' in url:
+                return tavily
+            chats.append(dict(kwargs['json']))
+            if 'reasoning_effort' in kwargs['json']:
+                return _response(400, {'error': 'unknown parameter'})
+            return _chat_response('Ok.')
+
+        with conf.supybot.plugins.Pollinations.tavily_rewrite.context(True), \
+                patch.object(self.plugin.session, 'post', side_effect=post):
+            self.assertResponse('pollinations search x', '[T] Ok. | https://example.com/')
+        self.assertEqual(chats[0]['reasoning_effort'], 'low')
+        self.assertNotIn('reasoning_effort', chats[1])
+        self.assertEqual(chats[0]['model'], chats[1]['model'])
+        system = '\n'.join(m['content'] for m in chats[0]['messages'] if m['role'] == 'system')
+        self.assertIn("never mention the results", system)
+
+    def testChatHasNoReasoningEffort(self):
+        with patch.object(self.plugin.session, 'post', return_value=_chat_response('Hi.')) as post:
+            self.assertResponse('pollinations chat hello', 'Hi.')
+        self.assertNotIn('reasoning_effort', post.call_args[1]['json'])
+
     def testFallsBackToSearxng(self):
         searx = _response(200, {'results': [
             {'title': 'Limnoria', 'url': 'https://limnoria.net/', 'content': 'A Python IRC bot'}]})

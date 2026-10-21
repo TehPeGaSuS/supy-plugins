@@ -96,6 +96,7 @@ All settings can be configured per-channel using:
 | `searxng_recent_words` | "last latest today yesterday tonight now current currently recent recently newest" | Words that trigger `searxng_recent_range` |
 | `search_text_model` | "openai-fast" | Model that writes answers from tavily/searxng results |
 | `search_text_fallback_model` | "gpt-oss" | Space-separated fallbacks for `search_text_model` |
+| `search_reasoning_effort` | "low" | `reasoning_effort` for search answers (`minimal`/`low`/`medium`/`high`); lower is faster. Empty leaves it to the model; a model that rejects it (HTTP 400) is retried without it |
 | `search_results` | 5 | Results asked from the backend |
 | `search_snippet_length` | 1000 | Max characters of each result's text given to `search_text_model` (Tavily extracts are long; SearXNG snippets are short) |
 | `search_sources` | 1 | Source URLs appended to the answer (0 for none) |

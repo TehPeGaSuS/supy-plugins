@@ -217,9 +217,11 @@ class Pollinations(callbacks.Plugin):
             pass
         return None
 
-    def _chat_request(self, model, messages, timeout, api_token):
+    def _chat_request(self, model, messages, timeout, api_token, options=None):
         """Send a chat completion API request for the given model.
 
+        options are extra payload fields (e.g. reasoning_effort); a model
+        that rejects them with HTTP 400 is asked once more without them.
         Returns (content_string, None) on success with usable content,
         or (None, error_string) on failure.  Raises on network/timeout
         errors so the caller can surface them to IRC.
@@ -229,6 +231,7 @@ class Pollinations(callbacks.Plugin):
             "model": model,
             "jsonMode": False
         }
+        payload.update(options or {})
         headers = {"Content-Type": "application/json"}
         if api_token:
             headers["Authorization"] = f"Bearer {api_token}"
@@ -245,6 +248,9 @@ class Pollinations(callbacks.Plugin):
         if response.status_code != 200:
             self.log.info("Text attempt on model %s took %.1fs (status=%s)", model, _elapsed, response.status_code)
             self.log.warning(f"Chat API error {response.status_code} (model={model})")
+            if response.status_code == 400 and options:
+                self.log.info("Retrying model %s without %s", model, ", ".join(options))
+                return self._chat_request(model, messages, timeout, api_token)
             return (None, "HTTP %d" % response.status_code)
 
         try:
@@ -315,7 +321,7 @@ class Pollinations(callbacks.Plugin):
             text = "%s: %s" % (msg.nick, response_text) if prefix else response_text
             irc.reply(text, prefixNick=False, to=channel)
 
-    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix="", tag=""):
+    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix="", tag="", reasoning_setting=None):
         channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         
         if not self.active_requests.acquire(blocking=False):
@@ -378,8 +384,14 @@ class Pollinations(callbacks.Plugin):
 
             messages.append({"role": "user", "content": text})
 
+            options = {}
+            if reasoning_setting:
+                effort = self.registryValue(reasoning_setting, msg.channel).strip()
+                if effort:
+                    options["reasoning_effort"] = effort
+
             # --- primary attempt ---
-            content, error = self._chat_request(text_model, messages, timeout, api_token)
+            content, error = self._chat_request(text_model, messages, timeout, api_token, options)
 
             # Content filter is not retryable — reply immediately
             if error is not None and isinstance(error, str) and error.startswith("content_filter:"):
@@ -409,7 +421,7 @@ class Pollinations(callbacks.Plugin):
                             "Primary model '%s' failed (%s), trying fallback '%s'"
                             % (text_model, error, fb_model)
                         )
-                        content, fb_error = self._chat_request(fb_model, messages, timeout, api_token)
+                        content, fb_error = self._chat_request(fb_model, messages, timeout, api_token, options)
                         if content is not None:
                             break
                         # Content filter on fallback — reply and stop
@@ -698,7 +710,7 @@ class Pollinations(callbacks.Plugin):
                 with self.dict_lock:
                     self._search_stats["capped"] += 1
                     self._save_search_stats()
-                self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", tag="[P] ")
+                self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", tag="[P] ", reasoning_setting="search_reasoning_effort")
                 return
             if backend == "tavily":
                 found = self._search_tavily(text, msg.channel)
@@ -728,9 +740,12 @@ class Pollinations(callbacks.Plugin):
                      "use clocks or dates from these results: work it out from the current "
                      "date and time given above (convert UTC to the place's time zone). "
                      "Otherwise answer only from these results. If they do not answer the "
-                     "question, say you could not find it. Do not write the [n] numbers." % sources)
+                     "question, say you could not find it. Answer as if you knew it yourself: "
+                     "never mention the results, the sources or what is 'listed here', and "
+                     "do not write the [n] numbers." % sources)
             self._chat(irc, msg, text, "search_text_model", "search_text_fallback_model",
-                       "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix, tag=tag)
+                       "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix, tag=tag,
+                       reasoning_setting="search_reasoning_effort")
             return
 
         self._search_refund()

@@ -280,6 +280,15 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Pollinations,
+    "search_reasoning_effort",
+    registry.String(
+        "low",
+        _("""reasoning_effort sent with search answers (minimal, low, medium, high): lower answers faster. Empty to leave it to the model. A model that rejects it is asked again without it."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
     "search_results",
     registry.PositiveInteger(
         5,
