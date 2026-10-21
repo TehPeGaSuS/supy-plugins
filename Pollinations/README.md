@@ -55,6 +55,11 @@ Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per ch
 
 Shows today's search count and, with a Tavily key, the Tavily credits the bot spent this month (counted from each response's `usage`, saved on disk, reset on the 1st UTC) and the account usage from `https://api.tavily.com/usage`. Tavily's own count lags behind, so the bot's count is the live one; it misses credits spent elsewhere with the same key (playground, other scripts).
 
+### Pollen Usage
+`polliusage` (owner only)
+
+Shows the pollen left (`GET /account/balance`; the Quest/paid split needs the `account:usage` permission on the key, otherwise only a budgeted key's balance is shown) and what this key spent in the last 24 hours, with the top models (`GET /account/key/usage`, no extra permission). Costs are as the API reports them, in USD.
+
 ### List Available Models
 `models [text|image|search] [low|med|high]`
 

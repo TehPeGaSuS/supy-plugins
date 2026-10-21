@@ -302,4 +302,45 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual(get.call_args[0][0], 'https://api.tavily.com/usage')
 
 
+class PollinationsUsageTestCase(PluginTestCase):
+    plugins = ('Pollinations',)
+    config = {'supybot.plugins.Pollinations.api_token': 'sk_test'}
+
+    def setUp(self):
+        super().setUp()
+        self.plugin = self.irc.getCallback('Pollinations')
+
+    def _get(self, balance, usage):
+        def get(url, **kwargs):
+            self.assertEqual(kwargs['headers']['Authorization'], 'Bearer sk_test')
+            return balance if url.endswith('/account/balance') else usage
+        return get
+
+    def testPolliUsage(self):
+        balance = _response(200, {'balance': 3.5, 'accountBalance': {'total': 3.5, 'tier': 3.25, 'paid': 0.25}})
+        usage = _response(200, {'usage': [
+            {'model': 'openai-fast', 'cost_usd': 0.0001},
+            {'model': 'openai-fast', 'cost_usd': 0.0002},
+            {'model': 'flux', 'cost_usd': 0.001},
+        ]})
+        with patch.object(self.plugin.session, 'get', side_effect=self._get(balance, usage)) as get:
+            self.assertResponse('polliusage',
+                                'Pollen: 3.5000 left (Quest 3.2500, paid 0.2500) | '
+                                'Last 24h (this key): 3 requests, $0.0013 (openai-fast 2, flux 1)')
+        usage_call = [c for c in get.call_args_list if c[0][0].endswith('/key/usage')][0]
+        self.assertEqual(usage_call[1]['params']['days'], 1)
+
+    def testPolliUsageWithoutAccountPermission(self):
+        balance = _response(403, {})
+        usage = _response(200, {'usage': []})
+        with patch.object(self.plugin.session, 'get', side_effect=self._get(balance, usage)):
+            self.assertResponse('polliusage',
+                                'Pollen: balance needs the account:usage permission on the key '
+                                '(enter.pollinations.ai/keys) | Last 24h (this key): 0 requests, $0.0000')
+
+    def testPolliUsageNoToken(self):
+        with conf.supybot.plugins.Pollinations.api_token.context(''):
+            self.assertResponse('polliusage', 'No Pollinations api_token is set.')
+
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

@@ -746,6 +746,67 @@ class Pollinations(callbacks.Plugin):
 
     searchusage = wrap(searchusage, ["owner"])
 
+    def polliusage(self, irc, msg, args):
+        """takes no arguments
+
+        Shows the Pollinations pollen balance and what this bot's API key
+        spent in the last 24 hours.
+        """
+        api_token = self.registryValue("api_token", msg.channel)
+        if not api_token:
+            irc.reply("No Pollinations api_token is set.", prefixNick=False)
+            return
+        headers = {"Authorization": "Bearer %s" % api_token}
+        parts = []
+
+        try:
+            response = self.session.get(
+                "https://gen.pollinations.ai/account/balance", headers=headers, timeout=10)
+            data = response.json() if response.status_code == 200 else None
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.log.warning("Pollinations balance failed: %r", e)
+            response, data = None, None
+        if isinstance(data, dict) and isinstance(data.get("balance"), (int, float)):
+            text = "Pollen: %.4f left" % data["balance"]
+            account = data.get("accountBalance")
+            if isinstance(account, dict):
+                text += " (Quest %.4f, paid %.4f)" % (account.get("tier") or 0, account.get("paid") or 0)
+            parts.append(text)
+        elif response is not None and response.status_code == 403:
+            # Unbudgeted keys need account:usage to read the account balance
+            parts.append("Pollen: balance needs the account:usage permission on the key "
+                         "(enter.pollinations.ai/keys)")
+        else:
+            parts.append("Pollen: balance unavailable")
+
+        try:
+            response = self.session.get(
+                "https://gen.pollinations.ai/account/key/usage",
+                params={"days": 1, "limit": 50000}, headers=headers, timeout=15)
+            data = response.json() if response.status_code == 200 else None
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.log.warning("Pollinations key usage failed: %r", e)
+            data = None
+        records = data.get("usage") if isinstance(data, dict) else None
+        if isinstance(records, list):
+            records = [r for r in records if isinstance(r, dict)]
+            cost = sum(r.get("cost_usd") or 0 for r in records)
+            models = {}
+            for r in records:
+                name = r.get("model") or "?"
+                models[name] = models.get(name, 0) + 1
+            top = sorted(models.items(), key=lambda item: -item[1])[:3]
+            text = "Last 24h (this key): %d requests, $%.4f" % (len(records), cost)
+            if top:
+                text += " (%s)" % ", ".join("%s %d" % item for item in top)
+            parts.append(text)
+        else:
+            parts.append("Last 24h: usage unavailable")
+
+        irc.reply(" | ".join(parts), prefixNick=False)
+
+    polliusage = wrap(polliusage, ["owner"])
+
     def image(self, irc, msg, args, text):
         """Generate image from text prompt using Pollinations.ai"""
         if not text.strip():
