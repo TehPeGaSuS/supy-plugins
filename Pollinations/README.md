@@ -8,7 +8,8 @@ A Limnoria IRC bot plugin that integrates with [Pollinations.ai](https://pollina
 - **Context Awareness**: Uses recent channel conversation for better responses
 - **Resilience & Retry**: Automatic retries on 429/5xx, fallback models, queue-throttling notices
 - **Highly Configurable**: Multiple settings for customization
-- **URL Shortening**: Optional shortened URLs for generated images
+- **URL Shortening**: Optional shortened URLs for generated images and search sources
+- **Live Web Search**: `search` answers from the web through a chain of backends (paid Pollinations search model such as Perplexity Sonar, Tavily, your own SearXNG) with per-backend daily limits, automatic fallback and usage commands (see [Web Search](#web-search))
 
 ## Installation
 1. Download the plugin files to your Limnoria plugins directory
@@ -38,29 +39,21 @@ Generate images from text descriptions.
 ### Live Web Search
 `search <query>`
 
-Answers using live web search. Backends are tried in the order of `search_backend`:
-- `tavily`: [Tavily](https://tavily.com) search (free plan: 1000 credits/month, 1 per basic search). Replies with Tavily's own short answer, or with `tavily_rewrite` on, `search_text_model` writes it from the results.
-- `searxng`: your own [SearXNG](https://docs.searxng.org) instance (free, no quota); `search_text_model` writes the answer from the results.
-- `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`), e.g. `sonar`.
-
-A backend that fails or has reached its daily limit is skipped and the next one answers, e.g. `pollinations tavily searxng`: sonar for the first `pollinations_daily_limit` searches of the day, then Tavily for `tavily_daily_limit` more, then SearXNG; if sonar fails (outage, no paid pollen left) Tavily and then SearXNG answer instead.
-
-Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Pollinations and Tavily searches each have a daily limit (UTC), SearXNG has none since it is free. Each user also waits `search_cooldown` between searches. The counts are saved in `data/Pollinations-search.json`, so they survive restarts.
-
-Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per channel, default 1) is how many chunks are sent at once before `(N more messages)`, e.g. `config channel #chan supybot.reply.mores.instant 3`.  
+Answers a question from the live web in one IRC line, e.g. `[P] Marco Bezzecchi won the Indonesian GP on 11 October 2026; Fernández was second.` Everything about it (backends, limits, costs, settings, SearXNG setup) is in [Web Search](#web-search).  
 **Examples:**
 `search latest stable Linux kernel version`
-`search who won the match last night`
+`search who won the last MotoGP race`
+`search current time in Paris`
 
 ### Search Usage
 `searchusage` (owner only)
 
-Shows today's search count and, with a Tavily key, the Tavily credits the bot spent this month (counted from each response's `usage`, saved on disk, reset on the 1st UTC) and the account usage from `https://api.tavily.com/usage`. Tavily's own count lags behind, so the bot's count is the live one; it misses credits spent elsewhere with the same key (playground, other scripts).
+Today's searches and each limited backend's count against its daily limit, plus Tavily credits: `Today: 25 searches, Pollinations 20/20, Tavily 5/30 | Tavily this month (bot): 47 credits in 47 searches | Tavily account: 45/1000 credits used (955 left, plan Researcher; may lag)`. See [Usage commands](#usage-commands).
 
 ### Pollen Usage
 `polliusage` (owner only)
 
-Shows the pollen left (`GET /account/balance`; the Quest/paid split needs the `account:usage` permission on the key, otherwise only a budgeted key's balance is shown) and what this key spent in the last 24 hours, with the top models (`GET /account/key/usage`, no extra permission). Costs are as the API reports them, in USD.
+The pollen balance and what the bot's key spent in the last 24 hours: `Pollen: 11.0713 left (Quest 3.6472, paid 7.4241) | Last 24h (this key): 12 requests, $0.0450 (sonar 10, openai-fast 2)`. See [Usage commands](#usage-commands).
 
 ### List Available Models
 `models [text|image|search] [low|med|high]`
@@ -72,7 +65,6 @@ Lists available API models organized by price categories (automatically fetched 
 `models`
 `models text low`
 `models image med`
-```
 
 ## Configuration
 All settings can be configured per-channel using:
@@ -87,33 +79,8 @@ All settings can be configured per-channel using:
 | `prompt` | "You are $botnick the IRC bot. Be brief, helpful" | System prompt for the AI ($botnick = bot's nickname) |
 | `text_model` | "openai" | Primary text model for chat completions (see [Recommended models](#recommended-models)) |
 | `text_fallback_model` | "openai-fast" | Space-separated list of fallback models tried when the primary fails persistently (429/5xx) |
-| `search_enabled` | True | Set to False to disable `search` (per channel or globally) |
-| `search_backend` | "tavily searxng" | Backends tried in order: `tavily`, `searxng`, `pollinations` (paid). A failed or capped backend is skipped |
-| `tavily_api_key` | "" | Tavily API key (global, private). Empty skips `tavily` |
-| `tavily_depth` | "basic" | `basic`, `fast`, `ultra-fast` (1 credit) or `advanced` (2 credits) |
-| `tavily_answer` | "basic" | Tavily's own answer: `basic` (short) or `advanced` (longer); same credit cost |
-| `tavily_rewrite` | False | If True, ignore Tavily's answer and let `search_text_model` write one from the results |
-| `searxng_url` | "" | SearXNG base URL with the json format enabled, e.g. `http://127.0.0.1:8888` (global). Empty skips `searxng` |
-| `searxng_recent_range` | "week" | For questions with a `searxng_recent_words` word, SearXNG is asked for pages from this period first (`day`/`week`/`month`/`year`); fewer than 3 results → searched again without it. Empty disables |
-| `searxng_recent_words` | "last latest today yesterday tonight now current currently recent recently newest" | Words that trigger `searxng_recent_range` |
-| `search_text_model` | "openai-fast" | Model that writes answers from tavily/searxng results |
-| `search_text_fallback_model` | "gpt-oss" | Space-separated fallbacks for `search_text_model` |
-| `search_reasoning_effort` | "low" | `reasoning_effort` for search answers (`minimal`/`low`/`medium`/`high`); lower is faster. Empty leaves it to the model; a model that rejects it (HTTP 400) is retried without it |
-| `search_results` | 5 | Results asked from the backend |
-| `search_snippet_length` | 1000 | Max characters of each result's text given to `search_text_model` (Tavily extracts are long; SearXNG snippets are short) |
-| `search_sources` | 1 | Source URLs appended to the answer (0 for none) |
-| `search_shorten_urls` | True | Shorten source URLs with is.gd |
-| `search_timeout` | 15 | Timeout in seconds for tavily/searxng requests |
-| `pollinations_daily_limit` | 20 | Searches per UTC day answered by the paid `pollinations` backend (global, 0 for no limit) |
-| `tavily_daily_limit` | 30 | Tavily searches per UTC day (global, 0 for no limit). 30 fits Tavily's free plan |
-| `search_cooldown` | 30 | Seconds between searches per user (0 to disable) |
-| `search_model` | "sonar" | Model for the `pollinations` backend (must support web search, see `models search`; paid) |
-| `search_prompt` | "IRC bot: answer in one plain-text line, max 300 chars. Direct answer first, then key context…" (352 chars, so it can be set again with one IRC `config` line) | Instructions for `search` only (e.g. no citations/markdown) |
-| `search_use_prompt` | False | If True, `search` also uses the main `prompt` (personality) before `search_prompt`; if False only `search_prompt` is used |
-| `search_thinking` | "Thinking..." | Line sent before a `search` answer; empty disables |
-| `search_fallback_model` | "gemini-search" | Space-separated fallbacks for `search` |
 | `text_timeout` | 30 | Timeout in seconds for text generation requests |
-| `context_lines` | 50 | Number of recent messages to include as context |
+| `context_lines` | 25 | Number of recent channel lines (from ChannelLogger) to include as context; 0 disables |
 | `nick_include` | True | Include user's nickname in the prompt |
 | `nick_strip` | True | Remove bot's nickname from responses |
 | `nick_prefix` | False | Prefix responses with user's nickname |
@@ -148,7 +115,242 @@ All settings can be configured per-channel using:
 | `image_private` | True | Make images private |
 | `image_safe` | False | Enable safe content filtering |
 | `negative_prompt` | "" | What to avoid in generated images |
-| `shorten_urls` | True | Use is.gd to shorten image URLs |
+| `shorten_urls` | False | Use is.gd to shorten image URLs (search sources have their own `search_shorten_urls`) |
+
+## Web Search
+
+`search <query>` answers a question from the live web. The bot finds the answer through one of several **backends**, tried in the order of `search_backend`, and replies in a single IRC line that starts with a tag saying which backend answered.
+
+### Backends
+
+| Backend | Tag | What it is | Cost | Needs |
+|---|---|---|---|---|
+| `pollinations` | `[P]` | A Pollinations search model (`search_model`, default `sonar` = Perplexity Sonar) that searches, reads the pages and writes the answer in one call | **Paid pollen only** (Quest Pollen cannot pay for search models). Measured: ~0.004 pollen per search with `sonar` | `api_token` |
+| `tavily` | `[T]` | [Tavily](https://tavily.com) search API: returns page extracts and, optionally, its own short answer | Free plan: 1000 credits/month; 1 credit per `basic` search, 2 per `advanced` | `tavily_api_key` |
+| `searxng` | `[S]` | Your own [SearXNG](https://docs.searxng.org) metasearch instance (Google, Brave, Bing, Mojeek, Wikipedia…) | Free, no quota; the answer is written by `search_text_model` (Quest Pollen, a tiny fraction of a pollen) | `searxng_url` |
+
+A backend is **skipped** when it is not configured (empty key/URL), has reached its daily limit, fails (HTTP error, timeout, bad JSON) or returns nothing; the next backend in the list then answers. If every backend is skipped the bot replies `Daily search limit reached. It resets at 00:00 UTC.` (when a limit was the reason) or `Web search is unavailable right now, please try again later.`
+
+### Recommended setups
+
+**Best answers, paid first, free after** (what this plugin was tuned with):
+```
+/msg yourbot config plugins.Pollinations.search_backend pollinations tavily searxng
+/msg yourbot config plugins.Pollinations.search_model sonar
+/msg yourbot config plugins.Pollinations.search_fallback_model ""
+/msg yourbot config plugins.Pollinations.pollinations_daily_limit 20
+/msg yourbot config plugins.Pollinations.tavily_daily_limit 30
+/msg yourbot config plugins.Pollinations.tavily_rewrite True
+```
+Sonar answers the first 20 searches of the day, Tavily the next 30, SearXNG the rest. If Sonar fails (outage, paid pollen used up) Tavily and then SearXNG answer instead, and the failed Sonar search is not counted. `search_fallback_model ""` makes a failing Sonar go straight to Tavily instead of first trying another paid model.
+
+**Free only:**
+```
+/msg yourbot config plugins.Pollinations.search_backend tavily searxng
+/msg yourbot config plugins.Pollinations.tavily_rewrite True
+```
+
+**Paid only:** `search_backend pollinations`. When the daily limit is reached, searches stop until 00:00 UTC.
+
+### How the answer is written
+
+| Backend | Who writes the answer | `search_prompt` | `search_text_model` | `tavily_rewrite` |
+|---|---|---|---|---|
+| `pollinations` | `search_model` itself (search + answer in one call) | used | not used | not used |
+| `tavily`, rewrite off (default) | Tavily's own answer (`tavily_answer` basic/advanced), sent as is | **not used** (Tavily takes no instructions) | not used | — |
+| `tavily`, rewrite on | `search_text_model`, from Tavily's page extracts | used | used | **only Tavily** |
+| `searxng` | always `search_text_model`, from the result snippets | used | used | not needed |
+
+Tavily's own answer cannot be steered: it is often long (500+ characters), may start with "According to the sources" and does not know the current time. With `tavily_rewrite True` every `[T]` answer goes through your `search_prompt` like the others, at the cost of one cheap `search_text_model` call per search. Recommended.
+
+Every model call made by the plugin (`chat` included) gets the **current UTC date and time** appended to its system prompt, so "last", "latest", "today" and "now" are resolved against the real date. For `tavily`/`searxng` the results are also introduced to the model as possibly days-old page copies, with instructions to:
+- work out live facts (the time in a city, today's date) from the real clock, never from a crawled clock page;
+- give an answer the results point to (e.g. a "X wins" headline) rather than refusing; say briefly that it could not find it only when nothing answers the question;
+- never mention "the results", "the sources" or "listed here", never write `[n]` numbers, never ask the user questions or offer to look things up.
+
+### The search prompt
+
+The default `search_prompt`:
+```
+IRC bot: answer in one plain-text line, max 300 chars. Direct answer first, then key context (when/where/score). For last/latest/now, use the current date given and name the event/date. If ambiguous, take the likeliest meaning and say so; if unsure, say so. Use the question's language. No markdown, emoji, [n], URLs, sources, filler or questions back.
+```
+It is 352 characters on purpose: `config plugins.Pollinations.search_prompt <text>` must fit in one IRC line (512 bytes including `PRIVMSG yourbot :` and your hostmask as the server relays it), so a prompt of about 360 characters is the practical maximum when set from IRC. A longer prompt can be set by editing the bot's `.conf` file:
+1. Find `supybot.plugins.Pollinations.search_prompt: ...` (channel values are `supybot.plugins.Pollinations.search_prompt.#channel: ...`) and edit the text after `: `, keeping it on one line.
+2. Right away run `/msg yourbot config reload`, or stop the bot before editing and start it after. The bot rewrites the `.conf` periodically and would otherwise overwrite your edit.
+
+To restore the default: `/msg yourbot config setdefault plugins.Pollinations.search_prompt`.
+
+`search_use_prompt True` puts the main `prompt` (bot personality) before `search_prompt`.
+
+### Daily limits, cooldown and the stats file
+
+- `pollinations_daily_limit` (default 20) and `tavily_daily_limit` (default 30) are **separate** limits, counted per UTC day across all channels. SearXNG has no limit. `0` disables a limit.
+- A search counts against a backend's limit only when that backend was used: a Tavily request counts when Tavily returns HTTP 200; a Pollinations search counts unless it failed and another backend followed (then it is given back). A search where every backend failed is not counted in `searches` either.
+- `search_cooldown` (default 30 s, per channel) is how long one user (by full hostmask) waits between searches. It applies to every search, whatever the backend.
+- Counts are saved in `<bot data dir>/Pollinations-search.json` and survive restarts and reloads. The file is one line of JSON:
+  ```json
+  {"day": "2026-10-21", "searches": 5, "pollinations_today": 3, "tavily_today": 2, "month": "2026-10", "tavily_credits": 47, "tavily_searches": 47}
+  ```
+  `searches`, `pollinations_today` and `tavily_today` reset at 00:00 UTC; `tavily_credits`/`tavily_searches` reset on the 1st of each month (UTC; Tavily's own reset date may differ). `day` and `month` must match the current UTC date, otherwise the counts are treated as stale and start from 0.
+- The file can be edited by hand (e.g. to set the Tavily count from the dashboard): edit it, then `/msg yourbot reload Pollinations` right away (a search in between overwrites the edit). Counts written as strings (`"5"`) or floats are accepted; anything that is not a number is ignored with a warning in the log. Fields from older versions (such as `capped`) are ignored.
+
+### Answer formatting
+
+- **Tag**: every answer starts with `[P]`, `[T]` or `[S]`. Error, cooldown and limit messages have no tag. With `nick_prefix` on the nick comes first: `nick: [T] ...`.
+- **Sources**: `[T]`/`[S]` answers end with ` | <url>` for the first `search_sources` results (default 1; `0` hides them). `[P]` answers have no URL. URLs are shortened with is.gd when `search_shorten_urls` is on (default); if is.gd fails the full URL is used.
+- **Cleanup**: markdown links and citations (`([site](url))`, `[site.com](url)`), bare numbered citations (`[3]`, `[3][15]`, `[1, 2]`, `[4-6]`), trailing bare domains, `Sources:` lines, headings and code ticks are removed; `**bold**` becomes IRC bold and `*italic*` IRC italic. Other brackets (`[PG]`, `[x]`) stay.
+- **Long answers** are split by Limnoria at word boundaries. `supybot.reply.mores.instant` (per channel, default 1) is how many chunks are sent at once before `(N more messages)`:
+  ```
+  /msg yourbot config channel #chan supybot.reply.mores.instant 3
+  ```
+  This applies to every command in that channel, not just `search`.
+- `search_thinking` (default `Thinking...`) is sent before the search starts; empty disables it.
+
+### Speed
+
+Typical times measured on IRC: Sonar 5–6 s; SearXNG ~1.5 s plus the `search_text_model` call. `search_reasoning_effort` (default `low`) is sent as `reasoning_effort` with every search answer (`[P]`, rewritten `[T]`, `[S]`): with `openai-fast` it cut the model call from 8.8 s to 3.1 s. Values: `minimal`, `low`, `medium`, `high`; empty leaves it to the model. A model that rejects the field (HTTP 400) is asked once more without it (`Retrying model X without reasoning_effort` in the log). Reasoning models can also return an **empty** reply (all tokens spent thinking), which counts as a failure and moves on to the fallback model: `openai/gpt-oss-20b` did this in testing, so it makes a poor primary `search_text_model`.
+
+The log shows where time goes:
+```
+SearXNG search (time_range=week): 5 results
+Search searxng for 'who won the last MotoGP?': Marquez wins Japanese MotoGP… | MotoGP Race Results | Crash.net | …
+Text attempt on model openai-fast took 3.1s (status=ok)
+```
+The `Search <backend> for ...` line lists the titles the model was given, so a wrong answer can be traced to wrong results or to the model.
+
+### Models and costs
+
+Prices change; check them with `models search` / `models text low` or `https://gen.pollinations.ai/text/models`. Per-request costs below are from the Pollinations dashboard's "Last events" (October 2026), which lists every request with its exact cost and whether it was paid from Quest or paid pollen:
+
+| Use | Model | Measured cost | Notes |
+|---|---|---|---|
+| `search_model` | `sonar` (`perplexity/sonar`) | 0.004012–0.004119 paid pollen/search | Best answers in testing: read the pages, named the right race, date and podium |
+| `search_model` | `gemini-search` (`google/gemini-2.5-flash-lite:search`) | 0.008087 paid pollen/search | Twice Sonar's cost despite 4× lower token prices (Google's search fee is not in the token price) and answered with a year-old result. It is the default `search_fallback_model`; set that to `""` if you would rather fall through to the next backend |
+| `search_text_model` | `openai-fast` (`openai/gpt-5-nano`) | <0.0001–0.000239 Quest pollen/answer | Default. Fast with `search_reasoning_effort low` |
+| `search_text_model` | `openai/gpt-oss-20b` | <0.0001 Quest pollen/answer | Cheapest per call, partly because it returned empty replies (still billed) |
+| `search_text_model` | `nvidia/nemotron-3.5-lightning` | 0.000366–0.000752 Quest pollen/answer | Cheap per token but verbose: 3–7× gpt-5-nano per answer, and took 11 s |
+
+A rough budget for Sonar: `paid pollen ÷ 0.0041 = searches`. For example 7.42 pollen ≈ 1,800 searches; at 15 a day that is about 4 months, at 20 a day about 3 months. Community models (`community/...`) are not recommended for search: prices are set by their authors, several are wrappers that call `sonar` underneath and bill your paid pollen anyway, and your prompts pass through a third-party server.
+
+### Tavily notes
+
+- Get a key at [tavily.com](https://tavily.com); set it globally (it is stored privately): `/msg yourbot config plugins.Pollinations.tavily_api_key tvly-...`. Never paste it in a channel.
+- Each search sends `search_depth` = `tavily_depth` (`basic`, `fast`, `ultra-fast` cost 1 credit, `advanced` 2), `include_answer` = `tavily_answer` (`basic` short, `advanced` longer, same cost; `false` when `tavily_rewrite` is on), `max_results` = `search_results` and `include_usage: true`.
+- `include_usage` makes Tavily report the credits each request used; the bot adds them to its monthly count (if a response has no `usage`, 2 is assumed for `advanced`, else 1). Tavily's own `/usage` endpoint and dashboard lag behind (minutes to hours), which is why `searchusage` shows both.
+- When the plan's credits run out Tavily answers HTTP 432 (433 = pay-as-you-go limit) and the next backend answers. Pay-as-you-go ($0.008/credit after the free 1000) is off unless you enable it in the Tavily dashboard; with it off the bot can never spend money on Tavily.
+- Tavily page extracts are long (several ~500-character chunks per page); `search_snippet_length` (default 1000) is how much of each result reaches `search_text_model`.
+
+### SearXNG setup
+
+Run SearXNG with Docker on the bot's machine, reachable only from localhost. `docker-compose.yml`:
+```yaml
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"   # localhost only
+    volumes:
+      - ./searxng:/etc/searxng
+```
+`searxng/settings.yml`:
+```yaml
+use_default_settings:
+  engines:
+    remove:
+      - duckduckgo        # CAPTCHAs on datacenter IPs
+server:
+  secret_key: "CHANGE_ME"  # openssl rand -hex 32
+  limiter: false           # only the bot uses it
+  image_proxy: false
+search:
+  default_lang: "en"       # optional: stops engines guessing the language from the server's location
+  formats:
+    - html
+    - json                 # required: the plugin asks for format=json
+```
+Then:
+```
+sed -i "s/CHANGE_ME/$(openssl rand -hex 32)/" searxng/settings.yml
+docker compose up -d
+/msg yourbot config plugins.Pollinations.searxng_url http://127.0.0.1:8888
+```
+Check it and see which engines fail:
+```
+curl -s 'http://127.0.0.1:8888/search?q=test&format=json' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["results"]), "results"); print(d["unresponsive_engines"])'
+```
+- `403 Forbidden` from `format=json` means the `json` format is not enabled.
+- An engine that keeps appearing in `unresponsive_engines` (CAPTCHA, too many requests) can be added to `remove:`. Search engines throttle datacenter IPs; SearXNG suspends a failing engine for a while and keeps answering from the others. Low volume helps, which is why it is best as the last backend.
+- `X-Forwarded-For nor X-Real-IP header is set!` in SearXNG's log is harmless with the limiter off and no reverse proxy.
+- SearXNG only returns the engines' own snippets (150–200 characters); no setting makes them longer, so `search_snippet_length` mostly matters for Tavily.
+- Questions with a word from `searxng_recent_words` (`last latest today yesterday tonight now current currently recent recently newest`) are searched with `time_range` = `searxng_recent_range` (default `week`) first; if that finds fewer than 3 results the search is repeated without it. Search engines do not know what "last" means: without this, "who won the last MotoGP" returned championship-history pages.
+- Update: `docker compose pull && docker compose up -d`.
+
+### Usage commands
+
+`searchusage` (owner only):
+```
+Today: 25 searches, Pollinations 20/20, Tavily 5/30 | Tavily this month (bot): 47 credits in 47 searches | Tavily account: 45/1000 credits used (955 left, plan Researcher; may lag)
+```
+- `Today` counts every search that got past the cooldown, minus searches where every backend failed; the per-backend counts are listed for the limited backends in `search_backend`.
+- `Tavily this month (bot)` is the bot's own live count (see above); it misses credits spent elsewhere with the same key (playground, other scripts).
+- `Tavily account` comes from `GET https://api.tavily.com/usage` (`account.plan_usage`/`plan_limit`) and lags behind the dashboard.
+
+`polliusage` (owner only):
+```
+Pollen: 11.0713 left (Quest 3.6472, paid 7.4241) | Last 24h (this key): 12 requests, $0.0450 (sonar 10, openai-fast 2)
+```
+- From `GET https://gen.pollinations.ai/account/balance`. The Quest/paid split needs the read-only `account:usage` permission on the key (enable it at [enter.pollinations.ai/keys](https://enter.pollinations.ai/keys)); without it a 403 is shown with that hint. A key with its own pollen budget shows that budget instead of the account total.
+- `Last 24h` is from `GET /account/key/usage?days=1` (no extra permission): request count, cost (the API reports it in USD) and the top three models. `[T]` answers with `tavily_rewrite` off make no Pollinations request at all, so they do not appear here.
+
+### Search settings
+
+| Setting | Scope | Default | Description |
+|---|---|---|---|
+| `search_enabled` | channel | True | False disables `search` (per channel or globally) |
+| `search_backend` | channel | "tavily searxng" | Backends tried in order: `pollinations`, `tavily`, `searxng`. A backend that is not configured, failed or reached its daily limit is skipped |
+| `pollinations_daily_limit` | global | 20 | Searches per UTC day answered by `pollinations` (0 = no limit) |
+| `tavily_daily_limit` | global | 30 | Tavily searches per UTC day (0 = no limit). 30 × 31 ≈ 930 fits the free 1000 credits/month |
+| `search_cooldown` | channel | 30 | Seconds one user waits between searches (0 disables) |
+| `search_model` | channel | "sonar" | Model for `pollinations`; must support web search (`models search`); paid pollen |
+| `search_fallback_model` | channel | "gemini-search" | Space-separated fallbacks tried when `search_model` fails, before falling through to the next backend. `""` falls through directly |
+| `search_prompt` | channel | see [The search prompt](#the-search-prompt) | Instructions for every search answer written by a model |
+| `search_use_prompt` | channel | False | True puts the main `prompt` before `search_prompt` |
+| `search_thinking` | channel | "Thinking..." | Line sent before searching; empty disables |
+| `search_reasoning_effort` | channel | "low" | `reasoning_effort` for search answers (`minimal`/`low`/`medium`/`high`, empty = model default); retried without it on HTTP 400 |
+| `search_text_model` | channel | "openai-fast" | Writes `[S]` answers and `[T]` answers with `tavily_rewrite` |
+| `search_text_fallback_model` | channel | "gpt-oss" | Space-separated fallbacks for `search_text_model` |
+| `search_results` | channel | 5 | Results asked from Tavily/SearXNG and given to the model |
+| `search_snippet_length` | channel | 1000 | Max characters of each result given to `search_text_model` |
+| `search_sources` | channel | 1 | Source URLs appended to `[T]`/`[S]` answers (0 = none) |
+| `search_shorten_urls` | channel | True | Shorten source URLs with is.gd |
+| `search_timeout` | channel | 15 | Seconds for each Tavily/SearXNG request (the model call uses `text_timeout`) |
+| `tavily_api_key` | global, private | "" | Tavily key (`tvly-...`); empty skips `tavily` |
+| `tavily_depth` | channel | "basic" | `basic`/`fast`/`ultra-fast` (1 credit) or `advanced` (2 credits) |
+| `tavily_answer` | channel | "basic" | Length of Tavily's own answer: `basic` or `advanced`; same cost |
+| `tavily_rewrite` | channel | False | True: ignore Tavily's answer and let `search_text_model` write one from the extracts (recommended) |
+| `searxng_url` | global | "" | SearXNG base URL with `json` enabled, e.g. `http://127.0.0.1:8888`; empty skips `searxng` |
+| `searxng_recent_range` | channel | "week" | `time_range` tried first for "last/latest/today…" questions (`day`/`week`/`month`/`year`; empty disables) |
+| `searxng_recent_words` | channel | "last latest today yesterday tonight now current currently recent recently newest" | Words that trigger `searxng_recent_range` |
+
+Channel settings set with `config channel #chan ...` override the global value: if search behaves differently in one channel, check `config channel #chan plugins.Pollinations.search_backend` (and the other settings) there.
+
+### Search troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `Web search is unavailable right now` | Every backend failed or is unconfigured. Check the log for `Tavily search error`, `SearXNG search error` or `All text models failed` |
+| `Daily search limit reached` | Every limited backend is at its limit and no unlimited backend (SearXNG) answered. Resets at 00:00 UTC |
+| `[S] I could not find …` | The snippets did not contain the answer; the `Search searxng for …` log line shows what the model saw. Tavily or Sonar read whole pages and do better on such questions |
+| Stale times or dates ("the time in Paris is 23:13" from a crawled clock) | Search results are old page copies. Use `tavily_rewrite True` so the model, which gets the real time, writes the answer; Tavily's own answer cannot be corrected |
+| `Tavily search error 432` | Monthly credits used up (433: pay-as-you-go limit). The next backend answers |
+| `SearXNG search error 403` | `json` format not enabled in `settings.yml` |
+| `Retrying model X without reasoning_effort` | The model does not accept `reasoning_effort`; harmless, or set `search_reasoning_effort ""` |
+| `TypeError` after editing the stats file | Fixed: hand-edited counts are converted; if it still happens, delete `Pollinations-search.json` (counts restart at 0) |
+| `searchusage` Tavily account shows fewer credits than the dashboard | Tavily's API lags; the `(bot)` count is live |
+| `Search` is ambiguous on the bot (Config also has `search`) | Call it as `pollinations search …` or make an alias, e.g. `aka add q "pollinations search $1"` (Aka's last `$N` takes all remaining words) |
+
 
 ## Configuration Examples
 
@@ -156,10 +358,10 @@ All settings can be configured per-channel using:
 Get your API key from [enter.pollinations.ai/keys](https://enter.pollinations.ai/keys), then configure it:
 ```
 # Global configuration
-/msg yourbot config supybot.Pollinations.api_token your_key_here
+/msg yourbot config plugins.Pollinations.api_token your_key_here
 
 # Or per-channel
-/msg yourbot config channel #mychannel supybot.Pollinations.api_token your_key_here
+/msg yourbot config channel #mychannel plugins.Pollinations.api_token your_key_here
 ```
 The key is stored privately (flagged `private=True` in the registry) and sent as `Authorization: Bearer <key>` on every text request. Anonymous requests (no key) return HTTP 401.
 
@@ -167,12 +369,12 @@ The key is stored privately (flagged `private=True` in the registry) and sent as
 ```
 /msg yourbot config channel #mychannel plugins.Pollinations.prompt "You are a friendly bot assistant."
 /msg yourbot config channel #mychannel plugins.Pollinations.context_lines 25
-/msg yourbot config channel #mychannel supybot.Pollinations.text_model openai
+/msg yourbot config channel #mychannel plugins.Pollinations.text_model openai
 ```
 
 ### Fallback Models Setup
 ```
-/msg yourbot config channel #mychannel supybot.Pollinations.text_fallback_model "nova-fast openai-fast"
+/msg yourbot config channel #mychannel plugins.Pollinations.text_fallback_model "nova-fast openai-fast"
 ```
 
 ### Auto-Reply Setup
@@ -253,11 +455,11 @@ See [Recommended models](#recommended-models) for suggested primary/fallback com
 **"API Error 401" or "UNAUTHORIZED"**
 - An API key is now **required** for text generation — anonymous requests are no longer accepted
 - Get a key from [enter.pollinations.ai/keys](https://enter.pollinations.ai/keys)
-- Set it: `/msg yourbot config supybot.Pollinations.api_token your_key_here`
+- Set it: `/msg yourbot config plugins.Pollinations.api_token your_key_here`
 
 **"API Error 400" with model error**
-- Invalid model name for the unified API
-- Use: `openai`, `claude`, `mistral`, or `llama`
+- Invalid model name for the unified API, or a parameter the model does not accept
+- List valid names with `models text low` (or the full list at `https://gen.pollinations.ai/text/models`)
 - Set it: `/msg yourbot config plugins.Pollinations.text_model openai`
 
 **"Please provide a prompt"**
