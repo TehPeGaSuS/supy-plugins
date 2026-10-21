@@ -216,7 +216,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         with patch.object(self.plugin.session, 'get', return_value=usage) as get:
             self.assertResponse('searchusage',
                                 'Today: 0/30 searches | Tavily: 150/1000 credits used '
-                                '(850 left, plan Researcher)')
+                                "(850 left, plan Researcher; Tavily's count may lag)")
         self.assertEqual(get.call_args[0][0], 'https://api.tavily.com/usage')
 
 

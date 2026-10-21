@@ -657,7 +657,7 @@ class Pollinations(callbacks.Plugin):
                 account = None
             if isinstance(account, dict) and account.get("plan_limit") is not None:
                 used, total = account.get("plan_usage") or 0, account["plan_limit"]
-                parts.append("Tavily: %s/%s credits used (%s left, plan %s)" % (
+                parts.append("Tavily: %s/%s credits used (%s left, plan %s; Tavily's count may lag)" % (
                     used, total, total - used, account.get("current_plan") or "?"))
             else:
                 parts.append("Tavily: usage unavailable")

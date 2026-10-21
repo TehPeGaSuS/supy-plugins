@@ -53,7 +53,7 @@ Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per ch
 ### Search Usage
 `searchusage` (owner only)
 
-Shows today's search count and, with a Tavily key, the credits used and left on the Tavily plan (`https://api.tavily.com/usage`).
+Shows today's search count and, with a Tavily key, the credits used and left on the Tavily plan (`https://api.tavily.com/usage`). Tavily updates that count with a delay, so recent searches may not show yet; the `Today` count is the bot's own, live.
 
 ### List Available Models
 `models [text|image|search] [low|med|high]`
