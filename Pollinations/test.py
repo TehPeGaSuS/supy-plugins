@@ -127,6 +127,27 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertIn('Current date and time: %s' % time.strftime('%A, %Y-%m-%d', time.gmtime()), system)
         self.assertIn('never use clocks or dates from these results', system)
 
+    def testSnippetLength(self):
+        tavily = _response(200, {'results': [
+            {'title': 'Long', 'url': 'https://example.com/', 'content': 'a' * 1500 + 'TAIL'}]})
+        calls = []
+
+        def post(url, **kwargs):
+            calls.append(kwargs)
+            return tavily if 'tavily' in url else _chat_response('Ok.')
+
+        with conf.supybot.plugins.Pollinations.tavily_rewrite.context(True), \
+                patch.object(self.plugin.session, 'post', side_effect=post):
+            self.assertResponse('pollinations search long', '[T] Ok. | https://example.com/')
+            system = '\n'.join(m['content'] for m in calls[1]['json']['messages'] if m['role'] == 'system')
+            self.assertIn('a' * 1000, system)
+            self.assertNotIn('a' * 1001, system)
+            with conf.supybot.plugins.Pollinations.search_snippet_length.context(2000):
+                calls.clear()
+                self.assertResponse('pollinations search long', '[T] Ok. | https://example.com/')
+            system = '\n'.join(m['content'] for m in calls[1]['json']['messages'] if m['role'] == 'system')
+            self.assertIn('TAIL', system)
+
     def testFallsBackToSearxng(self):
         searx = _response(200, {'results': [
             {'title': 'Limnoria', 'url': 'https://limnoria.net/', 'content': 'A Python IRC bot'}]})

@@ -95,6 +95,7 @@ All settings can be configured per-channel using:
 | `search_text_model` | "openai-fast" | Model that writes answers from tavily/searxng results |
 | `search_text_fallback_model` | "gpt-oss" | Space-separated fallbacks for `search_text_model` |
 | `search_results` | 5 | Results asked from the backend |
+| `search_snippet_length` | 1000 | Max characters of each result's text given to `search_text_model` (Tavily extracts are long; SearXNG snippets are short) |
 | `search_sources` | 1 | Source URLs appended to the answer (0 for none) |
 | `search_shorten_urls` | True | Shorten source URLs with is.gd |
 | `search_timeout` | 15 | Timeout in seconds for tavily/searxng requests |

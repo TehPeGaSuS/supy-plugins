@@ -483,15 +483,16 @@ class Pollinations(callbacks.Plugin):
         return url
 
     @staticmethod
-    def _search_results(items, limit):
-        """Keep (title, url, snippet) for results that have a URL."""
+    def _search_results(items, limit, length):
+        """Keep (title, url, snippet) for results that have a URL, snippets
+        cut to length characters."""
         results = []
         for item in items or []:
             if isinstance(item, dict) and item.get("url"):
                 results.append((
                     (item.get("title") or "").strip(),
                     item["url"],
-                    " ".join((item.get("content") or "").split())[:400],
+                    " ".join((item.get("content") or "").split())[:length],
                 ))
         return results[:limit]
 
@@ -595,7 +596,8 @@ class Pollinations(callbacks.Plugin):
         if want_answer and isinstance(data, dict):
             answer = (data.get("answer") or "").strip()
         results = self._search_results(data.get("results") if isinstance(data, dict) else None,
-                                       self.registryValue("search_results", channel))
+                                       self.registryValue("search_results", channel),
+                                       self.registryValue("search_snippet_length", channel))
         return (answer, results)
 
     def _search_searxng(self, query, channel):
@@ -618,7 +620,8 @@ class Pollinations(callbacks.Plugin):
             self.log.warning("SearXNG search failed: %r", e)
             return None
         results = self._search_results(data.get("results") if isinstance(data, dict) else None,
-                                       self.registryValue("search_results", channel))
+                                       self.registryValue("search_results", channel),
+                                       self.registryValue("search_snippet_length", channel))
         return ("", results)
 
     def _search_allowed(self, irc, msg):

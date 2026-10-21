@@ -270,6 +270,15 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Pollinations,
+    "search_snippet_length",
+    registry.PositiveInteger(
+        1000,
+        _("""Maximum characters of each result's text passed to search_text_model. Tavily's page extracts are long and benefit from more; SearXNG snippets are short anyway."""),
+    ),
+)
+
+conf.registerChannelValue(
+    Pollinations,
     "search_sources",
     registry.NonNegativeInteger(
         1,
