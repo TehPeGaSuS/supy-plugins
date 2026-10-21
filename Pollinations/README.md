@@ -105,7 +105,7 @@ All settings can be configured per-channel using:
 | `search_daily_limit` | 30 | Tavily + Pollinations searches per UTC day across all channels (global, 0 for no limit); SearXNG is not counted. 30 fits Tavily's free plan |
 | `search_cooldown` | 30 | Seconds between searches per user (0 to disable) |
 | `search_model` | "sonar" | Model for the `pollinations` backend (must support web search, see `models search`; paid) |
-| `search_prompt` | "You are answering on IRC. Reply in one or two full, natural sentences… key context… plain text, no sources/URLs/markdown… never ask the user questions" | Instructions for `search` only (e.g. no citations/markdown) |
+| `search_prompt` | "IRC bot: answer in one plain-text line, max 300 chars. Direct answer first, then key context…" (352 chars, so it can be set again with one IRC `config` line) | Instructions for `search` only (e.g. no citations/markdown) |
 | `search_use_prompt` | False | If True, `search` also uses the main `prompt` (personality) before `search_prompt`; if False only `search_prompt` is used |
 | `search_thinking` | "Thinking..." | Line sent before a `search` answer; empty disables |
 | `search_fallback_model` | "gemini-search" | Space-separated fallbacks for `search` |
