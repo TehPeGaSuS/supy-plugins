@@ -297,6 +297,8 @@ class Pollinations(callbacks.Plugin):
         # URLs left on their own after the last sentence
         content = re.sub(r"(?:[ \t]+(?:https?://\S+|(?:www\.)?[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|io|gov|edu|fr|uk|de|es|pt|br|no|eu|info)(?:/\S*)?))+[ \t]*$", "", content, flags=re.M)
         content = re.sub(r"(?im)^\s*(?:sources?|references?)\s*:.*$", "", content)
+        # Bare numbered citations: "third [3][15]." or "[1, 2]"
+        content = re.sub(r"\s*\[\d+(?:\s*[,-]\s*\d+)*\](?:\[\d+(?:\s*[,-]\s*\d+)*\])*", "", content)
         content = re.sub(r"\*\*(.+?)\*\*", "\x02\\1\x02", content)
         content = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", "\x1d\\1\x1d", content)
         content = re.sub(r"`([^`\n]+)`", r"\1", content)

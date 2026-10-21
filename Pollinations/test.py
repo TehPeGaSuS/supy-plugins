@@ -380,6 +380,12 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertEqual((stats['searches'], stats['capped'], stats['tavily_credits'],
                           stats['tavily_searches']), (0, 0, 0, 0))
 
+    def testBareCitationsRemoved(self):
+        clean = self.plugin._clean_markdown
+        self.assertEqual(clean('Jorge Martín third [3][15].'), 'Jorge Martín third.')
+        self.assertEqual(clean('Won in 2026 [1, 2] at Mandalika [4-6].'), 'Won in 2026 at Mandalika.')
+        self.assertEqual(clean('Rated [PG] in [x]'), 'Rated [PG] in [x]')
+
     def testSearchUsage(self):
         with self.plugin.dict_lock:
             self.plugin._roll_search_stats()
