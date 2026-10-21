@@ -88,7 +88,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         })
         with patch.object(self.plugin.session, 'post', return_value=tavily) as post:
             self.assertResponse('pollinations search latest kernel',
-                                'Linux 6.17 is the latest stable kernel. | https://kernel.org/')
+                                '[T] Linux 6.17 is the latest stable kernel. | https://kernel.org/')
         url = post.call_args[0][0]
         self.assertEqual(url, 'https://api.tavily.com/search')
         kwargs = post.call_args[1]
@@ -113,7 +113,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
 
         with conf.supybot.plugins.Pollinations.tavily_rewrite.context(True):
             with patch.object(self.plugin.session, 'post', side_effect=post):
-                self.assertResponse('pollinations search latest kernel', 'It is 6.17. | https://kernel.org/')
+                self.assertResponse('pollinations search latest kernel', '[T] It is 6.17. | https://kernel.org/')
         self.assertFalse(calls[0][1]['json']['include_answer'])
         chat = calls[1][1]['json']
         self.assertEqual(chat['model'], 'openai-fast')
@@ -133,7 +133,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         with patch.object(self.plugin.session, 'post', side_effect=post), \
                 patch.object(self.plugin.session, 'get', return_value=searx) as get:
             self.assertResponse('pollinations search limnoria',
-                                'Limnoria is a Python IRC bot. | https://limnoria.net/')
+                                '[S] Limnoria is a Python IRC bot. | https://limnoria.net/')
         self.assertEqual(get.call_args[0][0], 'http://127.0.0.1:8888/search')
         self.assertEqual(get.call_args[1]['params']['format'], 'json')
 
@@ -158,7 +158,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         tavily = _response(200, {'answer': 'Yes.', 'results': []})
         with conf.supybot.plugins.Pollinations.search_daily_limit.context(1), \
                 patch.object(self.plugin.session, 'post', return_value=tavily):
-            self.assertResponse('pollinations search one', 'Yes.')
+            self.assertResponse('pollinations search one', '[T] Yes.')
             self.assertResponse('pollinations search two',
                                 'Daily search limit reached (1). It resets at 00:00 UTC.')
 
@@ -166,7 +166,7 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         tavily = _response(200, {'answer': 'Yes.', 'results': []})
         with conf.supybot.plugins.Pollinations.search_cooldown.context(30), \
                 patch.object(self.plugin.session, 'post', return_value=tavily):
-            self.assertResponse('pollinations search one', 'Yes.')
+            self.assertResponse('pollinations search one', '[T] Yes.')
             self.assertRegexp('pollinations search two', r'^Please wait \d+s before searching again\.$')
 
     def testShortensSourceUrl(self):
@@ -179,14 +179,14 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
 
         with conf.supybot.plugins.Pollinations.search_shorten_urls.context(True), \
                 patch.object(self.plugin.session, 'post', side_effect=post):
-            self.assertResponse('pollinations search long', 'Yes. | https://is.gd/abc123')
+            self.assertResponse('pollinations search long', '[T] Yes. | https://is.gd/abc123')
 
     def testHideSources(self):
         tavily = _response(200, {'answer': 'Yes.', 'results': [
             {'title': 'kernel.org', 'url': 'https://kernel.org/', 'content': ''}]})
         with conf.supybot.plugins.Pollinations.search_sources.context(0), \
                 patch.object(self.plugin.session, 'post', return_value=tavily):
-            self.assertResponse('pollinations search kernel', 'Yes.')
+            self.assertResponse('pollinations search kernel', '[T] Yes.')
 
     def testLongAnswerSplitByMoresInstant(self):
         answer = ' '.join(['word%d' % i for i in range(150)])
@@ -203,6 +203,12 @@ class PollinationsSearchTestCase(ChannelPluginTestCase):
         self.assertIn('word0', replies[0])
         self.assertIn('word149', joined)
         self.assertNotIn('more message', joined)
+
+    def testPollinationsBackendTag(self):
+        with conf.supybot.plugins.Pollinations.search_backend.context(['pollinations']), \
+                patch.object(self.plugin.session, 'post', return_value=_chat_response('Paid answer.')) as post:
+            self.assertResponse('pollinations search kernel', '[P] Paid answer.')
+        self.assertEqual(post.call_args[1]['json']['model'], 'sonar')
 
     def testSearchUsage(self):
         usage = _response(200, {'account': {'current_plan': 'Researcher',

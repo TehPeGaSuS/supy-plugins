@@ -295,11 +295,11 @@ class Pollinations(callbacks.Plugin):
         content = re.sub(r"[ \t]{2,}", " ", content)
         return content.strip()
 
-    def _send_reply(self, irc, msg, channel, content, suffix=""):
+    def _send_reply(self, irc, msg, channel, content, suffix="", tag=""):
         content = self._clean_markdown(content)
         if self.registryValue("nick_strip", msg.channel):
             content = re.sub(r"^%s: " % (irc.nick), "", content)
-        content = content.rstrip() + suffix
+        content = tag + content.rstrip() + suffix
 
         prefix = self.registryValue("nick_prefix", msg.channel)
         if self.registryValue("reply_intact", msg.channel):
@@ -312,7 +312,7 @@ class Pollinations(callbacks.Plugin):
             text = "%s: %s" % (msg.nick, response_text) if prefix else response_text
             irc.reply(text, prefixNick=False, to=channel)
 
-    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix=""):
+    def _chat(self, irc, msg, text, model_setting="text_model", fallback_setting="text_fallback_model", extra_prompt_setting=None, persona_setting=None, thinking_setting=None, extra_system=None, suffix="", tag=""):
         channel = msg.channel if irc.isChannel(msg.channel) else msg.nick
         
         if not self.active_requests.acquire(blocking=False):
@@ -421,7 +421,7 @@ class Pollinations(callbacks.Plugin):
                 irc.reply("The AI service is currently unavailable, please try again in a moment.", prefixNick=False)
                 return
 
-            self._send_reply(irc, msg, channel, content, suffix)
+            self._send_reply(irc, msg, channel, content, suffix, tag)
 
             with self.dict_lock:
                 self.last_reply_time[msg.channel] = time.time()
@@ -597,7 +597,7 @@ class Pollinations(callbacks.Plugin):
 
         for backend in backends:
             if backend == "pollinations":
-                self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt")
+                self._chat(irc, msg, text, "search_model", "search_fallback_model", "search_prompt", "search_use_prompt", tag="[P] ")
                 return
             if backend == "tavily":
                 found = self._search_tavily(text, msg.channel)
@@ -609,12 +609,14 @@ class Pollinations(callbacks.Plugin):
             if not found or not (found[0] or found[1]):
                 continue
             answer, results = found
+            # Short marker of which backend answered: [T]avily, [S]earXNG
+            tag = "[%s] " % backend[0].upper()
             urls = [url for _title, url, _snippet in results[:self.registryValue("search_sources", msg.channel)]]
             if self.registryValue("search_shorten_urls", msg.channel):
                 urls = [self._shorten_url(url) for url in urls]
             suffix = (" | " + " ".join(urls)) if urls else ""
             if answer:
-                self._send_reply(irc, msg, channel, answer, suffix)
+                self._send_reply(irc, msg, channel, answer, suffix, tag)
                 return
             sources = "\n\n".join(
                 "[%d] %s (%s)\n%s" % (i, title, url, snippet)
@@ -623,7 +625,7 @@ class Pollinations(callbacks.Plugin):
                      "Answer only from these results. If they do not answer the question, "
                      "say you could not find it. Do not write the [n] numbers." % sources)
             self._chat(irc, msg, text, "search_text_model", "search_text_fallback_model",
-                       "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix)
+                       "search_prompt", "search_use_prompt", extra_system=extra, suffix=suffix, tag=tag)
             return
 
         self._search_refund()

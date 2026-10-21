@@ -43,7 +43,7 @@ Answers using live web search. Backends are tried in the order of `search_backen
 - `searxng`: your own [SearXNG](https://docs.searxng.org) instance (free, no quota); `search_text_model` writes the answer from the results.
 - `pollinations`: a paid Pollinations search model (`search_model`, falling back to `search_fallback_model`). It replies itself, so put it last.
 
-Answers from tavily/searxng end with `search_sources` source URLs. Uses are capped per UTC day (`search_daily_limit`) and per user (`search_cooldown`); the daily count lives in memory and restarts with the bot.
+Answers start with the backend that answered: `[T]` Tavily, `[S]` SearXNG, `[P]` Pollinations. Answers from tavily/searxng end with `search_sources` source URLs. Uses are capped per UTC day (`search_daily_limit`) and per user (`search_cooldown`); the daily count lives in memory and restarts with the bot.
 
 Long answers are split by Limnoria itself: `supybot.reply.mores.instant` (per channel, default 1) is how many chunks are sent at once before `(N more messages)`, e.g. `config channel #chan supybot.reply.mores.instant 3`.  
 **Examples:**
