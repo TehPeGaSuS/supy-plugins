@@ -39,7 +39,7 @@ Generate images from text descriptions.
 ### Live Web Search
 `search <query>`
 
-Answers a question from the live web in one IRC line, e.g. `[P] Marco Bezzecchi won the Indonesian GP on 11 October 2026; Fernández was second.` Everything about it (backends, limits, costs, settings, SearXNG setup) is in [Web Search](#web-search).  
+Answers a question from the live web in a few sentences (up to about 1000 characters, i.e. two or three IRC lines), e.g. `[P] Marco Bezzecchi won the Indonesian GP on 11 October 2026; Fernández was second.` Everything about it (backends, limits, costs, settings, SearXNG setup) is in [Web Search](#web-search).  
 **Examples:**
 `search latest stable Linux kernel version`
 `search who won the last MotoGP race`
@@ -133,7 +133,24 @@ A backend is **skipped** when it is not configured (empty key/URL), has reached 
 
 ### Recommended setups
 
-**Best answers, paid first, free after** (what this plugin was tuned with):
+**Free first, paid as backup** (the setup this plugin was tuned with, October 2026):
+```
+/msg yourbot config plugins.Pollinations.search_backend tavily pollinations searxng
+/msg yourbot config plugins.Pollinations.tavily_rewrite True
+/msg yourbot config plugins.Pollinations.tavily_depth basic
+/msg yourbot config plugins.Pollinations.search_snippet_length 5000
+/msg yourbot config plugins.Pollinations.search_text_model gpt-oss
+/msg yourbot config plugins.Pollinations.search_text_fallback_model openai-fast
+/msg yourbot config plugins.Pollinations.search_reasoning_effort low
+/msg yourbot config plugins.Pollinations.search_model sonar
+/msg yourbot config plugins.Pollinations.search_fallback_model ""
+/msg yourbot config plugins.Pollinations.tavily_daily_limit 30
+/msg yourbot config plugins.Pollinations.pollinations_daily_limit 15
+/msg yourbot config channel #yourchannel supybot.reply.mores.instant 2
+```
+Tavily answers the first 30 searches of the day (one free credit plus ~0.0002 Quest pollen for gpt-oss each, about 5 s); Sonar takes the next 15 and any search Tavily fails or finds nothing for (~0.0041 paid pollen each); SearXNG answers the rest for free. What was tried and dropped: `tavily_depth advanced` (2 credits, slower, no better answers), `search_reasoning_effort medium` (14 s instead of 5 s for one extra fact), `search_snippet_length` 1000 (cut off details such as exact version numbers that 5000 kept, for about 0.00002 pollen more).
+
+**Best answers, paid first, free after:**
 ```
 /msg yourbot config plugins.Pollinations.search_backend pollinations tavily searxng
 /msg yourbot config plugins.Pollinations.search_model sonar
@@ -172,13 +189,21 @@ Every model call made by the plugin (`chat` included) gets the **current UTC dat
 
 The default `search_prompt`:
 ```
-IRC bot: answer in one plain-text line, max 300 chars. Direct answer first, then key context (when/where/score). For last/latest/now, use the current date given and name the event/date. If ambiguous, take the likeliest meaning and say so; if unsure, say so. Use the question's language. No markdown, emoji, [n], URLs, sources, filler or questions back.
+IRC bot: reply in sentences, max 1000 chars, no lists/headings. Direct answer first, then useful detail (when/where/how/numbers). For last/latest/now, use today's date and name the event/date. If ambiguous, pick the likeliest meaning and say so; if unsure, say so. Use the question's language. No markdown, emoji, [n], URLs, sources or questions back.
 ```
-It is 352 characters on purpose: `config plugins.Pollinations.search_prompt <text>` must fit in one IRC line (512 bytes including `PRIVMSG yourbot :` and your hostmask as the server relays it), so a prompt of about 360 characters is the practical maximum when set from IRC. A longer prompt can be set by editing the bot's `.conf` file:
+It is 351 characters on purpose: `config plugins.Pollinations.search_prompt <text>` must fit in one IRC line (512 bytes including `PRIVMSG yourbot :` and your hostmask as the server relays it), so a prompt of about 360 characters is the practical maximum when set from IRC. A longer prompt can be set by editing the bot's `.conf` file:
 1. Find `supybot.plugins.Pollinations.search_prompt: ...` (channel values are `supybot.plugins.Pollinations.search_prompt.#channel: ...`) and edit the text after `: `, keeping it on one line.
 2. Right away run `/msg yourbot config reload`, or stop the bot before editing and start it after. The bot rewrites the `.conf` periodically and would otherwise overwrite your edit.
 
 To restore the default: `/msg yourbot config setdefault plugins.Pollinations.search_prompt`.
+
+Why it is worded this way (each part fixes something seen in testing):
+- **`max 1000 chars, no lists/headings`**: with long Tavily extracts (`search_snippet_length 5000`) and no length rule, gpt-oss wrote a whole article with headings, bullet lists and numbered steps (five IRC chunks). With a strict one-line limit (300 characters) answers were complete but sometimes terse. 1000 characters is two or three IRC lines; set `supybot.reply.mores.instant` to 2 or 3 so they are sent at once. Models count characters loosely, so expect roughly 600–1200.
+- **`reply in sentences`, `then useful detail (when/where/how/numbers)`**: without these, small models answer like a database label (`Last MotoGP season champion: Marc Márquez – 2025 season.`).
+- **`For last/latest/now, use today's date and name the event/date`**: the plugin gives every model the current UTC date and time; this makes it use them and say which race, release or day the answer is about.
+- **`If ambiguous… if unsure, say so`**: "the last MotoGP" can mean the last race or the last season; an honest "unclear" beats a confident wrong answer.
+- **`No … [n], URLs, sources or questions back`**: Sonar appends `[3][15]` citations and models like to offer "want me to look that up?". The plugin also strips citations itself, see [Answer formatting](#answer-formatting).
+- An earlier default (`answer in one plain-text line, max 300 chars…`) is a good choice if you want strictly one line per answer.
 
 `search_use_prompt True` puts the main `prompt` (bot personality) before `search_prompt`.
 

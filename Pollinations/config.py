@@ -154,7 +154,7 @@ conf.registerChannelValue(
     Pollinations,
     "search_prompt",
     registry.String(
-        "IRC bot: answer in one plain-text line, max 300 chars. Direct answer first, then key context (when/where/score). For last/latest/now, use the current date given and name the event/date. If ambiguous, take the likeliest meaning and say so; if unsure, say so. Use the question's language. No markdown, emoji, [n], URLs, sources, filler or questions back.",
+        "IRC bot: reply in sentences, max 1000 chars, no lists/headings. Direct answer first, then useful detail (when/where/how/numbers). For last/latest/now, use today's date and name the event/date. If ambiguous, pick the likeliest meaning and say so; if unsure, say so. Use the question's language. No markdown, emoji, [n], URLs, sources or questions back.",
         _("""Instructions for the 'search' command only. Used on its own, or appended to the main prompt if search_use_prompt is on."""),
     ),
 )
