@@ -412,6 +412,68 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, closed)
             self.assertResponse(' ', 'hubot closed #1347 (opened by octocat)')
 
+    def testVariablesDocPushExample(self):
+        # the push example in VARIABLES.md, kept here so the doc can't drift
+        sha = '3154423facdc7041d731fad3b5b57ac887a2ad66'
+        commit_url = 'https://github.com/octocat/Hello-World/commit/' + sha
+        payload = {
+            'ref': 'refs/heads/main',
+            'before': '16c0988f7a2c3a6c52b1b5a3b2a6c5e6f1e7d8c9',
+            'after': sha,
+            'compare': 'https://github.com/octocat/Hello-World/compare/'
+                       '16c0988f7a2c...3154423facdc',
+            'commits': [{
+                'id': sha,
+                'message': 'Fix crash on empty config\n\n'
+                           'The parser assumed at least one section.',
+                'timestamp': '2026-10-26T14:02:11+01:00',
+                'url': commit_url,
+                'author': {'name': 'The Octocat',
+                           'email': 'octocat@github.com',
+                           'username': 'octocat'},
+                'committer': {'name': 'The Octocat',
+                              'email': 'octocat@github.com',
+                              'username': 'octocat'},
+                'added': [], 'removed': [], 'modified': ['config.py']}],
+            'repository': {'name': 'Hello-World',
+                           'full_name': 'octocat/Hello-World',
+                           'html_url': 'https://github.com/octocat/'
+                                       'Hello-World',
+                           'owner': {'name': 'octocat', 'login': 'octocat'}},
+            'pusher': {'name': 'octocat', 'email': 'octocat@github.com'},
+            'sender': {'login': 'octocat'}}
+        self.assertNotError('githooks announce add %s octocat Hello-World'
+                            % self.channel)
+        with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
+             conf.supybot.plugins.GitHooks.format.push.context(
+                 'echo $repository__full_name ($ref__branch): '
+                 '$__commit__author__username committed '
+                 '$__commit__id__short: $__commit__message__firstline - '
+                 '$__commit__url'):
+            self.cb.announce.onPayload({'X-GitHub-Event': 'push'}, payload)
+            self.assertResponse(
+                ' ', 'octocat/Hello-World (main): octocat committed '
+                '3154423: Fix crash on empty config - ' + commit_url)
+        with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
+             conf.supybot.plugins.GitHooks.format.push.context(
+                 'echo $ref | $before__short..$after__short | '
+                 '$pusher__name | $__num_commits | '
+                 '$__files__added__len/$__files__removed__len/'
+                 '$__files__modified__len | $__commit__timestamp | '
+                 '$__commit__author__name | $__commit__author__email'):
+            self.cb.announce.onPayload({'X-GitHub-Event': 'push'}, payload)
+            self.assertResponse(
+                ' ', 'refs/heads/main | 16c0988..3154423 | octocat | 1 | '
+                '0/0/1 | 2026-10-26T14:02:11+01:00 | The Octocat | '
+                'octocat@github.com')
+        # the default GitBot-style line, colours stripped
+        self.cb.announce.onPayload({'X-GitHub-Event': 'push'}, payload)
+        m = self.getMsg(' ')
+        self.assertEqual(
+            ircutils.stripFormatting(m.args[1]),
+            '[GitHub] (octocat/Hello-World) octocat pushed 3154423 to main: '
+            'Fix crash on empty config - ' + commit_url)
+
     def testForgeDifferences(self):
         # checked against each forge's webhook source, see VARIABLES.md
         events = conf.supybot.plugins.GitHooks.format.get('global').events

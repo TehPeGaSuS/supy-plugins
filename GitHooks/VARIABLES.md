@@ -15,6 +15,7 @@ two kinds:
 * [Worked example](#worked-example)
 * [Who is who](#who-is-who)
 * [Variables the plugin adds](#variables-the-plugin-adds)
+* [Worked example: a push](#worked-example-a-push)
 * [Shorthand](#shorthand)
 * [Differences between forges](#differences-between-forges)
 * [Finding a name](#finding-a-name)
@@ -211,6 +212,96 @@ page, as `$__page__title`, `$__page__action`, `$__page__html_url`...
 | `__short` | any 40-character commit id, e.g. `$after__short` | the first 7 characters |
 | `__branch` | any full ref, e.g. `$ref__branch` | `refs/heads/main` becomes `main` (a ref that is already a short name gets no `__branch`) |
 | `__firstline` | any text, e.g. `$comment__body__firstline` | the first non-empty line, at most 300 characters, skipping quoted `> ` lines |
+
+## Worked example: a push
+
+Part of the webhook GitHub sends when octocat pushes one commit to `main`:
+
+```json
+{
+  "ref": "refs/heads/main",
+  "before": "16c0988f7a2c3a6c52b1b5a3b2a6c5e6f1e7d8c9",
+  "after": "3154423facdc7041d731fad3b5b57ac887a2ad66",
+  "compare": "https://github.com/octocat/Hello-World/compare/16c0988f7a2c...3154423facdc",
+  "commits": [
+    {
+      "id": "3154423facdc7041d731fad3b5b57ac887a2ad66",
+      "message": "Fix crash on empty config\n\nThe parser assumed at least one section.",
+      "timestamp": "2026-10-26T14:02:11+01:00",
+      "url": "https://github.com/octocat/Hello-World/commit/3154423facdc7041d731fad3b5b57ac887a2ad66",
+      "author": { "name": "The Octocat", "email": "octocat@github.com", "username": "octocat" },
+      "added": [],
+      "removed": [],
+      "modified": ["config.py"]
+    }
+  ],
+  "repository": { "name": "Hello-World", "full_name": "octocat/Hello-World" },
+  "pusher": { "name": "octocat", "email": "octocat@github.com" },
+  "sender": { "login": "octocat" }
+}
+```
+
+`commits` is a list, so the plugin sends one line per commit and puts the
+commit of that line under `__commit` (see
+[Variables the plugin adds](#variables-the-plugin-adds)). A per-event format
+for pushes:
+
+```
+@config supybot.plugins.GitHooks.format.push "echo $repository__full_name ($ref__branch): $__commit__author__username committed $__commit__id__short: $__commit__message__firstline - $__commit__url"
+```
+
+gives:
+
+```
+octocat/Hello-World (main): octocat committed 3154423: Fix crash on empty config - https://github.com/octocat/Hello-World/commit/3154423facdc7041d731fad3b5b57ac887a2ad66
+```
+
+**The commit of this line:**
+
+| Variable | Path in the JSON | Value |
+|---|---|---|
+| `$__commit__id` | `commits` → (this commit) → `id` | `3154423facdc7041d731fad3b5b57ac887a2ad66` |
+| `$__commit__id__short` | the same, first 7 characters | `3154423` |
+| `$__commit__message` | → `message` | the whole message, all lines |
+| `$__commit__message__firstline` | the same, first line | `Fix crash on empty config` |
+| `$__commit__timestamp` | → `timestamp` | `2026-10-26T14:02:11+01:00` |
+| `$__commit__url` | → `url` | `https://github.com/octocat/Hello-World/commit/3154423…` |
+| `$__commit__author__name` | → `author` → `name` | `The Octocat` |
+| `$__commit__author__email` | → `author` → `email` | `octocat@github.com` |
+| `$__commit__author__username` | → `author` → `username` | `octocat` (missing when the forge doesn't know the author's account, so it's left as typed; the shorthand `$user` falls back to the git name) |
+
+**The whole push** (the same on every line of it):
+
+| Variable | Path in the JSON | Value |
+|---|---|---|
+| `$ref` | `ref` | `refs/heads/main` |
+| `$ref__branch` | the same, without `refs/heads/` | `main` |
+| `$before__short` | `before`, first 7 characters | `16c0988` (the branch before the push) |
+| `$after__short` | `after`, first 7 characters | `3154423` (the branch after the push) |
+| `$compare` | `compare` | `https://github.com/octocat/Hello-World/compare/16c0988f7a2c...3154423facdc` (`$compare_url` on Gitea, Forgejo and Gogs) |
+| `$pusher__name` | `pusher` → `name` | `octocat` (`$pusher__login` on Gitea, Forgejo and Gogs) |
+| `$sender__login` | `sender` → `login` | `octocat` |
+| `$__num_commits` | made by the plugin | `1` |
+| `$__files__added__len` `$__files__removed__len` `$__files__modified__len` | made by the plugin | `0`, `0`, `1` |
+
+The author and the pusher aren't always the same person: if octocat pushes
+commits written by someone else, `$__commit__author__name` is that person and
+`$pusher__name` is still octocat.
+
+`$__commit__message` keeps the line breaks of the message, which IRC can't
+show, so use `$__commit__message__firstline` in announces.
+
+**The same with shorthand.** The default `format.global.push` uses only
+shorthand, and gives (colours left out):
+
+```
+[GitHub] (octocat/Hello-World) octocat pushed 3154423 to main: Fix crash on empty config - https://github.com/octocat/Hello-World/commit/3154423facdc7041d731fad3b5b57ac887a2ad66
+```
+
+For a push, `$user` is `$__commit__author__username`, `$ref` is
+`$__commit__id__short`, `$title` is `$__commit__message__firstline`, `$url` is
+`$__commit__url`, `$branch` is `$ref__branch` and `$count` is
+`$__num_commits`.
 
 ## Shorthand
 
