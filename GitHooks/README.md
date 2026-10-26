@@ -46,10 +46,11 @@ checked from `X-Hub-Signature(-256)`, `X-Gitea-Signature`,
 `X-Forgejo-Signature` or `X-Gogs-Signature` (old Gogs: the `secret` field).
 GitLab is not supported yet.
 
-`format.global` works unchanged on these forges (missing issue/PR URLs, which
-Gogs does not send, are rebuilt). If you keep the per-event `echo` formats,
+`format.global` works unchanged on these forges (the issue and release links
+Gogs does not send are rebuilt). If you keep the per-event `echo` formats,
 replace `$pusher__name` with `$pusher__login` and `$compare` with
-`$compare_url` in `format.push`.
+`$compare_url` in `format.push`. The other differences are listed in
+[VARIABLES.md](VARIABLES.md#differences-between-forges).
 
 ### Variable names
 

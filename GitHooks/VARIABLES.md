@@ -16,6 +16,7 @@ two kinds:
 * [Who is who](#who-is-who)
 * [Variables the plugin adds](#variables-the-plugin-adds)
 * [Shorthand](#shorthand)
+* [Differences between forges](#differences-between-forges)
 * [Finding a name](#finding-a-name)
 * [Template rules](#template-rules)
 * [Ready-made templates](#ready-made-templates)
@@ -200,15 +201,15 @@ being announced under `__commit`:
 Any other field of a commit works the same way: `commits` → (one commit) →
 `timestamp` is `$__commit__timestamp`.
 
-**Wiki edits** (`gollum` event) work the same: one line per edited page, as
-`$__page__title`, `$__page__action`, `$__page__html_url`...
+**Wiki edits** (GitHub's `gollum` event) work the same: one line per edited
+page, as `$__page__title`, `$__page__action`, `$__page__html_url`...
 
 **Endings** added to existing variables:
 
 | Ending | Added to | Value |
 |---|---|---|
 | `__short` | any 40-character commit id, e.g. `$after__short` | the first 7 characters |
-| `__branch` | any field called `ref`, e.g. `$ref__branch` | `refs/heads/main` becomes `main` |
+| `__branch` | any full ref, e.g. `$ref__branch` | `refs/heads/main` becomes `main` (a ref that is already a short name gets no `__branch`) |
 | `__firstline` | any text, e.g. `$comment__body__firstline` | the first non-empty line, at most 300 characters, skipping quoted `> ` lines |
 
 ## Shorthand
@@ -247,17 +248,18 @@ What they contain depends on the event:
 | `issue_comment` | `commented on issue #3` | `#3` | issue title | the comment |
 | `pull_request` | `opened pull request #3` | `#3` | PR title | the PR |
 | pull request reviews | `reviewed pull request #3` | `#3` | PR title | the PR or comment |
-| `commit_comment` | `commented on commit` | short commit id | first line of the comment | the comment |
+| `commit_comment` (GitHub only) | `commented on commit` | short commit id | first line of the comment | the comment |
 | `create` / `delete` | `created branch` | name of the branch/tag | | the repository |
 | `release` | `published release` | tag | release name | the release |
 | `fork` | `forked` | | name of the new fork | the fork |
-| `watch` / `star` | `starred` | | the repository | the repository |
+| `watch` / `star` (GitHub only) | `starred` | | the repository | the repository |
 
 `$user` is `$sender__login`, except for pushes, where it is the commit author's
 login (or git name if the forge sends no login), and for reviews, where it is
 the reviewer. A merged pull request has the action `merged` instead of
-`closed`. When the forge doesn't send a link (Gogs has no issue or pull
-request URLs), the plugin builds it from the repository URL.
+`closed`. When the forge doesn't send a link (Gogs has none for issues and
+releases), the plugin builds one from the repository URL. See
+[Differences between forges](#differences-between-forges).
 
 For other events the shorthand only has the common parts (`$repo`, `$user`,
 `$forge`, `$action`...); use the payload variables for the rest.
@@ -268,6 +270,45 @@ of some payloads: `$action`, `$ref`, `$number`, `$name`, `$url`. In
 In the per-event `echo` formats the payload wins (`$ref` of a push is
 `refs/heads/main`), so configs written for progval's plugin keep working. Use
 the `__` names, such as `$ref__branch`, when you need to be sure.
+
+## Differences between forges
+
+Gitea and Forgejo copy GitHub's payloads closely, Gogs less so. The shorthand
+already deals with everything below; it only matters when you write payload
+variables yourself. (Checked against GitHub's example payloads, and the
+webhook code of Gitea, Forgejo and Gogs 0.14.3.)
+
+**Links.** A field called `url` is the API address on GitHub, Gitea and
+Forgejo; the web page is `html_url`.
+
+| Link to | GitHub | Gitea / Forgejo | Gogs |
+|---|---|---|---|
+| issue | `$issue__html_url` | `$issue__html_url` | not sent: `$repository__html_url/issues/$issue__number`, or the shorthand `$url` |
+| pull request | `$pull_request__html_url` | `$pull_request__html_url` | `$pull_request__html_url` |
+| comment | `$comment__html_url` | `$comment__html_url` | `$comment__html_url` |
+| release | `$release__html_url` | `$release__html_url` | not sent, and Gogs has no page per release: the shorthand `$url` links `$repository__html_url/releases` |
+| user | `$sender__html_url` | `$sender__html_url` | not sent |
+| commit (push) | `$__commit__url` | `$__commit__url` | `$__commit__url` |
+| compare (push) | `$compare` | `$compare_url` | `$compare_url` |
+
+**Other fields.**
+
+| What | GitHub | Gitea / Forgejo | Gogs |
+|---|---|---|---|
+| who pushed | `$pusher__name` | `$pusher__login` | `$pusher__login` |
+| PR target branch | `$pull_request__base__ref` | `$pull_request__base__ref` | `$pull_request__base_branch` |
+| PR source branch | `$pull_request__head__ref` | `$pull_request__head__ref` | `$pull_request__head_branch` |
+| created/deleted branch or tag (`$ref` of `create`/`delete`) | `feature` | `feature`, but `refs/heads/feature` on Forgejo webhooks of type *Forgejo* | `feature` |
+| the label just added or removed | `$label__name` | `$label__name` on Forgejo; Gitea doesn't say which one | not sent |
+| the assignee of an assigned event | `$assignee__login` | `$issue__assignee__login` | `$issue__assignee__login` |
+
+The shorthand `$ref` and `$branch` are always the short name, and `$assignee`
+looks in both places.
+
+**Events.** `commit_comment`, `watch`/`star` and `gollum` are GitHub only.
+Gitea and Forgejo name pull request reviews `pull_request_approved`,
+`pull_request_rejected` and `pull_request_comment`, and have no `review` →
+`user`: there `$user` is the sender. Gogs has no review events.
 
 ## Finding a name
 
@@ -282,7 +323,7 @@ the `__` names, such as `$ref__branch`, when you need to be sure.
   the webhook settings of your forge.
 * **Your forge keeps the JSON it sent:** on GitHub, open the repository's
   *Settings → Webhooks →* (your webhook) *→ Recent Deliveries* and click a
-  delivery. Gitea and Forgejo have the same list on the webhook's page.
+  delivery. Gitea, Forgejo and Gogs have the same list on the webhook's page.
 * **Example payloads for every GitHub event**, one file per action, are in
   [octokit/webhooks](https://github.com/octokit/webhooks/tree/main/payload-examples/api.github.com)
   (e.g. `issues/opened.payload.json`). GitHub's own *Webhook events and

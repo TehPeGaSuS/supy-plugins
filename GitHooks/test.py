@@ -412,6 +412,32 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, closed)
             self.assertResponse(' ', 'hubot closed #1347 (opened by octocat)')
 
+    def testForgeDifferences(self):
+        # checked against each forge's webhook source, see VARIABLES.md
+        events = conf.supybot.plugins.GitHooks.format.get('global').events
+        with events.context(set(events()) | {'create', 'release'}), \
+             conf.supybot.plugins.GitHooks.format.get('global').context(
+                 '$what $ref $branch $url $assignee'):
+            # Forgejo-type webhooks send the full ref on create/delete
+            create = {'ref': 'refs/heads/feature', 'ref_type': 'branch',
+                      'repository': GITEA_REPO, 'sender': {'login': 'alice'}}
+            self.cb.announce.onPayload({'X-Forgejo-Event': 'create'}, create)
+            self.assertResponse(' ', 'created branch feature feature '
+                                'https://git.example/bob/proj')
+            # Gogs releases have no link: point at the releases page
+            release = {'action': 'published', 'repository': GITEA_REPO,
+                       'sender': {'login': 'alice'},
+                       'release': {'tag_name': 'v1', 'name': 'One'}}
+            self.cb.announce.onPayload({'X-Gogs-Event': 'release'}, release)
+            self.assertResponse(' ', 'published release v1 '
+                                'https://git.example/bob/proj/releases')
+            # Gitea/Forgejo/Gogs only have the assignee inside the issue
+            assigned = dict(GITEA_ISSUE, action='assigned',
+                            issue=dict(GITEA_ISSUE['issue'],
+                                       assignee={'login': 'dave'}))
+            self.cb.announce.onPayload({'X-Gitea-Event': 'issues'}, assigned)
+            self.assertRegexp(' ', r'^assigned issue #7 #7 .* dave$')
+
     def testShorthandInEchoFormats(self):
         with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
              conf.supybot.plugins.GitHooks.format.issues.opened.context(

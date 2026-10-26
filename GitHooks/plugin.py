@@ -267,6 +267,10 @@ def _global_vars(event, payload):
     for (key, path) in (('label', ('label', 'name')),
                         ('assignee', ('assignee', 'login'))):
         obj = payload.get(path[0])
+        if not isinstance(obj, dict) and key == 'assignee':
+            # Gitea, Forgejo and Gogs only have it inside the issue/PR
+            obj = (payload.get('issue') or payload.get('pull_request') or
+                   {}).get('assignee')
         if isinstance(obj, dict):
             v[key] = obj.get(path[1]) or ''
     if isinstance(payload.get('commits'), list):
@@ -320,16 +324,21 @@ def _global_vars(event, payload):
             v['body'] = _first_line(who.get('body') or who.get('content'))
     elif event in ('create', 'delete'):
         kind = payload.get('ref_type', 'ref')
-        v.update(what='%s %s' % (event + 'd', kind), ref=payload.get('ref', ''),
+        # Forgejo-type webhooks send the full ref, the others the short name
+        name = re.sub(r'^refs/(heads|tags)/', '', payload.get('ref') or '')
+        v.update(what='%s %s' % (event + 'd', kind), ref=name,
                  url=repo.get('html_url', ''))
         if kind == 'branch':
-            v['branch'] = payload.get('ref', '')
+            v['branch'] = name
     elif event == 'release':
         r = payload['release']
         v.update(what='%s release' % (v['action'] or 'published'),
                  ref=r.get('tag_name', ''), tag=r.get('tag_name', ''),
                  title=r.get('name') or r.get('tag_name', ''),
-                 body=_first_line(r.get('body')), url=r.get('html_url', ''))
+                 body=_first_line(r.get('body')),
+                 # Gogs sends no release link and has no page per release
+                 url=r.get('html_url') or
+                     '%s/releases' % repo.get('html_url', ''))
     elif event == 'fork':
         f = payload.get('forkee') or {}
         v.update(what='forked', title=f.get('full_name', ''),
@@ -507,7 +516,7 @@ class GitHooks(callbacks.Plugin):
                                    with_global=bool(global_.strip()))
             if global_.strip():
                 text = string.Template(global_).safe_substitute(repl)
-                text = re.sub(r' {2,}', ' ', text)  # empty variables
+                text = re.sub(r' {2,}', ' ', text).strip(' ')  # empty variables
                 irc.queueMsg(ircmsgs.privmsg(channel, text))
                 return
             tokens = callbacks.tokenize(format_)
