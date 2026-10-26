@@ -124,7 +124,7 @@ same thing for every common event:
 | `$what` | ready phrase, e.g. "opened issue #3", "committed" |
 | `$kind` `$verb` | `issue`/`PR`/`commit`... and `opened`/`commented on`/`merged`... |
 | `$action` | the raw action (opened, closed, labeled...) |
-| `$ref` | `#3`, short commit id, tag or branch name |
+| `$id` | `#3`, short commit id, tag or branch name |
 | `$number` `$title` `$body` | issue/PR number, title, first line of the text |
 | `$url` `$branch` | link to the thing, branch |
 | `$label` `$assignee` `$tag` | for labeled/assigned events and releases |
@@ -166,10 +166,10 @@ There are also special variables:
 Concerning push events, one line is formatted per commit; it is given extra
  variables: `$__commit__foo` for each `data['commits'][X]['foo']`.
 
-The shorthand (`$user`, `$repo`, `$number`, `$title`, `$url`...) works in these
-formats too. Where the payload has a top-level field with the same name
-(`$action`, `$ref`, `$number`), the payload's value is used, so templates
-written for progval's plugin keep working.
+The shorthand (`$user`, `$repo`, `$id`, `$title`, `$url`...) works in these
+formats too. It never hides a payload variable: where the payload has a
+top-level field with the same name (`$action`, `$number`), the payload's value
+is used, so templates written for progval's plugin keep working.
 
 Format of 'issues' and 'pull_request' events can be overridden on a per-action
 basis, with the `supybot.plugins.GitHooks.format.<type>.<action>` config variable.

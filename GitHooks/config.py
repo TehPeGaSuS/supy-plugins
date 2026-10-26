@@ -77,14 +77,22 @@ conf.registerGroup(GitHooks, 'format')
 # The defaults reproduce the style of the GitBot IRC bot:
 # [GitHub] (owner/repo) [issue] user opened #7: title - url
 DEFAULT_GLOBAL = ('\x0303[$forge]\x03 \x0314($repo)\x03 [$kind] '
-                  '\x02$user\x02 $verb \x0313$ref\x03: $title - $url')
+                  '\x02$user\x02 $verb \x0313$id\x03: $title - $url')
 DEFAULT_GLOBAL_PUSH = ('\x0303[$forge]\x03 \x0314($repo)\x03 '
-                       '\x02$user\x02 pushed \x0313$ref\x03 to '
+                       '\x02$user\x02 pushed \x0313$id\x03 to '
                        '\x0307$branch\x03: $title - $url')
 DEFAULT_PUSH_SUMMARY = ('\x0303[$forge]\x03 \x0314($repo)\x03 \x02$user\x02 '
                         'pushed $count commits to \x0307$branch\x03 - $url')
 DEFAULT_PUSH_COMMIT = ('\x0303[$forge]\x03 \x0314($repo)\x03 '
-                       '\x0313$ref\x03 - $title - $url')
+                       '\x0313$id\x03 - $title - $url')
+# The shorthand $ref was renamed $id so that $ref is always the payload's
+# ref. Limnoria saves default values in the bot's config, so templates still
+# equal to these old defaults are upgraded when the plugin loads.
+OLD_DEFAULTS = {
+    'global': DEFAULT_GLOBAL.replace('$id', '$ref'),
+    'global.push': DEFAULT_GLOBAL_PUSH.replace('$id', '$ref'),
+    'global.push.commit': DEFAULT_PUSH_COMMIT.replace('$id', '$ref'),
+}
 conf.registerChannelValue(GitHooks.format, 'global',
         registry.String(DEFAULT_GLOBAL,
         _("""Plain-text template used for push, issue, pull request and
@@ -92,7 +100,7 @@ conf.registerChannelValue(GitHooks.format, 'global',
         format such as format.issues.closed still wins, and "ignore" there
         silences it). No commands: colour codes (Ctrl+K, Ctrl+B, Ctrl+O) can
         be pasted directly from your IRC client. Shorthand: $repo $owner $name
-        $user $what $kind $verb $action $ref $title $url $branch $forge
+        $user $what $kind $verb $action $id $title $url $branch $forge
         (GitHub, Gitea, Forgejo or Gogs); the payload variables like
         $issue__title also work. Empty disables it.""")))
 conf.registerChannelValue(GitHooks.format.get('global'), 'events',
@@ -107,7 +115,7 @@ conf.registerChannelValue(GitHooks.format.get('global'), 'push',
         registry.String(DEFAULT_GLOBAL_PUSH,
         _("""Plain-text template for each commit of a push. If empty, or if
         you changed format.global and left this one alone, format.global is
-        used. Example: $user pushed $ref to $branch: $title
+        used. Example: $user pushed $id to $branch: $title
         - $url""")))
 conf.registerChannelValue(GitHooks.format.get('global').get('push'), 'summary',
         registry.String(DEFAULT_PUSH_SUMMARY,

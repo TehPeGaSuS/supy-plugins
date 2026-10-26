@@ -359,7 +359,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
                 'It broke https://git.example/bob/proj/issues/7')
 
     def testGlobalFormatPush(self):
-        fmt = '$repo/$branch $user $ref $title $url'
+        fmt = '$repo/$branch $user $id $title $url'
         with conf.supybot.plugins.GitHooks.format.get('global').context(fmt):
             self.cb.announce.onPayload({'x-gogs-event': 'push'}, GITEA_PUSH)
             self.assertResponse(
@@ -479,7 +479,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
         events = conf.supybot.plugins.GitHooks.format.get('global').events
         with events.context(set(events()) | {'create', 'release'}), \
              conf.supybot.plugins.GitHooks.format.get('global').context(
-                 '$what $ref $branch $url $assignee'):
+                 '$what $id $branch $url $assignee'):
             # Forgejo-type webhooks send the full ref on create/delete
             create = {'ref': 'refs/heads/feature', 'ref_type': 'branch',
                       'repository': GITEA_REPO, 'sender': {'login': 'alice'}}
@@ -509,13 +509,36 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             self.assertResponse(' ', 'alice opened issue 7: It broke')
 
     def testPayloadWinsInEchoFormats(self):
-        # $ref is the short commit id in format.global, but an echo format
-        # keeps the payload's own ref field
+        # $ref is the payload's ref in both kinds of formats; the
+        # shorthand for the commit is $id
         with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
              conf.supybot.plugins.GitHooks.format.push.context(
-                 'echo $ref $ref__branch $user'):
+                 'echo $ref $ref__branch $id $user'):
             self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
-            self.assertResponse(' ', 'refs/heads/main main alice')
+            self.assertResponse(' ', 'refs/heads/main main aaaaaaa alice')
+        g = conf.supybot.plugins.GitHooks.format.get('global')
+        with g.context('$ref $id'), g.get('push').context('$ref $id'):
+            self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
+            self.assertResponse(' ', 'refs/heads/main aaaaaaa')
+
+    def testOldDefaultsUpgraded(self):
+        # a bot that saved its config before $ref became $id
+        from . import config as cfg
+        from .plugin import _upgrade_old_defaults
+        g = conf.supybot.plugins.GitHooks.format.get('global')
+        chan = g.get('push').get(self.channel)
+        try:
+            g.setValue(cfg.OLD_DEFAULTS['global'])
+            chan.setValue(cfg.OLD_DEFAULTS['global.push'])
+            g.get('push').get('commit').setValue('my own $ref')
+            _upgrade_old_defaults()
+            self.assertEqual(g(), cfg.DEFAULT_GLOBAL)
+            self.assertEqual(chan(), cfg.DEFAULT_GLOBAL_PUSH)
+            self.assertEqual(g.get('push').get('commit')(), 'my own $ref')
+        finally:
+            g.setValue(cfg.DEFAULT_GLOBAL)
+            g.get('push').unregister(self.channel)
+            g.get('push').get('commit').setValue(cfg.DEFAULT_PUSH_COMMIT)
 
     def testMaxAnnounceCommits(self):
         commits = [dict(GITEA_PUSH['commits'][0], message='c%d' % i)
@@ -537,7 +560,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
 
     def testGitBotStyle(self):
         fmt = ('\x0303[$forge]\x03 \x0314($repo)\x03 \x02$user\x02 '
-               '\x0313$ref\x03 - $title - $url')
+               '\x0313$id\x03 - $title - $url')
         commits = [dict(GITEA_PUSH['commits'][0], message='c%d' % i)
                    for i in range(5)]
         with conf.supybot.plugins.GitHooks.format.get('global').context(fmt), \
@@ -560,7 +583,7 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
     def testPushTemplate(self):
         g = conf.supybot.plugins.GitHooks.format.get('global')
         with g.context('GLOBAL $title'), g.get('push').context(
-                '$user pushed $ref to $branch: $title'):
+                '$user pushed $id to $branch: $title'):
             self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
             self.assertResponse(' ', 'alice pushed aaaaaaa to main: Fix it')
             self.cb.announce.onPayload({'X-Gitea-Event': 'issues'},

@@ -10,6 +10,14 @@ two kinds:
 * **Shorthand**, a few short names the plugin fills in for the common events,
   with the same meaning everywhere: `$user`, `$repo`, `$title`, `$url`.
 
+> **Tip: use the long form when you can.** A payload variable is exactly what
+> the forge sent, so you always know what you get. Shorthand is a convenience:
+> it picks a value for you (the commit author for a push, the reviewer for a
+> review...), which is handy for one template that covers every event, but
+> it's one more step between the webhook and your line. When a shorthand
+> doesn't give what you expected, look up the payload variable with
+> `@githooks vars` and use that.
+
 * [Quick start](#quick-start)
 * [Payload variables](#payload-variables)
 * [Worked example](#worked-example)
@@ -27,10 +35,10 @@ two kinds:
 The defaults already give GitBot-style lines. They are:
 
 ```
-format.global       ^C03[$forge]^C ^C14($repo)^C [$kind] ^B$user^B $verb ^C13$ref^C: $title - $url
-format.global.push  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed ^C13$ref^C to ^C07$branch^C: $title - $url
+format.global       ^C03[$forge]^C ^C14($repo)^C [$kind] ^B$user^B $verb ^C13$id^C: $title - $url
+format.global.push  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed ^C13$id^C to ^C07$branch^C: $title - $url
 format.global.push.summary  ^C03[$forge]^C ^C14($repo)^C ^B$user^B pushed $count commits to ^C07$branch^C - $url
-format.global.push.commit   ^C03[$forge]^C ^C14($repo)^C ^C13$ref^C - $title - $url
+format.global.push.commit   ^C03[$forge]^C ^C14($repo)^C ^C13$id^C - $title - $url
 format.global.hidden        ^C03[$forge]^C ^C14($repo)^C (+$hidden hidden commits)
 ```
 
@@ -39,7 +47,7 @@ pushes get `push.summary`, then shortened `push.commit` lines, then `hidden`.
 (`^C` is the colour code, Ctrl+K, and `^B` is bold, Ctrl+B.) To make your own:
 
 ```
-@config supybot.plugins.GitHooks.format.global "[$forge] ($repo) $user $action $ref - $title - $url"
+@config supybot.plugins.GitHooks.format.global "[$forge] ($repo) $user $action $id - $title - $url"
 ```
 
 **Put the template in double quotes.** Spaces are fine without them, but
@@ -298,10 +306,19 @@ shorthand, and gives (colours left out):
 [GitHub] (octocat/Hello-World) octocat pushed 3154423 to main: Fix crash on empty config - https://github.com/octocat/Hello-World/commit/3154423facdc7041d731fad3b5b57ac887a2ad66
 ```
 
-For a push, `$user` is `$__commit__author__username`, `$ref` is
-`$__commit__id__short`, `$title` is `$__commit__message__firstline`, `$url` is
-`$__commit__url`, `$branch` is `$ref__branch` and `$count` is
-`$__num_commits`.
+On a push, each shorthand stands for:
+
+| Shorthand | Long form | Value here |
+|---|---|---|
+| `$user` | `$__commit__author__username` (the git name if missing) | `octocat` |
+| `$id` | `$__commit__id__short` | `3154423` |
+| `$title` | `$__commit__message__firstline` | `Fix crash on empty config` |
+| `$url` | `$__commit__url` | `https://github.com/octocat/Hello-World/commit/3154423…` |
+| `$branch` | `$ref__branch` | `main` |
+| `$count` | `$__num_commits` | `1` |
+
+`$ref` is not shorthand: it's the payload's `ref`, `refs/heads/main`, in every
+kind of format.
 
 ## Shorthand
 
@@ -319,7 +336,7 @@ in these short names, with the same meaning for every supported event:
 | `$what` | a ready phrase such as `opened issue #3` or `committed` |
 | `$kind` | `issue`, `PR`, `commit`, `push`, `release`, `branch`... |
 | `$verb` | `opened`, `closed`, `merged`, `commented on`, `reviewed`, `pushed`... (`synchronize` becomes `updated`) |
-| `$ref` | what the event is about: `#3`, a short commit id, a tag or a branch |
+| `$id` | what the event is about: `#3`, a short commit id, a tag or a branch |
 | `$number` | issue or pull request number |
 | `$title` | title of the issue, pull request or release, or the commit message |
 | `$body` | first line of the text (issue, comment, review, release notes) |
@@ -332,7 +349,7 @@ in these short names, with the same meaning for every supported event:
 
 What they contain depends on the event:
 
-| Event | `$what` | `$ref` | `$title` | `$url` |
+| Event | `$what` | `$id` | `$title` | `$url` |
 |---|---|---|---|---|
 | `push` (once per commit) | `committed` | short commit id | first line of the message | the commit |
 | `issues` | `opened issue #3` | `#3` | issue title | the issue |
@@ -355,12 +372,16 @@ releases), the plugin builds one from the repository URL. See
 For other events the shorthand only has the common parts (`$repo`, `$user`,
 `$forge`, `$action`...); use the payload variables for the rest.
 
-**Same name as a payload field.** A few shorthand names also exist at the top
-of some payloads: `$action`, `$ref`, `$number`, `$name`, `$url`. In
-`format.global` the shorthand wins (`$ref` of a push is the short commit id).
-In the per-event `echo` formats the payload wins (`$ref` of a push is
-`refs/heads/main`), so configs written for progval's plugin keep working. Use
-the `__` names, such as `$ref__branch`, when you need to be sure.
+**Shorthand never hides a payload variable.** If the payload has a top-level
+field with the same name, the payload's value is used, in every kind of
+format. That only happens with `$action` and `$number`, which have the same
+value either way, and with `$name` on `status` events (the payload's
+`owner/name` there).
+
+Before October 2026 the shorthand `$id` was called `$ref`, which hid the
+payload's `ref`. Templates still equal to the old defaults are upgraded
+automatically; if you wrote your own template with the shorthand `$ref`,
+replace it with `$id`.
 
 ## Differences between forges
 
@@ -395,7 +416,7 @@ Forgejo; the web page is `html_url`.
 | the label just added or removed | `$label__name` | `$label__name` on Forgejo; Gitea doesn't say which one | not sent |
 | the assignee of an assigned event | `$assignee__login` | `$issue__assignee__login` | `$issue__assignee__login` |
 
-The shorthand `$ref` and `$branch` are always the short name, and `$assignee`
+The shorthand `$id` and `$branch` are always the short name, and `$assignee`
 looks in both places.
 
 **Events.** `commit_comment`, `watch`/`star` and `gollum` are GitHub only.
@@ -476,7 +497,7 @@ format.issues.opened  echo $sender__login opened issue #$issue__number: $issue__
 The same with shorthand:
 
 ```
-format.issues.opened  echo $user opened issue $ref: $title - $url
+format.issues.opened  echo $user opened issue $id: $title - $url
 ```
 
 Announcing releases and new branches as well:

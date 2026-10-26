@@ -41,6 +41,7 @@ import fnmatch
 import threading
 from string import Template
 import supybot.log as log
+import supybot.conf as conf
 from . import config
 import supybot.utils as utils
 import supybot.world as world
@@ -187,6 +188,21 @@ class GithubCallback(httpserver.SupyHTTPServerCallback):
 # API access stuff
 #####################
 
+def _upgrade_old_defaults():
+    """Replace templates still equal to a default from before $ref became
+    $id (see config.OLD_DEFAULTS), including channel/network overrides."""
+    def upgrade(value, old):
+        if value() == old:
+            value.setValue(value._default)
+        for (name, child) in list(value._children.items()):
+            if name.startswith(('#', ':')):
+                upgrade(child, old)
+    for (path, old) in config.OLD_DEFAULTS.items():
+        value = conf.supybot.plugins.GitHooks.format
+        for part in path.split('.'):
+            value = value.get(part)
+        upgrade(value, old)
+
 PUSH_TEMPLATES = {
     'push': ('format.global.push', config.DEFAULT_GLOBAL_PUSH),
     'push.summary': ('format.global.push.summary', config.DEFAULT_PUSH_SUMMARY),
@@ -198,7 +214,7 @@ COMMENT_VERBS = {'created': 'commented on', 'edited': 'edited a comment on',
 
 def _kind_and_verb(v, event, payload):
     """$kind ("issue", "PR", "commit"...) and $verb ("opened",
-    "commented on"...), for templates like "[$kind] $user $verb $ref"."""
+    "commented on"...), for templates like "[$kind] $user $verb $id"."""
     action = v['action'].replace('_', ' ')
     if action in ('synchronize', 'synchronized'):
         action = 'updated'
@@ -259,7 +275,7 @@ def _global_vars(event, payload):
         'user': payload.get('sender', {}).get('login') or
                 payload.get('sender', {}).get('username') or '',
         'event': event, 'action': payload.get('action', ''),
-        'what': event, 'ref': '', 'title': '', 'url': '', 'branch': '',
+        'what': event, 'id': '', 'title': '', 'url': '', 'branch': '',
         'forge': payload.get('__forge', 'Git'), 'hidden': '',
         'number': '', 'body': '', 'label': '', 'assignee': '', 'tag': '',
         'kind': event, 'verb': '', 'count': '',
@@ -289,7 +305,7 @@ def _global_vars(event, payload):
         a = c.get('author') or {}
         v.update(user=a.get('username') or a.get('login') or a.get('name') or
                  v['user'],
-                 what='committed', ref=c['id'][:7],
+                 what='committed', id=c['id'][:7],
                  title=c['message'].split('\n', 1)[0], url=c['url'])
     elif event == 'push.hidden':
         v.update(what='pushed more commits', hidden=payload['__hidden_commits'],
@@ -299,7 +315,7 @@ def _global_vars(event, payload):
         i = payload['issue']
         is_pr = bool(i.get('pull_request') or payload.get('is_pull'))
         kind = 'pull request' if is_pr else 'issue'
-        v.update(ref='#%s' % i['number'], number=i['number'],
+        v.update(id='#%s' % i['number'], number=i['number'],
                  title=i['title'], body=_first_line(i.get('body')),
                  url=i.get('html_url') or _forge_url(
                      payload, 'pulls' if is_pr else 'issues', i['number']))
@@ -311,7 +327,7 @@ def _global_vars(event, payload):
             v['body'] = _first_line(payload['comment'].get('body'))
     elif event.startswith('pull_request'):
         pr = payload['pull_request']
-        v.update(ref='#%s' % pr['number'], number=pr['number'],
+        v.update(id='#%s' % pr['number'], number=pr['number'],
                  title=pr['title'], body=_first_line(pr.get('body')),
                  url=pr.get('html_url') or _forge_url(
                      payload, 'pulls', pr['number']))
@@ -326,14 +342,14 @@ def _global_vars(event, payload):
         kind = payload.get('ref_type', 'ref')
         # Forgejo-type webhooks send the full ref, the others the short name
         name = re.sub(r'^refs/(heads|tags)/', '', payload.get('ref') or '')
-        v.update(what='%s %s' % (event + 'd', kind), ref=name,
+        v.update(what='%s %s' % (event + 'd', kind), id=name,
                  url=repo.get('html_url', ''))
         if kind == 'branch':
             v['branch'] = name
     elif event == 'release':
         r = payload['release']
         v.update(what='%s release' % (v['action'] or 'published'),
-                 ref=r.get('tag_name', ''), tag=r.get('tag_name', ''),
+                 id=r.get('tag_name', ''), tag=r.get('tag_name', ''),
                  title=r.get('name') or r.get('tag_name', ''),
                  body=_first_line(r.get('body')),
                  # Gogs sends no release link and has no page per release
@@ -348,7 +364,7 @@ def _global_vars(event, payload):
                  else 'unstarred', title=v['repo'], url=repo.get('html_url', ''))
     elif event == 'commit_comment':
         c = payload['comment']
-        v.update(what='commented on commit', body=_first_line(c.get('body')), ref=c['commit_id'][:7],
+        v.update(what='commented on commit', body=_first_line(c.get('body')), id=c['commit_id'][:7],
                  title=c['body'].split('\n', 1)[0][:300], url=c['html_url'])
     _kind_and_verb(v, event, payload)
     return v
@@ -379,6 +395,7 @@ class GitHooks(callbacks.Plugin):
         callbacks.Plugin.__init__(self, irc)
         instance = self
         self.last_payloads = {}
+        _upgrade_old_defaults()
 
         callback = GithubCallback()
         callback.plugin = self
@@ -398,10 +415,8 @@ class GitHooks(callbacks.Plugin):
                        aliases=True):
             """All the variables a template can use for this payload: the
             flattened payload, the single-underscore aliases and the
-            shorthand. In format.global the shorthand wins over a payload
-            field of the same name ($ref, $name, $url...); in the per-event
-            echo formats the payload field wins, so old configs keep
-            working."""
+            shorthand. The shorthand never hides a payload field: where both
+            have a name ($action, $number), the payload's value is used."""
             repl = flatten_subdicts(payload)
             for (key, value) in dict(repl).items():
                 if isinstance(value, basestring) and \
@@ -450,10 +465,7 @@ class GitHooks(callbacks.Plugin):
                     raise
                 shorthand = {}
             for (key, value) in shorthand.items():
-                if with_global:
-                    repl[key] = value
-                else:
-                    repl.setdefault(key, value)
+                repl.setdefault(key, value)
             return repl
 
         def _createPrivmsg(self, irc, channel, payload, event):
@@ -793,7 +805,7 @@ class GitHooks(callbacks.Plugin):
             irc.reply(_('Events seen since I started: %s. Use "vars <event> '
                         '[<pattern>]" to see their variables. Shorthand '
                         'available everywhere: $repo $owner $name $user '
-                        '$what $kind $verb $action $ref $number $title '
+                        '$what $kind $verb $action $id $number $title '
                         '$body $url $branch $label $assignee $tag $count '
                         '$forge.') %
                       (', '.join(seen) or _('none yet')))
