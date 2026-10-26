@@ -367,11 +367,67 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
                 'https://git.example/bob/proj/commit/aaa')
 
     def testAliases(self):
-        fmt = '$issues_issue_title / $issue_title / $repository_full_name'
+        # the event-prefixed spelling ($issues_issue_title) is gone
+        fmt = ('$issue__title / $issue_title / $repository_full_name / '
+               '$issues_issue_title')
         with conf.supybot.plugins.GitHooks.format.get('global').context(fmt):
             self.cb.announce.onPayload({'X-Gitea-Event': 'issues'},
                                        GITEA_ISSUE)
-            self.assertResponse(' ', 'It broke / It broke / bob/proj')
+            self.assertResponse(
+                ' ', 'It broke / It broke / bob/proj / $issues_issue_title')
+
+    def testVariablesDocExample(self):
+        # the worked example in VARIABLES.md, kept here so the doc can't drift
+        payload = {
+            'action': 'opened',
+            'issue': {'number': 1347, 'title': 'Found a bug',
+                      'html_url': 'https://github.com/octocat/Hello-World/'
+                                  'issues/1347',
+                      'user': {'login': 'octocat'}},
+            'repository': {'name': 'Hello-World',
+                           'full_name': 'octocat/Hello-World',
+                           'owner': {'login': 'octocat'}},
+            'sender': {'login': 'octocat'}}
+        url = 'https://github.com/octocat/Hello-World/issues/1347'
+        self.assertNotError('githooks announce add %s octocat Hello-World'
+                            % self.channel)
+        with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
+             conf.supybot.plugins.GitHooks.format.issues.opened.context(
+                 'echo $sender__login opened issue #$issue__number on '
+                 '$repository__full_name: $issue__title - $issue__html_url'):
+            self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, payload)
+            self.assertResponse(
+                ' ', 'octocat opened issue #1347 on octocat/Hello-World: '
+                'Found a bug - ' + url)
+        with conf.supybot.plugins.GitHooks.format.get('global').context(
+                '[$forge] ($repo) $user $what: $title - $url'):
+            self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, payload)
+            self.assertResponse(
+                ' ', '[GitHub] (octocat/Hello-World) octocat opened issue '
+                '#1347: Found a bug - ' + url)
+        closed = dict(payload, action='closed', sender={'login': 'hubot'})
+        with conf.supybot.plugins.GitHooks.format.get('global').context(
+                '$sender__login $action #$issue__number '
+                '(opened by $issue__user__login)'):
+            self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, closed)
+            self.assertResponse(' ', 'hubot closed #1347 (opened by octocat)')
+
+    def testShorthandInEchoFormats(self):
+        with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
+             conf.supybot.plugins.GitHooks.format.issues.opened.context(
+                 'echo $user $action issue $number: $title'):
+            self.cb.announce.onPayload({'X-Gitea-Event': 'issues'},
+                                       GITEA_ISSUE)
+            self.assertResponse(' ', 'alice opened issue 7: It broke')
+
+    def testPayloadWinsInEchoFormats(self):
+        # $ref is the short commit id in format.global, but an echo format
+        # keeps the payload's own ref field
+        with conf.supybot.plugins.GitHooks.format.get('global').context(''), \
+             conf.supybot.plugins.GitHooks.format.push.context(
+                 'echo $ref $ref__branch $user'):
+            self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
+            self.assertResponse(' ', 'refs/heads/main main alice')
 
     def testMaxAnnounceCommits(self):
         commits = [dict(GITEA_PUSH['commits'][0], message='c%d' % i)
@@ -465,9 +521,19 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
             self.assertResponse(' ', 'x')
         self.assertRegexp('githooks vars', 'issues')
         self.assertRegexp('githooks vars issues', r'\$repo=bob/proj.*\$title=It broke')
-        self.assertRegexp('githooks vars issues issue_number', r'\$issue_number=7')
-        self.assertNotRegexp('githooks vars issues', r'_firstline|\$__')
-        self.assertRegexp('githooks vars issues firstline', r'_firstline=')
+        self.assertRegexp('githooks vars issues issue__number',
+                          r'\$issue__number=7')
+        self.assertNotRegexp('githooks vars issues', r'\$issue_number=')
+        self.assertNotRegexp('githooks vars issues', r'_firstline|__forge')
+        self.assertRegexp('githooks vars issues firstline', r'__firstline=')
+
+    def testVarsCommandPush(self):
+        with conf.supybot.plugins.GitHooks.format.get('global').context('x'):
+            self.cb.announce.onPayload({'X-Gitea-Event': 'push'}, GITEA_PUSH)
+            self.assertResponse(' ', 'x')
+        self.assertRegexp('githooks vars push commit__',
+                          r'\$__commit__id__short=aaaaaaa')
+        self.assertRegexp('githooks vars push num', r'\$__num_commits=1')
 
     def testDocumentedPushVariables(self):
         fmt = ('$commit_id_short|$commit_message_firstline|$commit_author_name|'

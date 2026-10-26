@@ -91,10 +91,10 @@ conf.registerChannelValue(GitHooks.format, 'global',
         comment events instead of the per-event formats below (a per-action
         format such as format.issues.closed still wins, and "ignore" there
         silences it). No commands: colour codes (Ctrl+K, Ctrl+B, Ctrl+O) can
-        be pasted directly from your IRC client. Variables: $repo $owner $name
+        be pasted directly from your IRC client. Shorthand: $repo $owner $name
         $user $what $kind $verb $action $ref $title $url $branch $forge
-        (GitHub, Gitea, Forgejo or Gogs); the raw payload
-        variables like $issue__title also work. Empty disables it.""")))
+        (GitHub, Gitea, Forgejo or Gogs); the payload variables like
+        $issue__title also work. Empty disables it.""")))
 conf.registerChannelValue(GitHooks.format.get('global'), 'events',
         registry.SpaceSeparatedSetOfStrings(
             'push issues issue_comment pull_request pull_request_review '

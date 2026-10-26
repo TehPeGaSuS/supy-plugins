@@ -116,6 +116,9 @@ EVENT_HEADERS = ('x-github-event', 'x-gitea-event', 'x-forgejo-event',
 # Headers holding a bare hex HMAC-SHA256 of the body.
 HEX_SIGNATURE_HEADERS = ('x-gitea-signature', 'x-forgejo-signature',
                          'x-gogs-signature')
+# Added to the payload for the plugin's own use; "vars" doesn't list them
+# ($forge is the shorthand for __forge).
+INTERNAL_VARS = ('__forge',)
 
 def _event_name(headers):
     for name in EVENT_HEADERS:
@@ -231,17 +234,12 @@ def _first_line(text):
             return line[:300]
     return ''
 
-def _add_aliases(repl, event, prefixed=True):
+def _add_aliases(repl):
     """Add single-underscore names for the flattened payload variables, so
-    that $issue__html_url can also be written $issue_html_url or, prefixed
-    with the event, $issues_issue_html_url. Existing names are never
-    replaced."""
-    prefix = event.split('.')[0]
+    that $issue__html_url can also be written $issue_html_url. Existing
+    names are never replaced."""
     for (key, value) in list(repl.items()):
-        short = key.replace('__', '_').strip('_')
-        for alias in ((short, '%s_%s' % (prefix, short)) if prefixed
-                      else (short,)):
-            repl.setdefault(alias, value)
+        repl.setdefault(key.replace('__', '_').strip('_'), value)
 
 def _forge_url(payload, kind, number):
     """Gogs does not send issue/PR URLs: build them from the repo's."""
@@ -388,8 +386,13 @@ class GitHooks(callbacks.Plugin):
 
     class announce(callbacks.Commands):
         def _variables(self, payload, event, format_='', with_global=False,
-                       prefixed=True):
-            """All the variables a template can use for this payload."""
+                       aliases=True):
+            """All the variables a template can use for this payload: the
+            flattened payload, the single-underscore aliases and the
+            shorthand. In format.global the shorthand wins over a payload
+            field of the same name ($ref, $name, $url...); in the per-event
+            echo formats the payload field wins, so old configs keep
+            working."""
             repl = flatten_subdicts(payload)
             for (key, value) in dict(repl).items():
                 if isinstance(value, basestring) and \
@@ -427,9 +430,21 @@ class GitHooks(callbacks.Plugin):
                     repl[key + '__firstline'] = (
                         first_line[0:300]  # prevents "(XX more messages)"
                     )
-            _add_aliases(repl, event, prefixed)
-            if with_global:
-                repl.update(_global_vars(event, payload))
+            if aliases:
+                _add_aliases(repl)
+            try:
+                shorthand = _global_vars(event, payload)
+            except (KeyError, TypeError, AttributeError):
+                # a payload shaped differently than expected must not
+                # break the per-event formats, which don't need it
+                if with_global:
+                    raise
+                shorthand = {}
+            for (key, value) in shorthand.items():
+                if with_global:
+                    repl[key] = value
+                else:
+                    repl.setdefault(key, value)
             return repl
 
         def _createPrivmsg(self, irc, channel, payload, event):
@@ -767,7 +782,7 @@ class GitHooks(callbacks.Plugin):
         if not event:
             seen = sorted(self.last_payloads)
             irc.reply(_('Events seen since I started: %s. Use "vars <event> '
-                        '[<pattern>]" to see their variables. Friendly names '
+                        '[<pattern>]" to see their variables. Shorthand '
                         'available everywhere: $repo $owner $name $user '
                         '$what $kind $verb $action $ref $number $title '
                         '$body $url $branch $label $assignee $tag $count '
@@ -781,15 +796,15 @@ class GitHooks(callbacks.Plugin):
                         'forge).') % event)
             return
         repl = self.announce._variables(payload, event, with_global=True,
-                                        prefixed=False)
-        friendly = sorted(_global_vars(event, payload))
+                                        aliases=False)
+        shorthand = sorted(_global_vars(event, payload))
         names = sorted((k for (k, val) in repl.items()
                         if isinstance(val, (str, int, float, bool))
-                        and '__' not in k and not k.startswith('_')
-                        and (not k.endswith('_firstline') or
+                        and k not in INTERNAL_VARS
+                        and (not k.endswith('__firstline') or
                              'firstline' in (pattern or ''))
                         and (not pattern or pattern.lower() in k.lower())),
-                       key=lambda k: (k not in friendly, k))
+                       key=lambda k: (k not in shorthand, k))
         limit = 40
         items = ['$%s=%s' % (k, str(repl[k]).replace('\n', ' ')[:40])
                  for k in names[:limit]]

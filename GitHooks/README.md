@@ -53,10 +53,11 @@ replace `$pusher__name` with `$pusher__login` and `$compare` with
 
 ### Variable names
 
-Every payload variable can be written with single underscores:
-`$issue__html_url` is also `$issue_html_url`, and each name also exists
-prefixed with the event: `$issues_issue_html_url`, `$push_repository_name`.
-The `__` forms keep working.
+Variables are named after where the value sits in the webhook's JSON, with
+`__` between the levels, as in progval's plugin: `issue` → `user` → `login` is
+`$issue__user__login`. Single underscores also work (`$issue_user_login`).
+On top of those, the plugin offers **shorthand** such as `$user`, `$repo`,
+`$title` and `$url` for the common events. See [VARIABLES.md](VARIABLES.md).
 
 ## Announce format
 
@@ -103,7 +104,10 @@ per-event `echo` formats described below.
 Type the colour codes straight from your IRC client (Ctrl+K, Ctrl+B, Ctrl+O in
 mIRC and most others) and paste the result in.
 
-| Variable | Meaning |
+The default templates use the plugin's **shorthand**, short names that mean the
+same thing for every common event:
+
+| Shorthand | Meaning |
 |---|---|
 | `$forge` | GitHub, Gitea, Forgejo or Gogs |
 | `$repo` `$owner` `$name` | `owner/name`, owner, name |
@@ -117,7 +121,7 @@ mIRC and most others) and paste the result in.
 | `$label` `$assignee` `$tag` | for labeled/assigned events and releases |
 | `$hidden` | number of hidden commits (hidden-commits line only) |
 
-The raw payload variables (`$issue__title`, `$issue_title`) also work.
+The payload variables (`$issue__title`, `$sender__login`...) also work.
 Empty variables don't leave double spaces.
 
 More settings:
@@ -144,7 +148,7 @@ A template is a command, where you can use @echo to print variable content.
 Variable names are prefixed with a $.
 Replacements will be made using the data sent by GitHub. As this data 
 contains lists and dictionnaries, it is “flattened”, ie. 
-`data['foo']['bar']['baz']` can be accessed with `$foo__bar__baz` (or `$foo_bar_baz`; note the double underscores).
+`data['foo']['bar']['baz']` can be accessed with `$foo__bar__baz` (note the double underscores; `$foo_bar_baz` also works).
 There are also special variables:
 * if `$foo` is a git ref, `$foo__branch` will be the matching branch
 * if `$foo` is a string, `$foo__firstline` will contain the first line of 
@@ -152,6 +156,11 @@ There are also special variables:
 
 Concerning push events, one line is formatted per commit; it is given extra
  variables: `$__commit__foo` for each `data['commits'][X]['foo']`.
+
+The shorthand (`$user`, `$repo`, `$number`, `$title`, `$url`...) works in these
+formats too. Where the payload has a top-level field with the same name
+(`$action`, `$ref`, `$number`), the payload's value is used, so templates
+written for progval's plugin keep working.
 
 Format of 'issues' and 'pull_request' events can be overridden on a per-action
 basis, with the `supybot.plugins.GitHooks.format.<type>.<action>` config variable.

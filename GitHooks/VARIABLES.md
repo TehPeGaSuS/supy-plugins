@@ -1,16 +1,21 @@
 # Template variables
 
-Everything between two `$` signs in a GitHooks format, like `$user` or
-`$issue_title`, is replaced with a value taken from the webhook the forge sent.
-This page explains where those names come from and how to find the one you
-need.
+Everything starting with `$` in a GitHooks format, like `$sender__login` or
+`$user`, is replaced with a value from the webhook the forge sent. There are
+two kinds:
+
+* **Payload variables**, one for every value in the webhook's JSON, named after
+  where the value sits in it: `$issue__title`, `$sender__login`. These are the
+  names progval's GitHub plugin used, and they work for every event.
+* **Shorthand**, a few short names the plugin fills in for the common events,
+  with the same meaning everywhere: `$user`, `$repo`, `$title`, `$url`.
 
 * [Quick start](#quick-start)
-* [Friendly variables](#friendly-variables)
-* [Raw payload variables](#raw-payload-variables)
-* [Aliases](#aliases)
-* [Special suffixes](#special-suffixes)
-* [Pushes](#pushes)
+* [Payload variables](#payload-variables)
+* [Worked example](#worked-example)
+* [Who is who](#who-is-who)
+* [Variables the plugin adds](#variables-the-plugin-adds)
+* [Shorthand](#shorthand)
 * [Finding a name](#finding-a-name)
 * [Template rules](#template-rules)
 * [Ready-made templates](#ready-made-templates)
@@ -44,17 +49,179 @@ Colour and bold codes are typed straight from your IRC client (Ctrl+K, Ctrl+B,
 Ctrl+O in mIRC and most others), so you can set the format from your client
 and see the result straight away.
 
-## Friendly variables
+## Payload variables
 
-These exist for every event handled by `format.global`, with the same meaning
-everywhere:
+A webhook is a JSON document. Part of the one GitHub sends when an issue is
+opened:
 
-| Variable | Meaning |
+```json
+{
+  "action": "opened",
+  "issue": {
+    "number": 1347,
+    "title": "Found a bug",
+    "html_url": "https://github.com/octocat/Hello-World/issues/1347",
+    "user": { "login": "octocat" }
+  },
+  "repository": {
+    "name": "Hello-World",
+    "full_name": "octocat/Hello-World",
+    "owner": { "login": "octocat" }
+  },
+  "sender": { "login": "octocat" }
+}
+```
+
+Every value in it is a variable. Start from the top of the JSON and write the
+names on the way down, with **two underscores** between the levels:
+
+| Position in the JSON | Variable |
+|---|---|
+| `action` | `$action` |
+| `issue` → `number` | `$issue__number` |
+| `issue` → `title` | `$issue__title` |
+| `issue` → `user` → `login` | `$issue__user__login` |
+| `repository` → `full_name` | `$repository__full_name` |
+| `repository` → `owner` → `login` | `$repository__owner__login` |
+| `sender` → `login` | `$sender__login` |
+
+The event name (`issues`) is not part of the name: the JSON above *is* the
+whole webhook, so the path starts at `action`, `issue`, `repository`...
+
+Two underscores because JSON names often contain one: in `$issue__html_url`,
+`__` means "go into `issue`" and the `_` belongs to the name `html_url`.
+
+Lists inside the payload (like the `labels` of an issue) aren't turned into
+variables. The commits of a push and the pages of a wiki edit are the
+exception, see [below](#variables-the-plugin-adds).
+
+**Single underscores also work:** `$issue__user__login` can be written
+`$issue_user_login`. If two payload fields end up with the same
+single-underscore name, the first one wins, so the `__` form is the one to
+use when in doubt.
+
+## Worked example
+
+Take the issue webhook above, and announce new issues with a per-action
+format built only from payload variables:
+
+```
+@config supybot.plugins.GitHooks.format.issues.opened "echo $sender__login opened issue #$issue__number on $repository__full_name: $issue__title - $issue__html_url"
+```
+
+When GitHub sends the webhook, each variable is looked up in the JSON:
+
+| In the template | Path in the JSON | Becomes |
+|---|---|---|
+| `$sender__login` | `sender` → `login` | `octocat` |
+| `$issue__number` | `issue` → `number` | `1347` |
+| `$repository__full_name` | `repository` → `full_name` | `octocat/Hello-World` |
+| `$issue__title` | `issue` → `title` | `Found a bug` |
+| `$issue__html_url` | `issue` → `html_url` | `https://github.com/octocat/Hello-World/issues/1347` |
+
+and the bot says:
+
+```
+octocat opened issue #1347 on octocat/Hello-World: Found a bug - https://github.com/octocat/Hello-World/issues/1347
+```
+
+The `#` before `$issue__number` and the words `opened issue`, `on` are plain
+text, copied as they are. `echo` is there because per-action formats are
+Limnoria commands (see [Template rules](#template-rules)).
+
+**The same with shorthand.** [Shorthand](#shorthand) names do the lookups for
+you, and work for issues, pull requests, pushes and the other common events
+alike. In `format.global`, which is plain text and needs no `echo`:
+
+```
+@config supybot.plugins.GitHooks.format.global "[$forge] ($repo) $user $what: $title - $url"
+```
+
+```
+[GitHub] (octocat/Hello-World) octocat opened issue #1347: Found a bug - https://github.com/octocat/Hello-World/issues/1347
+```
+
+Here `$repo` is `$repository__full_name`, `$user` is `$sender__login`,
+`$what` is the ready phrase `opened issue #1347`, `$title` is `$issue__title`
+and `$url` is `$issue__html_url`.
+
+**When it's someone else.** If hubot later closes that issue, GitHub sends the
+same JSON with `"action": "closed"` and `"sender": { "login": "hubot" }`, but
+`issue` → `user` is still octocat:
+
+```
+@config supybot.plugins.GitHooks.format.global "$sender__login $action #$issue__number (opened by $issue__user__login)"
+```
+
+```
+hubot closed #1347 (opened by octocat)
+```
+
+## Who is who
+
+Most payloads have several people in them, and they're not always the same:
+
+* `$sender__login` is who **did the thing** this webhook is about: opened,
+  closed, labeled, commented, pushed...
+* `$issue__user__login`, `$pull_request__user__login`, `$comment__user__login`
+  are who **created** that issue, pull request or comment.
+
+| Event | `$sender__login` | `$issue__user__login` |
+|---|---|---|
+| alice opens #1 | alice | alice |
+| bob closes #1 | bob | alice |
+| carol labels #1 | carol | alice |
+| bob comments on #1 | bob | alice |
+
+So `$sender__login` is usually the one you want. The shorthand `$user` picks
+the right person for you (see [Shorthand](#shorthand)).
+
+## Variables the plugin adds
+
+These aren't in the JSON; the plugin makes them. Names starting with `__` are
+the plugin's own, so they can never clash with a field the forge sends.
+
+**Pushes.** A push carries a *list* of commits, and lists don't become
+variables. So the plugin announces one commit per line and puts the commit
+being announced under `__commit`:
+
+| Variable | Value |
+|---|---|
+| `$__commit__id` | full commit id |
+| `$__commit__id__short` | short commit id |
+| `$__commit__message__firstline` | first line of the commit message |
+| `$__commit__author__name` | author's git name |
+| `$__commit__author__username` | author's login, when the forge knows it |
+| `$__commit__url` | link to the commit |
+| `$__num_commits` | number of commits in the whole push |
+| `$__files__added__len` | files added in the whole push (also `removed`, `modified`) |
+| `$__hidden_commits` | commits left out of a big push (on the `push.hidden` line) |
+
+Any other field of a commit works the same way: `commits` → (one commit) →
+`timestamp` is `$__commit__timestamp`.
+
+**Wiki edits** (`gollum` event) work the same: one line per edited page, as
+`$__page__title`, `$__page__action`, `$__page__html_url`...
+
+**Endings** added to existing variables:
+
+| Ending | Added to | Value |
+|---|---|---|
+| `__short` | any 40-character commit id, e.g. `$after__short` | the first 7 characters |
+| `__branch` | any field called `ref`, e.g. `$ref__branch` | `refs/heads/main` becomes `main` |
+| `__firstline` | any text, e.g. `$comment__body__firstline` | the first non-empty line, at most 300 characters, skipping quoted `> ` lines |
+
+## Shorthand
+
+Writing `$repository__full_name` every time is long, so the plugin also fills
+in these short names, with the same meaning for every supported event:
+
+| Shorthand | Meaning |
 |---|---|
 | `$forge` | `GitHub`, `Gitea`, `Forgejo` or `Gogs` |
 | `$repo` | `owner/name` |
 | `$owner` `$name` | the two halves of `$repo` |
-| `$user` | who did it (see the table below) |
+| `$user` | who did it (see below) |
 | `$event` | the event type: `push`, `issues`, `pull_request`... |
 | `$action` | the raw action: `opened`, `closed`, `labeled`... (empty for pushes) |
 | `$what` | a ready phrase such as `opened issue #3` or `committed` |
@@ -86,125 +253,65 @@ What they contain depends on the event:
 | `fork` | `forked` | | name of the new fork | the fork |
 | `watch` / `star` | `starred` | | the repository | the repository |
 
-`$user` is the person who triggered the event. The exceptions are pushes,
-where it is the commit author's login (the git name if the forge sends no login), and reviews, where it is the reviewer.
-A merged pull request has the action `merged` instead of `closed`. When the
-forge doesn't send a link (Gogs has no issue or pull request URLs), the plugin
-builds it from the repository URL.
+`$user` is `$sender__login`, except for pushes, where it is the commit author's
+login (or git name if the forge sends no login), and for reviews, where it is
+the reviewer. A merged pull request has the action `merged` instead of
+`closed`. When the forge doesn't send a link (Gogs has no issue or pull
+request URLs), the plugin builds it from the repository URL.
 
-Events other than the ones above, or events not listed in
-`format.global.events`, don't use the friendly variables or `format.global`.
+For other events the shorthand only has the common parts (`$repo`, `$user`,
+`$forge`, `$action`...); use the payload variables for the rest.
 
-## Raw payload variables
-
-A webhook is a nested JSON document. Part of an "issue opened" webhook:
-
-```json
-{
-  "action": "opened",
-  "issue": { "number": 7, "title": "It broke", "user": { "login": "alice" } },
-  "repository": { "name": "proj", "owner": { "login": "bob" } }
-}
-```
-
-GitHooks turns every value in it into a variable, joining the levels with
-**two underscores**:
-
-| Position in the JSON | Variable |
-|---|---|
-| `action` | `$action` |
-| `issue` → `title` | `$issue__title` |
-| `issue` → `user` → `login` | `$issue__user__login` |
-| `repository` → `owner` → `login` | `$repository__owner__login` |
-
-The double underscore is needed because JSON names often contain a single one
-(`html_url`). In `$issue__html_url` the double underscore means "go into
-`issue`" and the single one belongs to the name `html_url`.
-
-Lists inside the payload aren't expanded, so you can't pick the third label out
-of `labels`. The exception is the commits of a push, see [Pushes](#pushes).
-
-## Aliases
-
-Typing two underscores is awkward, so every raw variable also has two other
-names:
-
-| Spelling | Example |
-|---|---|
-| raw | `$issue__user__login` |
-| single underscores | `$issue_user_login` |
-| prefixed with the event | `$issues_issue_user_login` |
-
-They all give the same value, and the double-underscore form always works. The
-first two spellings are enough in practice. The prefixed one is there if you
-like to see which event a variable belongs to. An alias never replaces an
-existing variable.
-
-## Special suffixes
-
-Besides the payload fields, the plugin makes a few derived variables:
-
-| Suffix | Added to | Value |
-|---|---|---|
-| `__short` | any 40-character commit id, e.g. `$after__short` | the first 7 characters |
-| `__branch` | any field called `ref`, e.g. `$ref__branch` | `refs/heads/main` becomes `main` |
-| `__firstline` | any text, e.g. `$comment__body__firstline` | the first non-empty line, at most 300 characters, skipping quoted `> ` lines |
-
-These have aliases too: `$comment_body_firstline`, `$ref_branch`.
-
-## Pushes
-
-A push is announced one commit at a time (up to `max_announce_commits`), and
-the commit being announced is available as `$__commit__...`, also written
-`$commit_...`:
-
-| Variable | Value |
-|---|---|
-| `$__commit__id` / `$commit_id` | full commit id |
-| `$__commit__id__short` / `$commit_id_short` | short commit id |
-| `$__commit__message__firstline` / `$commit_message_firstline` | first line of the message |
-| `$__commit__author__name` / `$commit_author_name` | author |
-| `$__commit__url` / `$commit_url` | link to the commit |
-| `$__num_commits` / `$num_commits` | commits in the whole push |
-| `$__files__added__len` / `$files_added_len` | files added in the whole push (also `removed`, `modified`) |
-
-With `format.global` you rarely need these, since `$user`, `$ref`, `$title` and
-`$url` already describe the commit. When a push has more commits than the
-limit, one more line is sent with `format.global.hidden`, where `$hidden` is the
-number left out.
+**Same name as a payload field.** A few shorthand names also exist at the top
+of some payloads: `$action`, `$ref`, `$number`, `$name`, `$url`. In
+`format.global` the shorthand wins (`$ref` of a push is the short commit id).
+In the per-event `echo` formats the payload wins (`$ref` of a push is
+`refs/heads/main`), so configs written for progval's plugin keep working. Use
+the `__` names, such as `$ref__branch`, when you need to be sure.
 
 ## Finding a name
 
 * **`@githooks vars`** lists the event types the bot has received since it
   started.
 * **`@githooks vars <event>`** shows the variables and their current values for
-  the last event of that type, friendly names first.
+  the last event of that type, shorthand first, then the payload variables.
 * **`@githooks vars <event> <pattern>`** keeps only the names containing the
-  pattern, e.g. `@githooks vars issues user`. At most 40 names are shown, so use
-  a pattern on big payloads.
+  pattern, e.g. `@githooks vars issues user__`. At most 40 names are shown, so
+  use a pattern on big payloads.
 * If the bot hasn't received that event yet, trigger one, or use *Redeliver* in
-  the webhook settings of your forge (the *Recent deliveries* page also shows
-  the exact JSON that was sent).
-* The forges document their payloads: GitHub's *Webhook events and payloads*,
-  and the webhook pages of Gitea, Forgejo and Gogs. Take the path to the value
-  you want and put `__` between the levels.
+  the webhook settings of your forge.
+* **Your forge keeps the JSON it sent:** on GitHub, open the repository's
+  *Settings → Webhooks →* (your webhook) *→ Recent Deliveries* and click a
+  delivery. Gitea and Forgejo have the same list on the webhook's page.
+* **Example payloads for every GitHub event**, one file per action, are in
+  [octokit/webhooks](https://github.com/octokit/webhooks/tree/main/payload-examples/api.github.com)
+  (e.g. `issues/opened.payload.json`). GitHub's own *Webhook events and
+  payloads* page lists the fields too.
 
 `@githooks vars` only knows events for repositories announced somewhere, and
 only since the bot last started.
 
 ## Template rules
 
+* There are two kinds of formats:
+  * `format.global` and its `push`, `push.summary`, `push.commit` and `hidden`
+    templates are **plain text**: what you write is what is sent.
+  * The per-event and per-action formats (`format.issues`,
+    `format.issues.opened`, `format.push`...) are **Limnoria commands**, so
+    they start with `echo`: `echo $sender__login opened issue #$issue__number`.
+    They can use other commands too, like `cif` from the Conditional plugin.
+* Per-action formats such as `format.issues.closed` win over `format.global`
+  (and `ignore` silences that action). Both kinds can use every variable on
+  this page.
 * A variable is `$` followed by letters, digits and underscores. To put text
   right after one, use braces: `${user}s`. For a literal dollar sign use `$$`.
 * An unknown name (a typo, or a field this event doesn't have) is left in the
   message as typed, e.g. `$titel`. A known name with no value gives an empty
-  string, and spaces left doubled by an empty variable are collapsed.
+  string, and in `format.global` spaces left doubled by an empty variable are
+  collapsed.
 * Colour and formatting codes can be pasted into the template. If you type
   them in a config file, they are `\x02` (bold), `\x03` (colour) and `\x0f`
   (reset).
-* Per-action formats such as `format.issues.closed` win over `format.global`
-  (and `ignore` silences that action). Those older formats are written as
-  `echo ...` commands, see the README, and use the same variable names.
 
 ## Ready-made templates
 
@@ -224,6 +331,18 @@ The defaults (GitBot style) give, for example:
 [GitHub] (bob/proj) alice pushed 6 commits to main - https://github.com/bob/proj/compare/16c0988...098dbc7
 [GitHub] (bob/proj) 3154423 - Fix crash on empty config - https://github.com/bob/proj/commit/3154423
 [GitHub] (bob/proj) (+3 hidden commits)
+```
+
+Only issue openings, as a per-action format, with payload variables:
+
+```
+format.issues.opened  echo $sender__login opened issue #$issue__number: $issue__title - $issue__html_url
+```
+
+The same with shorthand:
+
+```
+format.issues.opened  echo $user opened issue $ref: $title - $url
 ```
 
 Announcing releases and new branches as well:
