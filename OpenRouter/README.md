@@ -80,16 +80,49 @@ Run `@config list plugins.OpenRouter` to see all options.
 
 ### Other providers
 
-`base_url` can point at any OpenAI‑compatible API, for example Groq's free tier:
+`base_url` can point at any OpenAI‑compatible API, e.g. Gemini:
+`https://generativelanguage.googleapis.com/v1beta/openai/`. Web search only
+works with OpenRouter.
+
+### Groq (free tier)
+
+[Groq](https://console.groq.com) has a free tier with no credit card. Get a key
+at [console.groq.com/keys](https://console.groq.com/keys), then:
 
 ```irc
 @config plugins.OpenRouter.base_url https://api.groq.com/openai/v1
 @config plugins.OpenRouter.api_key  gsk_your_groq_key
 @config plugins.OpenRouter.model    openai/gpt-oss-120b
+@config plugins.OpenRouter.reasoning_effort low
+@config plugins.OpenRouter.max_history 3
+@config plugins.OpenRouter.max_tokens 400
 ```
 
-Gemini: `https://generativelanguage.googleapis.com/v1beta/openai/`.
-Web search only works with OpenRouter.
+The free chat models in October 2026 were `openai/gpt-oss-120b`,
+`openai/gpt-oss-20b` and `qwen/qwen3.8-27b`, all with the same limits: 30
+requests per minute, 1K requests per day, 8K tokens per minute and 200K tokens
+per day. Your account's current limits are at
+[console.groq.com/settings/limits](https://console.groq.com/settings/limits).
+
+Tokens run out long before requests do. Every call counts the system prompt,
+the history and the reply, and gpt-oss also counts its hidden reasoning, so:
+
+- `reasoning_effort low` saves the most tokens.
+- `max_history 3` keeps the history short.
+- `max_tokens 400` stops long replies, with room left for the reasoning.
+
+That is roughly 500 to 1000 tokens per call. When a limit is hit, the bot
+answers `Rate limited by the API (429): …`. The per-minute limit recovers
+within a minute, the daily one the next day.
+
+To use Groq through OpenRouter instead, so web search still works, add your
+Groq key under Settings → Integrations on OpenRouter, in the Prioritized
+section, with *Shared capacity fallback* set to "Never use shared capacity
+for any model on this provider" (otherwise OpenRouter falls back to its own,
+paid, capacity when your Groq limits are reached). Keep `base_url` on
+OpenRouter and use a model Groq serves. OpenRouter charges a 5% fee on
+requests made with your own keys, within a monthly free allowance that
+depends on your OpenRouter plan.
 
 ## Command
 
