@@ -276,7 +276,9 @@ the `__` names, such as `$ref__branch`, when you need to be sure.
 Gitea and Forgejo copy GitHub's payloads closely, Gogs less so. The shorthand
 already deals with everything below; it only matters when you write payload
 variables yourself. (Checked against GitHub's example payloads, and the
-webhook code of Gitea, Forgejo and Gogs 0.14.3.)
+webhook code of Gitea, Forgejo and Gogs 0.14.3, in October 2026. Support for
+forges other than GitHub is best effort, see the
+[README](README.md#other-forges).)
 
 **Links.** A field called `url` is the API address on GitHub, Gitea and
 Forgejo; the web page is `html_url`.

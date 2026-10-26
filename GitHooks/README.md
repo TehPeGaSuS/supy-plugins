@@ -37,6 +37,14 @@ Fill the other fields of the form according to what you want.
 
 ## Other forges
 
+> **Best effort.** GitHooks is built around GitHub's webhooks. Gitea, Forgejo
+> and Gogs are supported on a best-effort basis: their payloads were checked
+> against each forge's source code, but forges change them between versions
+> and not every release is tested. If an announce looks wrong, please
+> [open an issue](https://github.com/TehPeGaSuS/supy-plugins/issues) with the
+> forge, its version and the payload from the webhook's *Recent Deliveries*
+> page.
+
 Gitea, Forgejo and Gogs webhooks are supported: add a webhook of type
 Gitea/Gogs (or "Forgejo") pointing at the same URL, with content type
 `application/json`. The event name is read from `X-GitHub-Event` (sent by
