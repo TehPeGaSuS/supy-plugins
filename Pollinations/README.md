@@ -579,7 +579,7 @@ Use this to identify slow or consistently-failing models and adjust your `text_m
 Feel free to submit issues and pull requests on GitHub.
 
 ## License
-This plugin is released under the same license as Limnoria.
+MIT, see [LICENSE](LICENSE).
 
 ## Credits
 - Uses [Pollinations.ai](https://pollinations.ai) API

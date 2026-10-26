@@ -286,3 +286,11 @@ English dictionary is left over from the first version and no longer used.
 `limnoria-test` runs the suite (about 335 tests); `python3 -m unittest
 test_tcldb` in this directory runs the Tcl database reader's tests without
 Limnoria.
+
+## License
+
+Duck Hunt is © 2015-2016 Menz Agitat and licensed under
+[Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported](https://creativecommons.org/licenses/by-nc-sa/3.0/).
+DuckHuntPro is a port of it, including its message catalogue, so it is shared
+under the same license: see [LICENSE](LICENSE). You may not use it for
+commercial purposes, and derivatives must keep this license.
