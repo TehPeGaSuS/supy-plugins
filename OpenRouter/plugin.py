@@ -1,5 +1,6 @@
 ###
 # Copyright (c) 2025 Nelluk
+# Copyright (c) 2026, PeGaSuS
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,13 +31,28 @@
 from supybot import utils, plugins, ircutils, callbacks
 from supybot.commands import *  # getopts, rest, somethingWithoutSpaces, etc.
 from supybot.i18n import PluginInternationalization
+import builtins
 import re
 from collections import defaultdict
 from datetime import date
-from openai import OpenAI
+from openai import OpenAI, APIError, APIStatusError
 import json
 
 _ = PluginInternationalization("OpenRouter")
+
+# Sampling parameters and the value every OpenAI-compatible API assumes when
+# they are left out. Only values that differ are sent, so providers that do
+# not support a parameter never see it unless it was actually configured.
+_SAMPLING_DEFAULTS = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+}
+
+# Search engines accepted by OpenRouter's web plugin. Anything else (including
+# "auto") leaves the choice to OpenRouter.
+_WEB_ENGINES = ("native", "exa", "firecrawl", "parallel", "perplexity")
 
 
 class OpenRouter(callbacks.Plugin):
@@ -58,6 +74,11 @@ class OpenRouter(callbacks.Plugin):
             return opts["temp"]
         return opts.get(name, self.registryValue(name, channel))
 
+    def _is_openrouter(self):
+        """True when base_url points at OpenRouter, which has extra features
+        (web plugin, reasoning object) other endpoints do not understand."""
+        return "openrouter.ai" in self.registryValue("base_url").lower()
+
     def _history_key(self, channel, model_name, alias_name):
         """Return the key object used to segregate chat histories."""
         scope = self.registryValue("contextScope", channel).lower()
@@ -69,12 +90,14 @@ class OpenRouter(callbacks.Plugin):
         return (channel, model_name)
 
     def _append_history(self, key, user_msg, assistant_msg, max_history):
+        if max_history <= 0:
+            return
         hist = self.history[key]
         hist.extend([
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ])
-        # trim if needed
+        # max_history counts exchanges (one user + one assistant message)
         excess = max(len(hist) - max_history * 2, 0)
         if excess:
             del hist[:excess]
@@ -101,7 +124,9 @@ class OpenRouter(callbacks.Plugin):
             "as of",
             "right now",
         ]
-        if any(k in lowered for k in keywords):
+        # builtins.any: `from supybot.commands import *` shadows any() with
+        # Limnoria's `any` converter, which raises AssertionError here.
+        if builtins.any(k in lowered for k in keywords):
             return True
         # YYYY-MM-DD
         if re.search(r"\b\d{4}-\d{2}-\d{2}\b", lowered):
@@ -127,6 +152,46 @@ class OpenRouter(callbacks.Plugin):
         text = re.sub(r"\s+\n", "\n", text)
         return text.strip()
 
+    def _annotation_urls(self, annotations):
+        """Return the source URLs of the reply's annotations, in order.
+
+        The openai library hands annotations over as objects rather than
+        dicts; the URL of a web citation is at url_citation.url."""
+        urls = []
+        for ann in annotations or []:
+            if hasattr(ann, "model_dump"):
+                ann = ann.model_dump()
+            if not isinstance(ann, dict):
+                continue
+            citation = ann.get("url_citation") or {}
+            url = (
+                citation.get("url")
+                or ann.get("url")
+                or ann.get("source")
+                or ann.get("link")
+            )
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
+    def _api_error_message(self, e):
+        """Turn an openai exception into a one-line message for IRC."""
+        if isinstance(e, APIStatusError):
+            detail = None
+            body = e.body
+            if isinstance(body, dict):
+                err = body.get("error", body)
+                if isinstance(err, dict):
+                    detail = err.get("message")
+                elif isinstance(err, str):
+                    detail = err
+            detail = utils.str.ellipsisify(
+                " ".join(str(detail or e.message).split()), 300)
+            if e.status_code == 429:
+                return f"Rate limited by the API (429): {detail}"
+            return f"API error {e.status_code}: {detail}"
+        return f"Could not reach the API: {e}"
+
     # ---------------------------- command ----------------------------- #
 
     _OPTSPEC = {
@@ -147,10 +212,11 @@ class OpenRouter(callbacks.Plugin):
         rest("text"),
     ])
     def chat(self, irc, msg, args, opts, prompt):
-        """[--model <name>] [--temperature <f>] … -- <prompt>
+        """[--model <name>] [--temperature <f>] [--web|--no-web] … -- <prompt>
 
         Sends <prompt> to the configured API. Flags override the channel's
-        defaults for this single call.
+        defaults for this single call. --web and --no-web force OpenRouter's
+        web search on or off for this call.
         """
 
         # list → dict and strip any accidental leading dashes
@@ -173,6 +239,7 @@ class OpenRouter(callbacks.Plugin):
             api_key=self.registryValue("api_key"),
             base_url=self.registryValue("base_url"),
         )
+        is_openrouter = self._is_openrouter()
 
         system_prompt = self.registryValue("prompt", channel).replace(
             "$botnick", irc.nick
@@ -195,26 +262,23 @@ class OpenRouter(callbacks.Plugin):
         alias_name = msg.args[1].split()[0] if msg.args and len(msg.args) > 1 else None
         key = self._history_key(channel, model_name, alias_name)
         max_history = self.registryValue("max_history", channel)
+        history = self.history[key][-max_history * 2:] if max_history > 0 else []
 
         request_params = {
             "model": model_name,
-            "messages": self.history[key][-max_history:] + [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt_for_llm},
-            ],
+            "messages": [{"role": "system", "content": system_prompt}]
+            + history
+            + [{"role": "user", "content": prompt_for_llm}],
             "user": msg.nick,
         }
+        extra_body = {}
 
-        for pname in (
-            "temperature",
-            "top_p",
-            # token limit handled separately to support both names
-            "presence_penalty",
-            "frequency_penalty",
-        ):
+        for pname, default in _SAMPLING_DEFAULTS.items():
             if pname == "frequency_penalty" and "gemini" in model_name.lower():
                 continue
-            request_params[pname] = self._get_param(opts, pname, channel)
+            value = self._get_param(opts, pname, channel)
+            if value != default:
+                request_params[pname] = value
 
         # Choose exactly one token limit parameter, preferring max_completion_tokens
         mct = self._get_param(opts, "max_completion_tokens", channel)
@@ -225,6 +289,15 @@ class OpenRouter(callbacks.Plugin):
             if isinstance(mt, int) and mt > 0:
                 request_params["max_tokens"] = mt
 
+        # OpenRouter takes a reasoning object, other endpoints (Groq, OpenAI)
+        # the flat reasoning_effort parameter.
+        effort = self.registryValue("reasoning_effort", channel).strip().lower()
+        if effort:
+            if is_openrouter:
+                extra_body["reasoning"] = {"effort": effort}
+            else:
+                request_params["reasoning_effort"] = effort
+
         # --------------------------------------------------------------- #
         # Web search plugin options
         # --------------------------------------------------------------- #
@@ -234,6 +307,12 @@ class OpenRouter(callbacks.Plugin):
         if web_force_off:
             use_web = False
         elif web_mode == "off":
+            # Web search costs money, so "off" means off: --web does not
+            # override it (use optin for that).
+            if web_force_on:
+                irc.error(
+                    "Web search is disabled here (web_mode is off).")
+                return
             use_web = False
         elif web_mode == "always":
             use_web = True
@@ -242,7 +321,17 @@ class OpenRouter(callbacks.Plugin):
         else:
             use_web = web_force_on or self._is_time_sensitive(prompt)
 
-        web_search_options = None
+        # The web plugin is an OpenRouter feature; other endpoints reject or
+        # ignore it. Say so when search was asked for explicitly, and quietly
+        # skip it when it was only triggered by auto mode.
+        if use_web and not is_openrouter:
+            if web_force_on or web_mode == "always":
+                irc.error(
+                    "Web search only works when base_url points at OpenRouter.")
+                return
+            use_web = False
+
+        web_plugin = None
         if use_web:
             engine = str(self.registryValue("web_engine", channel)).lower()
             search_context_size = str(
@@ -258,52 +347,63 @@ class OpenRouter(callbacks.Plugin):
             if max_results > 10:
                 max_results = 10
 
-            web_search_options = {
-                "search_context_size": search_context_size,
-                "max_results": max_results,
-            }
+            web_plugin = {"id": "web", "max_results": max_results}
             if search_prompt:
-                web_search_options["search_prompt"] = search_prompt
-            if engine in ("native", "exa"):
-                web_search_options["engine"] = engine
+                web_plugin["search_prompt"] = search_prompt
+            if engine in _WEB_ENGINES:
+                web_plugin["engine"] = engine
 
-            extra_body = request_params.get("extra_body") or {}
-            extra_body["plugins"] = [{"id": "web"}]
-            extra_body["web_search_options"] = web_search_options
+            extra_body["plugins"] = [web_plugin]
+            # Only used by models with native search
+            extra_body["web_search_options"] = {
+                "search_context_size": search_context_size,
+            }
+
+        if extra_body:
             request_params["extra_body"] = extra_body
 
         # --------------------------------------------------------------- #
-        # Log exact request payload (always on)
+        # Log the request; the full payload holds users' messages, so it
+        # only goes to the debug log.
         # --------------------------------------------------------------- #
+        scope = self.registryValue("contextScope", channel)
+        self.log.info(
+            f"OpenRouter request → base_url={self.registryValue('base_url')} "
+            f"model={model_name} scope={scope} key={key!r} "
+            f"history_used={len(history)} "
+            f"messages_total={len(request_params['messages'])} "
+            f"use_web={use_web} web_mode={web_mode} "
+            f"web_plugin={web_plugin if use_web else 'omitted'}"
+        )
         try:
-            scope = self.registryValue("contextScope", channel)
-            history_slice = self.history[key][-max_history:]
-            history_count = len(history_slice)
             payload_json = json.dumps(request_params, ensure_ascii=False, separators=(",", ":"))
-            self.log.info(
-                f"OpenRouter request → base_url={self.registryValue('base_url')} "
-                f"model={model_name} scope={scope} key={key!r} "
-                f"history_used={history_count} messages_total={len(request_params.get('messages', []))} "
-                f"use_web={use_web} web_mode={web_mode} "
-                f"web_search_options={web_search_options if use_web else 'omitted'} "
-                f"payload={payload_json}"
-            )
+            self.log.debug(f"OpenRouter request payload={payload_json}")
         except Exception as e:
             # Fallback to repr if JSON serialization fails for any reason
-            self.log.info(
+            self.log.debug(
                 f"OpenRouter request (repr fallback due to {e}): {request_params!r}"
             )
 
         # --------------------------------------------------------------- #
         # Call the API
         # --------------------------------------------------------------- #
-        completion = client.chat.completions.create(**request_params)
+        try:
+            completion = client.chat.completions.create(**request_params)
+        except APIError as e:
+            self.log.warning(f"OpenRouter request failed: {e}")
+            irc.error(self._api_error_message(e))
+            return
+
+        if not getattr(completion, "choices", None):
+            self.log.warning(f"OpenRouter response without choices: {completion!r}")
+            irc.error("The API returned no reply.")
+            return
+
+        choice0 = completion.choices[0]
+        message0 = choice0.message
+        finish_reason = getattr(choice0, "finish_reason", None)
         # Log response metadata
         try:
-            finish_reason = None
-            if getattr(completion, "choices", None):
-                choice0 = completion.choices[0]
-                finish_reason = getattr(choice0, "finish_reason", None)
             usage = getattr(completion, "usage", None)
             prompt_toks = getattr(usage, "prompt_tokens", None) if usage else None
             completion_toks = getattr(usage, "completion_tokens", None) if usage else None
@@ -317,44 +417,38 @@ class OpenRouter(callbacks.Plugin):
         except Exception as e:
             self.log.info(f"OpenRouter response (metadata logging failed): {e}")
 
-        choice0 = completion.choices[0]
-        message0 = choice0.message
-        content = message0.content
+        # Reasoning models can spend the whole token budget thinking and
+        # return no content at all.
+        content = (message0.content or "").strip()
+        if not content:
+            if finish_reason == "length":
+                irc.error(
+                    "The model ran out of tokens before replying. Raise "
+                    "max_tokens (or max_completion_tokens), or lower "
+                    "reasoning_effort.")
+            else:
+                irc.error("The model returned an empty reply.")
+            return
+
         # Log any annotations (sources) if present
-        try:
-            annotations = getattr(message0, "annotations", None)
-            if annotations:
-                self.log.info(
-                    f"OpenRouter annotations: {json.dumps(annotations, ensure_ascii=False)}"
-                )
-        except Exception as e:
-            self.log.info(f"OpenRouter annotations logging failed: {e}")
-            annotations = None
+        urls = self._annotation_urls(getattr(message0, "annotations", None))
+        if urls:
+            self.log.info(f"OpenRouter sources: {' '.join(urls)}")
 
         # Optionally append sources
-        try:
-            if self.registryValue("web_show_sources", channel) and annotations:
-                urls = []
-                for ann in annotations:
-                    if isinstance(ann, dict):
-                        url = ann.get("url") or ann.get("source") or ann.get("link")
-                        if url:
-                            urls.append(url)
-                if urls:
-                    content = f"{content}\nSources: " + " ".join(urls)
-        except Exception as e:
-            self.log.info(f"OpenRouter source append failed: {e}")
+        if self.registryValue("web_show_sources", channel) and urls:
+            content = f"{content}\nSources: " + " ".join(urls)
 
         # If web sources are hidden, strip URLs/markdown citations.
-        try:
-            if use_web and not self.registryValue("web_show_sources", channel):
-                content = self._strip_urls_and_citations(content)
-        except Exception as e:
-            self.log.info(f"OpenRouter citation stripping failed: {e}")
-
+        if use_web and not self.registryValue("web_show_sources", channel):
+            content = self._strip_urls_and_citations(content)
 
         if self.registryValue("nick_strip", channel):
             content = re.sub(rf"^{re.escape(irc.nick)}: ?", "", content)
+
+        if not content.strip():
+            irc.error("The model returned an empty reply.")
+            return
 
         # --------------------------------------------------------------- #
         # Send reply back to IRC

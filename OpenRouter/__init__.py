@@ -1,5 +1,6 @@
 ###
 # Copyright (c) 2023, oddluck
+# Copyright (c) 2026, PeGaSuS
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -37,17 +38,19 @@ import supybot
 from supybot import world
 
 # Use this for the version of this plugin.
-__version__ = ""
+__version__ = "2026.10.26"
 
-# XXX Replace this with an appropriate author or supybot.Author instance.
-__author__ = supybot.authors.unknown
+__author__ = supybot.Author("Nelluk", "Nelluk", "")
 
 # This is a dictionary mapping supybot.Author instances to lists of
 # contributions.
-__contributors__ = {}
+__contributors__ = {
+    supybot.Author("oddluck", "oddluck", ""): ["original ChatGPT plugin"],
+    supybot.Author("PeGaSuS", "PeGaSuS", ""): ["fixes"],
+}
 
 # This is a url where the most recent plugin package can be downloaded.
-__url__ = ""
+__url__ = "https://github.com/TehPeGaSuS/supy-plugins"
 
 from . import config
 from . import plugin

@@ -1,5 +1,6 @@
 ###
 # Copyright (c) 2025 Nelluk
+# Copyright (c) 2026, PeGaSuS
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -69,7 +70,7 @@ conf.registerGlobalValue(
     "api_key",
     registry.String(
         "",
-        _("""Your OpenAI API Key (required)"""),
+        _("""API key for the endpoint in base_url (required)"""),
         private=True,
     ),
 )
@@ -81,7 +82,9 @@ conf.registerGlobalValue(
         "https://openrouter.ai/api/v1",
         _(
             """
-            API server, default: "https://api.openai.com/v1/"
+            OpenAI-compatible API server, e.g. "https://openrouter.ai/api/v1",
+            "https://api.groq.com/openai/v1" or "https://api.openai.com/v1".
+            Web search only works with OpenRouter.
             """
         ),
     ),
@@ -118,10 +121,12 @@ conf.registerChannelValue(
     OpenRouter,
     "model",
     registry.String(
-        "deepseek/deepseek-chat-v3-0324:free",
+        "openrouter/free",
         _(
             """
-            OpenRouter endpoint model, default: "deepseek/deepseek-chat-v3-0324:free"
+            Model id. The default, "openrouter/free", is OpenRouter's router
+            that picks one of the currently free models, so it keeps working
+            when the list of free models changes.
             """
         ),
     ),
@@ -131,10 +136,11 @@ conf.registerChannelValue(
     OpenRouter,
     "web_mode",
     registry.String(
-        "auto",
+        "off",
         _(
             """
-            Web search mode: off, auto, always, or optin.
+            Web search mode: off, auto, always, or optin. OpenRouter charges
+            for web search even with free models, so it is off by default.
             """
         ),
     ),
@@ -147,7 +153,8 @@ conf.registerChannelValue(
         "auto",
         _(
             """
-            Web search engine: auto, native, or exa.
+            Web search engine: auto, native, exa, firecrawl, parallel, or
+            perplexity.
             """
         ),
     ),
@@ -160,7 +167,8 @@ conf.registerChannelValue(
         "medium",
         _(
             """
-            Web search context size: low, medium, or high.
+            Web search context size: low, medium, or high. Only used by
+            models with native search.
             """
         ),
     ),
@@ -279,10 +287,26 @@ conf.registerChannelValue(
     OpenRouter,
     "max_tokens",
     registry.Integer(
-        200,
+        1000,
         _(
             """
-            The maximum number of tokens to generate in the chat completion. The total length of input tokens and generated tokens is limited by the model's context length.
+            The maximum number of tokens to generate in the chat completion. The total length of input tokens and generated tokens is limited by the model's context length. Reasoning models count their hidden thinking against this limit, so a low value can leave no room for the reply.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    OpenRouter,
+    "reasoning_effort",
+    registry.String(
+        "",
+        _(
+            """
+            Reasoning effort for reasoning models (e.g. low, medium, high;
+            accepted values depend on the model). Empty leaves it to the
+            model. Sent as OpenRouter's reasoning.effort, or as
+            reasoning_effort to other endpoints.
             """
         ),
     ),
@@ -334,10 +358,11 @@ conf.registerChannelValue(
     OpenRouter,
     "max_history",
     registry.Integer(
-        10,
+        5,
         _(
             """
-            The maximum number of messages to keep in conversation history. 0 to disable.
+            The maximum number of exchanges (one user message and the bot's
+            reply) to keep in conversation history. 0 to disable.
             """
         ),
     ),

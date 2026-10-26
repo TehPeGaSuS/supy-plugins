@@ -1,5 +1,6 @@
 ###
 # Copyright (c) 2023, oddluck
+# Copyright (c) 2026, PeGaSuS
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
