@@ -142,7 +142,7 @@ TEXTS = {
         'championsNote': 'Final standings of the season that ended on %s.',
         'championsHeaders': ('#', 'Hunter', 'xp', 'Ducks', 'Golden<br />ducks'),
         'championsEmpty': 'No quarterly reset has happened here yet.',
-        'backToIndex': 'All channels',
+        'home': 'Home',
         'other': 'fr',
         'switch': 'Lisez-le en Français',
     },
@@ -171,7 +171,7 @@ TEXTS = {
         'championsNote': 'Classement final de la saison terminée le %s.',
         'championsHeaders': ('#', 'Chasseur', 'xp', 'Canards', 'Canards<br />dorés'),
         'championsEmpty': "Aucune remise à zéro trimestrielle n'a encore eu lieu ici.",
-        'backToIndex': 'Tous les canaux',
+        'home': 'Accueil',
         'other': 'en',
         'switch': 'Read it in English',
     },
@@ -218,15 +218,16 @@ _PAGE = """<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
 """
 
 
-def _page(lang, page, title, headers, rows, note='', width='', back=False):
+def _page(lang, page, title, headers, rows, note='', width=''):
     """`page` is the path under /duckhuntpro/ without the language ('' for
-    the index); `back` adds a link to the index before the language switch."""
+    the index). Every page but the index gets a Home link (to the index, in
+    the same language) before the language switch."""
     texts = TEXTS[lang]
     return _PAGE % {
         'lang': lang, 'other': texts['other'], 'switch': texts['switch'],
         'switchHref': '/duckhuntpro/%s%s' % (page + '/' if page else '', texts['other']),
         'back': ('<a href="/duckhuntpro/%s">%s</a> &nbsp;&middot;&nbsp; '
-                 % (lang, texts['backToIndex']) if back else ''),
+                 % (lang, texts['home']) if page else ''),
         'title': html.escape(title), 'width': width, 'rows': ''.join(rows),
         'note': ('\t<div style="text-align: center;">\n\t\t%s\n\t</div>\n\t<br />\n' % note
                  if note else '\t<br />\n'),
@@ -313,7 +314,7 @@ def renderLeaderboard(lang, network, channel, players):
         rows.append(_empty(lang, 'leaderboardEmpty', 11))
     return _page(lang, '%s/leaderboard' % channelPath(network, channel),
                  texts['leaderboardTitle'] % channel,
-                 (('', h) for h in texts['leaderboardHeaders']), rows, back=True)
+                 (('', h) for h in texts['leaderboardHeaders']), rows)
 
 
 def renderChampions(lang, network, channel, when, standings):
@@ -328,4 +329,4 @@ def renderChampions(lang, network, channel, when, standings):
     note = texts['championsNote'] % html.escape(when) if when else ''
     return _page(lang, '%s/champions' % channelPath(network, channel),
                  texts['championsTitle'] % channel,
-                 (('', h) for h in texts['championsHeaders']), rows, note=note, back=True)
+                 (('', h) for h in texts['championsHeaders']), rows, note=note)

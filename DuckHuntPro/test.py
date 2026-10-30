@@ -923,7 +923,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn('<td style="text-align: left;">%s</td>'
                       % messages.lvl2rank(data.levelForXp(300), 'en'), body)
         self.assertIn('href="/duckhuntpro%sleaderboard/fr">Lisez-le en Français' % path, body)
-        self.assertIn('href="/duckhuntpro/en">All channels</a>', body)
+        self.assertIn('href="/duckhuntpro/en">Home</a>', body)
         body = cb._renderWeb(path + 'leaderboard/fr')
         self.assertIn('<title>Duck Hunt - classement - %s</title>' % self.channel, body)
         self.assertIn('<th>Chasseur</th>', body)
@@ -1009,6 +1009,20 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             self.assertIn('<td>77%</td>', cb._renderWeb('/levels'))
         finally:
             value.setValue(original)
+
+    def testEveryPageButTheIndexHasAHomeLink(self):
+        cb = self._cb()
+        cb.db.player(self.irc.network, self.channel, 'someone')
+        cb.db.save()
+        chan = '/%s/%s/' % (urllib.parse.quote(self.irc.network, safe=''),
+                            urllib.parse.quote(self.channel, safe=''))
+        for page in ('shop', 'levels', chan + 'leaderboard', chan + 'champions'):
+            self.assertIn('<a href="/duckhuntpro/en">Home</a>', cb._renderWeb(page + '/en'), page)
+            self.assertIn('<a href="/duckhuntpro/fr">Accueil</a>', cb._renderWeb(page + '/fr'), page)
+        for page in ('/', '/en', '/fr'):
+            body = cb._renderWeb(page)
+            self.assertNotIn('>Home</a>', body)
+            self.assertNotIn('>Accueil</a>', body)
 
     def testRenderWebUnknownChannelRaises404(self):
         cb = self._cb()
