@@ -2623,6 +2623,23 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     # Phase 3: nick-change stat fusion
     # -----------------------------------------------------------------
 
+    def testBareReloadIsTheGameCommandInGameChannels(self):
+        lvl = data.LEVELS[data.levelForXp(1)]
+        reply = messages.tcl('en', 'm204', self.nick, lvl.clip_size, lvl.clip_size,
+                             lvl.clip_count, lvl.clip_count)
+        self._sent()
+        for text in ('@reload', '@ReLoad', '%s: reload' % self.irc.nick):
+            self.irc.feedMsg(ircmsgs.privmsg(self.channel, text, prefix=self.prefix))
+            self.assertEqual([m.args[-1] for m in self._drainWait(1)], [reply], text)
+
+    def testReloadWithAnArgumentOrOutsideGameChannelsStaysOwners(self):
+        self.assertRegexp('reload NoSuchPluginHere', 'No plugin|not loaded|Error|loaded',
+                          frm=self.prefix)
+        conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        self.assertNotRegexp('reload', 'm204')
+        self.assertRegexp('reload', 'reload <plugin>')
+        self.assertRegexp('reload', 'reload <plugin>', private=True)
+
     def testDoNickRecordsPendingTransfer(self):
         cb = self._cb()
         cb.db.player(self.irc.network, self.channel, self.nick)

@@ -423,6 +423,31 @@ class DuckHuntPro(callbacks.Plugin):
             self._cancelFlights(network, channelName)
 
     # -----------------------------------------------------------------
+    # "!reload" as the game's command in game channels
+    # -----------------------------------------------------------------
+
+    def inFilter(self, irc, msg):
+        """In a channel where the game is enabled, a bare "reload" command
+        (whatever the channel's prefix chars or nick addressing) is the
+        game's duckreload, not Owner's reload. With an argument, in private,
+        or where the game is off, Owner gets it as usual; "owner reload"
+        always works."""
+        if (msg.command == 'PRIVMSG' and len(msg.args) == 2
+                and irc.isChannel(msg.args[0])
+                and self.registryValue('enabled', msg.args[0], irc.network)):
+            text = callbacks.addressed(irc, msg)
+            if text and text.strip().lower() == 'reload':
+                payload = msg.args[1]
+                i = payload.lower().rfind('reload')
+                if i >= 0:
+                    msg = ircmsgs.IrcMsg(msg=msg, args=(msg.args[0],
+                                                        payload[:i] + 'duck' + payload[i:]))
+                    # addressed() caches its result as a tag the copy inherits.
+                    k = text.lower().find('reload')
+                    msg.tag('addressed', text[:k] + 'duck' + text[k:])
+        return msg
+
+    # -----------------------------------------------------------------
     # Nick-change stat fusion
     # -----------------------------------------------------------------
 

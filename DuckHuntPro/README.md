@@ -93,6 +93,12 @@ the daily `.bak` is the only undo.
   original's deferral against stat theft), using its exact merge rules. Unlike
   the original, a player who renames and leaves before acting keeps the link
   for `pendingTransfersAfterLeave` (3 days), host-guarded.
+- **`!reload` in game channels** (extra, not in the original): in a channel
+  where the game is enabled, a bare `reload` command (whatever the prefix
+  char or nick addressing) is the game's `duckreload`, so players keep their
+  muscle memory; Owner's `reload` is untouched everywhere else, with an
+  argument, and as `owner reload <plugin>`. Set `reloadCommand` to `reload`
+  there so the jam and empty-magazine hints match.
 - **Host linking** (extra, not in the original): every profile remembers the
   `user@host`s it acted from (`hostMemoryDays`). A player acting under a nick
   with no NICK-change link to their stats (ping timeout and back as `Nick_`,
