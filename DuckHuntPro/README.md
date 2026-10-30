@@ -110,7 +110,8 @@ the daily `.bak` is the only undo.
   Anything ambiguous is logged and left to `duckfusion`.
 - **Antiflood**: per player and command (`floodShoot` 30:600, `floodReload`
   15:120, `floodStats` 2:120, `floodLastduck` 1:300, `floodShop` 3:600) and
-  channel-wide (`floodGlobal` 30:600), with the original's throttled warnings.
+  channel-wide (`floodGlobal` 100:600, the original's 30 is too tight for a
+  busy channel), with the original's throttled warnings.
 - **Quarterly reset** (extra, not in the original): on 1 Jan/Apr/Jul/Oct each
   channel's standings are archived for `duckchampions` and xp/stats are zeroed;
   the channel is told and the top three are named. `quarterlyResetEnabled`
@@ -195,7 +196,7 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `floodStats` | channel, network | `2:120` | Individual flood limit for duckstats as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
 | `floodLastduck` | channel, network | `1:300` | Individual flood limit for lastduck as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
 | `floodShop` | channel, network | `3:600` | Individual flood limit for shop as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |
-| `floodGlobal` | channel, network | `30:600` | Flood limit on all the game's commands together, for the whole channel ("<requests>:<seconds>"). The original suggests at least the largest individual limit. |
+| `floodGlobal` | channel, network | `100:600` | Flood limit on all the game's commands together, for the whole channel ("<requests>:<seconds>"). The original's 30:600 trips during normal play with ten shooters; 100 only catches runaway loops. |
 | `antifloodMsgInterval` | channel, network | `60` | Minimum number of seconds between two flood-control warnings for the same limit (not too low, or the warnings become the flood). |
 | `kickViaChanServ` | network | `False` | Make the game's kicks through services instead of kicking directly (the original's kick_method 1), on this network. Needed when the bot has no op but is allowed to use services. |
 | `chanServKickLine` | network | `CS KICK {channel} {nick} :{reason}` | The raw IRC line kickViaChanServ sends on this network, with {channel}, {nick} and {reason} filled in. The default is the original's `CS kick` (the network needs a CS alias for ChanServ, as DALnet's has). Without an alias, for example: `PRIVMSG ChanServ :KICK {channel} {nick} {reason}`; on Undernet the service is X: `PRIVMSG X@channels.undernet.org :KICK {channel} {nick} {reason}`. |

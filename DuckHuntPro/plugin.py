@@ -841,7 +841,7 @@ class DuckHuntPro(callbacks.Plugin):
     # -----------------------------------------------------------------
 
     _FLOOD_DEFAULTS = {'floodShoot': (30, 600), 'floodReload': (15, 120), 'floodStats': (2, 120),
-                       'floodLastduck': (1, 300), 'floodShop': (3, 600), 'floodGlobal': (30, 600)}
+                       'floodLastduck': (1, 300), 'floodShop': (3, 600), 'floodGlobal': (100, 600)}
 
     def _floodLimit(self, channel, key):
         """A "requests:seconds" limit setting; the default if it is malformed."""

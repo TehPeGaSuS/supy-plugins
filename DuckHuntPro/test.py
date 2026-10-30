@@ -3577,11 +3577,11 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         blocked = cb._floodBlocked(self.irc, msg, self.channel, command, key, now)
         return blocked, self._texts(self._sent())
 
-    def testFloodSettingsHaveTheOriginalsDefaults(self):
+    def testFloodSettingsHaveTheOriginalsDefaultsExceptGlobal(self):
         cb = self._cb()
         self.assertEqual([cb._floodLimit(self.channel, k) for k in (
             'floodShoot', 'floodReload', 'floodStats', 'floodLastduck', 'floodShop', 'floodGlobal')],
-            [(30, 600), (15, 120), (2, 120), (1, 300), (3, 600), (30, 600)])
+            [(30, 600), (15, 120), (2, 120), (1, 300), (3, 600), (100, 600)])
         conf.supybot.plugins.DuckHuntPro.floodStats.setValue('banana')
         self.assertEqual(cb._floodLimit(self.channel, 'floodStats'), (2, 120))
 

@@ -327,9 +327,10 @@ for _name, _default, _what in (
         registry.String(_default, "Individual flood limit for %s%s" % (_what, _FLOOD_HELP)))
 
 conf.registerChannelValue(DuckHuntPro, 'floodGlobal',
-    registry.String('30:600', """Flood limit on all the game's commands
-    together, for the whole channel ("<requests>:<seconds>"). The original
-    suggests at least the largest individual limit."""))
+    registry.String('100:600', """Flood limit on all the game's commands
+    together, for the whole channel ("<requests>:<seconds>"). The original's
+    30:600 trips during normal play with ten shooters (a duck costs each of
+    them about three commands); 100 only catches runaway loops."""))
 
 conf.registerChannelValue(DuckHuntPro, 'antifloodMsgInterval',
     registry.PositiveInteger(60, """Minimum number of seconds between two
