@@ -542,6 +542,12 @@ class DuckHuntPro(callbacks.Plugin):
             line = t(self._LOG_PLAIN[action])
         elif action in self._LOG_UNARM:
             line = t(self._LOG_UNARM[action], clock, target, hunter)
+        elif action.startswith('item_') and int(action[5:]) > data.ORIGINAL_SHOP_SIZE:
+            itemKey = data.SHOP_ITEMS[int(action[5:]) - 1]
+            lang = self._lang(channel)
+            line = messages.get(lang, 'log_item', clock=clock, hunter=hunter,
+                                item=messages.get(lang, 'item_' + itemKey),
+                                cost=self._shopCost(itemKey))
         elif action.startswith('item_'):
             number = int(action[5:])
             cost = self._shopCost(data.SHOP_ITEMS[number - 1])
@@ -1331,7 +1337,11 @@ class DuckHuntPro(callbacks.Plugin):
         elif forceNonGolden:
             isGolden = False
         else:
-            isGolden = self._rng.uniform(0, 100) < (100.0 * goldenPerDay / ducksPerDay)
+            chance = 100.0 * goldenPerDay / ducksPerDay
+            chanData = self.db.getChannel(irc.network, channelName)
+            if chanData and (chanData.get('golden_magnet_until') or 0) > time.time():
+                chance = min(100.0, chance * data.GOLDEN_MAGNET_MULTIPLIER)
+            isGolden = self._rng.uniform(0, 100) < chance
 
         hpTotal = 1
         if isGolden:
@@ -1360,6 +1370,19 @@ class DuckHuntPro(callbacks.Plugin):
                           'fake_duck_soaring' if isFake else 'soaring', now=now)
 
         self._out(irc, channelName, None, self._duckAnnouncement(channelName), 'public')
+
+        if chan.get('snowman_pending'):
+            # Shop item 28: the drunk Snowman scares this duck off at once.
+            with self.db.lock:
+                chan.pop('snowman_pending', None)
+                chan['snowman_last'] = now
+            self.db.save()
+            self._removeDuck(irc.network, channelName, spawnedAt=now, outcome='fled')
+            self._out(irc, channelName, None,
+                      messages.get(self._lang(channelName), 'snowman_scares'), 'public')
+            self._huntLog(channelName, 'frightened', now=now)
+            self._maybeHandBackOnDuckGone(irc.network, channelName)
+            return
 
         escapeAt = now + self._currentEscapeTime(irc.network, channelName, now)
         name = "DuckHuntPro:escape:%s:%s:%r" % (irc.network, key[1], now)
@@ -1624,7 +1647,10 @@ class DuckHuntPro(callbacks.Plugin):
         if sabotage:
             db.removeItem(player, 'sabotage')
             sabotageMsg = t('m337', sabotage.get('value') or '?')
-        if db.itemActive(player, 'liability_insurance', now):
+        ranger = bool(db.itemActive(player, 'bribed_ranger', now))
+        if ranger:
+            xpAccident = 0      # shop item 27 waives it (liability is moot then)
+        elif db.itemActive(player, 'liability_insurance', now):
             xpAccident = xpAccident // 3      # Tcl's int(x / 3) floors negatives
             liabilityMsg = t('m343')
 
@@ -1673,7 +1699,7 @@ class DuckHuntPro(callbacks.Plugin):
         fled = 0
         if not duckPresent or self._rng.uniform(0, 100) >= accuracy:
             fled = self._shotMissed(irc, channel, network, nick, player, lvl, duckPresent,
-                                    xpAccident, dazzleMsg, liabilityMsg, now)
+                                    xpAccident, dazzleMsg, liabilityMsg, now, ranger)
         else:
             damage = data.NORMAL_DAMAGE
             for ammoKey, dmg in data.AMMO_TYPE_DAMAGE.items():
@@ -1693,16 +1719,21 @@ class DuckHuntPro(callbacks.Plugin):
             out(t('m23') if numDucks == 1 else t('m24'), 'public')
 
     def _shotMissed(self, irc, channel, network, nick, player, lvl, duckPresent,
-                    xpAccident, dazzleMsg, liabilityMsg, now):
+                    xpAccident, dazzleMsg, liabilityMsg, now, ranger=False):
         """The miss/wild-fire half of Duck_Hunt.tcl's shoot: xp penalties,
         scaring the ducks, the hunting-accident ricochet chain, wild-fire
-        confiscation and the demotion notice. Returns how many ducks the
-        noise scared off."""
+        confiscation and the demotion notice. With `ranger` (shop item 27)
+        the accident (already 0 in `xpAccident`) and wild-fire penalties are
+        waived and the ranger glares at a random bystander, for show only.
+        Returns how many ducks the noise scared off."""
         stats = player['stats']
         t = lambda k, *a: self._t(channel, k, *a)
         out = lambda text, kind='pref': self._out(irc, channel, nick, text, kind)
         key = (network.lower(), channel.lower())
         xpMiss, xpWild = lvl.xp_missed_shot, lvl.xp_wild_shot
+        if ranger:
+            xpWild = 0
+            liabilityMsg = messages.get(self._lang(channel), 'ranger_waived')
 
         stats['missed'] += 1
         previousXp = player['xp']
@@ -1819,12 +1850,18 @@ class DuckHuntPro(callbacks.Plugin):
             if confiscated:
                 self._huntLog(channel, 'confiscated', now=now)
             if not someoneHit:
-                out(t('m18', nick, xpMiss, xpWild) + confiscationMsg)
+                out(t('m18', nick, xpMiss, xpWild) + confiscationMsg
+                    + (liabilityMsg if ranger else ''))
         elif not someoneHit:
             out(t('m19', nick, xpMiss) + dazzleMsg)
             self._huntLog(channel, 'miss', nick, now=now, network=network)
         if not duckPresent and self.registryValue('kickOnWildFire', channel):
             self._kickIfOpped(irc, channel, nick, t('m20', xpMiss, xpWild))
+        if ranger and (someoneHit or not duckPresent):
+            lang = self._lang(channel)
+            bystander = self._pickAccidentVictim(irc, channel, network, nick)
+            out(messages.get(lang, 'ranger_glare', victim=bystander) if bystander
+                else messages.get(lang, 'ranger_glare_nobody'), 'public')
         newLevel = data.levelForXp(player['xp'])
         if data.levelForXp(previousXp) > newLevel:
             out(t('m2', nick, newLevel, messages.lvl2rank(newLevel, self._lang(channel))),
@@ -1882,6 +1919,19 @@ class DuckHuntPro(callbacks.Plugin):
             xpWon = 0
         else:
             xpWon = self.registryValue('xpPerDuck') + (self.registryValue('xpLuckyShot') if isLucky else 0)
+        featherMsg = ''
+        if not duck['is_golden'] and not duck.get('is_fake') \
+                and db.itemActive(player, 'golden_feather', now):
+            # Shop item 25: this ordinary duck pays like a golden one (the
+            # hit points rolled as for a real golden duck); it still counts
+            # as an ordinary duck in the stats.
+            hp = self._rng.randint(self.registryValue('goldenDuckMinHP', channel),
+                                   max(self.registryValue('goldenDuckMinHP', channel),
+                                       self.registryValue('goldenDuckMaxHP', channel)))
+            xpWon = (self.registryValue('xpPerGoldenDuckHp') * hp
+                     + (self.registryValue('xpLuckyShot') if isLucky else 0))
+            db.consumeItemUse(player, 'golden_feather')
+            featherMsg = messages.get(self._lang(channel), 'feather_used')
         cloverMsg = ''
         clover = db.itemActive(player, 'four_leaf_clover', now)
         if clover:
@@ -1936,7 +1986,7 @@ class DuckHuntPro(callbacks.Plugin):
                      channel, lvlUp, xpWon) + cloverMsg + ammoMsg
         else:
             text = t(mkey, nick, sound, spent, total, totalWord, channel, lvlUp,
-                     xpWon) + cloverMsg
+                     xpWon) + cloverMsg + featherMsg
         self._out(irc, channel, nick, text, 'public')
         if not isLucky:
             self._huntLog(channel, 'shoot_golden_duck' if golden else 'shoot', nick,
@@ -2180,6 +2230,8 @@ class DuckHuntPro(callbacks.Plugin):
             accuracyMod += '\x0303+%d%%\x03' % int((100 - lvl.accuracy) / 3)
         # (in the order the player got them, as the original lists them)
         inventoryNames = {k: t(m) for k, m in self._STATS_INVENTORY}
+        inventoryNames.update({k: messages.get(lang, 'item_' + k) for k in
+                               ('golden_feather', 'mirror_shield', 'bribed_ranger')})
         effectNames = {k: t(m) for k, m in self._STATS_EFFECTS}
         held = [k for k in list(player['items']) if db.itemActive(player, k, now)]
         inventory = [inventoryNames[k] for k in held if k in inventoryNames]
@@ -2334,7 +2386,7 @@ class DuckHuntPro(callbacks.Plugin):
     def shop(self, irc, msg, args, channel, text):
         """[<channel>] [<id> [<target>]]
         Without arguments lists the purchasable items, otherwise buys item
-        number <id> (1-23) with your xp. Items 14-17 (mirror, sand, water
+        number <id> (1-28) with your xp. Items 14-17 (mirror, sand, water
         bucket, sabotage) need a <target> player, the others take none.
         """
         # Tcl only binds the command when shop_enabled is set.
@@ -2377,9 +2429,12 @@ class DuckHuntPro(callbacks.Plugin):
         costs = [self._shopCost(k) for k in data.SHOP_ITEMS]
         itemId = parts[0] if parts else ''
         targetNick = parts[1] if len(parts) > 1 else ''
-        valid = [str(i) for i in range(1, 24)]
+        if itemId == str(data.SHOP_JOKE_ID):
+            out(messages.get(lang, 'shop_joke', nick=nick))      # Snowman's Aunt
+            return
+        valid = [str(i) for i in range(1, len(data.SHOP_ITEMS) + 1)]
         noTarget = [str(i) for i in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-                                     18, 19, 20, 21, 22, 23)]
+                                     18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28)]
         withTarget = ['14', '15', '16', '17']
         if ((itemId in noTarget and len(parts) != 1)
                 or (itemId in withTarget and len(parts) != 2)
@@ -2390,7 +2445,7 @@ class DuckHuntPro(callbacks.Plugin):
             if self.registryValue('shopPreferredDisplayMode', channel):
                 out(t('m263', 'DuckHuntPro', self.registryValue('shopUrl', channel), 'shop'))
             else:
-                out(t('m265', 'DuckHuntPro', *(costs + ['shop'])))
+                out(self._shopListing(channel, costs))
             return
 
         player['last_activity'] = now
@@ -2407,7 +2462,7 @@ class DuckHuntPro(callbacks.Plugin):
         # moves a renamed target's stats or drops expired items.
         if targetNick and self._checkPendingRename(irc, channel, targetNick):
             draft.commit(player)
-        expired = (itemNo in (3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 19, 22)
+        expired = (itemNo in (3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 18, 19, 22, 25, 26, 27)
                    and db.purgeExpiredItems(player, now))
         if itemNo in (14, 15, 16, 17):
             victim = self.db.getPlayer(network, channel, targetNick)
@@ -2525,6 +2580,15 @@ class DuckHuntPro(callbacks.Plugin):
             elif itemNo == 14:
                 if db.itemActive(targetPlayer, 'mirror_dazzle', now):
                     out(t('m324', nick, targetNick))
+                elif db.itemActive(targetPlayer, 'mirror_shield', now):
+                    # Shop item 26: the dazzle lands on the thrower (whatever
+                    # they wear or own; one dazzle at a time).
+                    if not db.itemActive(player, 'mirror_dazzle', now):
+                        db.giveItem(player, 'mirror_dazzle', now, duration=None, uses=1,
+                                    value=targetPlayer['display_nick'])
+                    output = messages.get(lang, 'shield_mirror', nick=nick, cost=cost,
+                                          xpword=plural, target=targetNick)
+                    charged = True
                 elif db.itemActive(player, 'sunglasses', now):
                     # Tcl quirk: tests the BUYER's sunglasses, yet the message
                     # says the target wears them; the buyer pays for nothing.
@@ -2541,6 +2605,14 @@ class DuckHuntPro(callbacks.Plugin):
                     out(t('m367', nick, targetNick))
                 elif db.itemActive(targetPlayer, 'sand', now):
                     out(t('m327', nick, targetNick))
+                elif db.itemActive(targetPlayer, 'mirror_shield', now):
+                    # Shop item 26: the sand lands in the thrower's gun.
+                    if not db.itemActive(player, 'sand', now):
+                        db.giveItem(player, 'sand', now, duration=None, uses=1,
+                                    value=targetPlayer['display_nick'])
+                    output = messages.get(lang, 'shield_sand', nick=nick, cost=cost,
+                                          xpword=plural, target=targetNick)
+                    charged = True
                 elif db.itemActive(targetPlayer, 'grease', now):
                     # Grease is used up by the sand, which has no effect.
                     db.removeItem(targetPlayer, 'grease')
@@ -2596,12 +2668,15 @@ class DuckHuntPro(callbacks.Plugin):
                     output = t('m347', nick, cost, plural, count,
                                messages.plural(count, t('m348'), t('m349')), channel)
                     charged = True
-        else:
-            # 23: Tcl has no sleeping-hours or other check for the fake duck.
+        elif itemNo == 23:
+            # Tcl has no sleeping-hours or other check for the fake duck.
             self._scheduleSpecialSpawn(network, channel, now + data.FAKE_DUCK_DELAY,
                                        'fake_duck', True, player['display_nick'])
             output = t('m361', nick, cost, plural)
             charged = True
+        else:
+            output, charged = self._shopOwnItem(irc, channel, network, nick, player, itemNo,
+                                                cost, plural, now)
 
         if charged:
             player['xp'] -= cost
@@ -2617,6 +2692,60 @@ class DuckHuntPro(callbacks.Plugin):
         if output is not None:
             out(output)
         return charged
+
+    def _shopListing(self, channel, costs):
+        """The original's catalogue (m265) with DuckHuntPro's own items
+        inserted before its syntax reminder."""
+        n = data.ORIGINAL_SHOP_SIZE
+        text = self._t(channel, 'm265', 'DuckHuntPro', *(costs[:n] + ['shop']))
+        extra = messages.get(self._lang(channel), 'shop_extra', **{
+            'c%d' % (n + 1 + i): c for i, c in enumerate(costs[n:])})
+        cut = text.find('\x0307|\x03')
+        if cut < 0:
+            return text + extra
+        return text[:cut].rstrip(' ') + extra + text[cut:]
+
+    def _shopOwnItem(self, irc, channel, network, nick, player, itemNo, cost, plural, now):
+        """DuckHuntPro's own shop items, 24-28. Returns (reply, charged); a
+        refusal is sent here and returns (None, False)."""
+        lang = self._lang(channel)
+        get = lambda k, **kw: messages.get(lang, k, nick=nick, cost=cost, xpword=plural, **kw)
+        out = lambda text: self._out(irc, channel, nick, text, 'pref')
+        left = lambda seconds: messages.adaptTimeResolution(int(seconds * 1000), False, lang)
+        key = data.SHOP_ITEMS[itemNo - 1]
+        if itemNo == 24:
+            chan = self.db.channel(network, channel)
+            with self.db.lock:
+                until = chan.get('golden_magnet_until') or 0
+                extended = until > now
+                chan['golden_magnet_until'] = max(until, now) + data.GOLDEN_MAGNET_DURATION
+                remaining = chan['golden_magnet_until'] - now
+            return get('magnet_extended' if extended else 'magnet_bought',
+                       left=left(remaining), channel=channel), True
+        if itemNo in (25, 26, 27):
+            item = db.itemActive(player, key, now)
+            if item:
+                if item.get('expires_at') is None:
+                    out(self._t(channel, 'm288', nick, item['uses_left'], messages.plural(
+                        item['uses_left'], self._t(channel, 'm292'), self._t(channel, 'm293'))))
+                else:
+                    out(self._t(channel, 'm283', nick, left(item['expires_at'] - now)))
+                return None, False
+            meta = data.ITEM_META[key]
+            db.giveItem(player, key, now, duration=meta['duration'], uses=meta['uses'])
+            return get({25: 'feather_bought', 26: 'shield_bought', 27: 'ranger_bought'}[itemNo]), True
+        # 28: the drunk Snowman, one pending per channel, then a cooldown.
+        chan = self.db.channel(network, channel)
+        if chan.get('snowman_pending'):
+            out(messages.get(lang, 'snowman_pending', nick=nick))
+            return None, False
+        wait = (chan.get('snowman_last') or 0) + self.registryValue('snowmanCooldown', channel) - now
+        if wait > 0:
+            out(messages.get(lang, 'snowman_cooldown', nick=nick, left=left(wait)))
+            return None, False
+        with self.db.lock:
+            chan['snowman_pending'] = player['display_nick']
+        return get('snowman_bought', channel=channel), True
 
     # -----------------------------------------------------------------
     # Weapon confiscation admin commands

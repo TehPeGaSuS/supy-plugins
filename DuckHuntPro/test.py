@@ -1140,12 +1140,17 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testShopNoArgumentListsTheCatalog(self):
         costs = [data.ITEM_COSTS[k] for k in data.SHOP_ITEMS]
-        self.assertEqual(len(costs), 23)
+        self.assertEqual(len(costs), 28)
         texts = self._shopRun()
+        original = self._msg('m265', 'DuckHuntPro', *(costs[:23] + ['shop']))
+        cut = original.index('\x0307|\x03')
+        extra = messages.get('en', 'shop_extra', c24=30, c25=35, c26=12, c27=25, c28=8)
         # (too long for one line: split as the original's split_line does)
         self.assertEqual(texts, messages.splitLine(
-            self._msg('m265', 'DuckHuntPro', *(costs + ['shop'])), 435))
-        self.assertEqual(len(texts), 2)
+            original[:cut].rstrip(' ') + extra + original[cut:], 435))
+        whole = self._cb()._shopListing(self.channel, costs)
+        self.assertLess(whole.index('23- Mechanical duck'), whole.index('24- Golden magnet (30 xp)'))
+        self.assertLess(whole.index('28- Drunk Snowman (8 xp)'), whole.index('Syntax'))
         self.assertEqual(self._xp(), 1000)
         # Listing is not a shop "activity" in Tcl (last_activity untouched).
         self.assertTrue(self._player()['last_activity'] is None)
@@ -1158,8 +1163,8 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
 
     def testShopSyntaxErrors(self):
         syntax = self._msg('m264', 'shop')
-        for text in ('0', '24', 'abc', '01', '-1', '1 bob', '5 x', '23 x', '14', '15',
-                     '16', '17', '14 a b', '1 2 3'):
+        for text in ('0', '29', '68', '70', 'abc', '01', '-1', '1 bob', '5 x', '23 x', '24 x',
+                     '28 bob', '14', '15', '16', '17', '14 a b', '1 2 3'):
             self.assertEqual(self._shopRun(text), [syntax], text)
         self.assertEqual(self._xp(), 1000)
         self.assertTrue(self._player()['last_activity'] is None)
@@ -1369,6 +1374,225 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             p = self._player()
             self.assertEqual(p['items'], {})
             self.assertEqual(p['xp'], 1000 - data.ITEM_COSTS['brush'])
+
+    # -----------------------------------------------------------------
+    # DuckHuntPro's own shop items (24-28) and shop 69
+    # -----------------------------------------------------------------
+
+    def _own(self, key, **kw):
+        c = data.ITEM_COSTS[key]
+        return messages.get('en', kw.pop('msg'), nick=self.nick, cost=c, xpword=self._word(c), **kw)
+
+    def _chanData(self):
+        return self._cb().db.channel(self.irc.network, self.channel)
+
+    def testShop69IsAJokeAndFree(self):
+        for text in ('69', '69 bob'):
+            self.assertEqual(self._shopRun(text), [messages.get('en', 'shop_joke', nick=self.nick)])
+        self.assertEqual(self._xp(), 1000)
+        self.assertIn('tante de Snowman', messages.get('fr', 'shop_joke', nick='x'))
+
+    def testGoldenMagnetDoublesTheChanceAndExtends(self):
+        texts = self._shopRun('24')
+        self.assertEqual(len(texts), 1)
+        self.assertTrue(texts[0].startswith('%s > You hang a golden magnet' % self.nick), texts)
+        until = self._chanData()['golden_magnet_until']
+        self.assertAlmostEqual(until - time.time(), data.GOLDEN_MAGNET_DURATION, delta=5)
+        self.assertEqual(self._xp(), 1000 - 30)
+        # a second one adds 12h instead of doubling again
+        texts = self._shopRun('24')
+        self.assertTrue(texts[0].startswith('%s > You add a golden magnet' % self.nick), texts)
+        self.assertAlmostEqual(self._chanData()['golden_magnet_until'] - until,
+                               data.GOLDEN_MAGNET_DURATION, delta=5)
+        # 1 golden in 18 ducks is ~5.6%; a roll of 8 is golden only with the magnet
+        cb = self._cb()
+        cb._rng = ScriptedRNG([8])
+        cb._spawnDuck(self.irc, self.channel)
+        self.assertTrue(cb._activeDuck[self._key()][-1]['is_golden'])
+        cb._removeDuck(self.irc.network, self.channel)
+        self._chanData()['golden_magnet_until'] = time.time() - 1
+        cb._rng = ScriptedRNG([8])
+        cb._spawnDuck(self.irc, self.channel)
+        self.assertFalse(cb._activeDuck[self._key()][-1]['is_golden'])
+        cb._removeDuck(self.irc.network, self.channel)
+        self._sent()
+
+    def testGoldenMagnetIsCappedAt100Percent(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.ducksPerDay.setValue(2)
+        conf.supybot.plugins.DuckHuntPro.approxGoldenDucksPerDay.setValue(2)
+        self._chanData()['golden_magnet_until'] = time.time() + 100
+        cb._rng = ScriptedRNG([99.9])
+        cb._spawnDuck(self.irc, self.channel)
+        self.assertTrue(cb._activeDuck[self._key()][-1]['is_golden'])
+        cb._removeDuck(self.irc.network, self.channel)
+        self._sent()
+
+    def testGoldenFeatherPaysAGoldenBountyOnce(self):
+        self.assertEqual(self._shopRun('25'), [self._own('golden_feather', msg='feather_bought')])
+        self.assertEqual(self._xp(), 1000 - 35)
+        # owning one already
+        self.assertEqual(self._shopRun('25', xp=1000, setup=lambda p: db.giveItem(
+            p, 'golden_feather', time.time(), duration=None, uses=1)),
+            [self._msg('m288', self.nick, 1, self._msg('m292'))])
+        cb = self._putDuck()
+        cb._rng = ScriptedRNG([100, 0, 4])        # no jam, hit, 4 hp for the bounty
+        before = self._xp()
+        text = ' '.join(self._texts(self._cmd('bang')))
+        p = self._player()
+        self.assertEqual(p['xp'] - before, data.BASE_XP_GOLDEN_DUCK * 4)
+        self.assertEqual((p['stats']['killed'], p['stats']['golden_killed']), (1, 0))
+        self.assertIn('[golden feather: golden bounty]', text)
+        self.assertTrue(self._item(p, 'golden_feather') is None)
+        # the next ordinary duck pays normally again
+        cb = self._putDuck()
+        cb._rng = ScriptedRNG([100, 0])
+        before = self._xp()
+        self._cmd('bang')
+        self.assertEqual(self._xp() - before, data.XP_PER_DUCK)
+
+    def testGoldenFeatherIgnoresGoldenAndFakeDucks(self):
+        feather = lambda p: db.giveItem(p, 'golden_feather', time.time(), duration=None, uses=1)
+        cb = self._putDuck(is_golden=True, hp_total=1)
+        cb._rng = ScriptedRNG([100, 0])
+        self._cmd('bang', setup=lambda p: (self._tidy(p), feather(p)))
+        self.assertTrue(self._item(self._player(), 'golden_feather') is not None)
+        cb = self._putDuck(is_fake=True)
+        cb._rng = ScriptedRNG([100, 0])
+        self._cmd('bang')
+        self.assertTrue(self._item(self._player(), 'golden_feather') is not None)
+
+    def testMirrorShieldReflectsMirrorAndSand(self):
+        self.assertEqual(self._shopRun('26'), [self._own('mirror_shield', msg='shield_bought')])
+        self._assertMsg(self._shopRun('26'), 'm283', self.nick, 'WILDCARD')
+        bob = self._target('bob')
+        db.giveItem(bob, 'mirror_shield', time.time(), duration=86400)
+        db.giveItem(bob, 'grease', time.time(), duration=86400)
+        db.giveItem(bob, 'sunglasses', time.time(), duration=86400)
+        self._cb().db.save()
+        c = data.ITEM_COSTS['mirror']
+        texts = self._shopRun('14 bob', setup=lambda p: p['items'].clear())
+        self.assertEqual(texts, [messages.get('en', 'shield_mirror', nick=self.nick, cost=c,
+                                              xpword=self._word(c), target='bob')])
+        self.assertTrue(self._item(self._bob(), 'mirror_dazzle') is None)
+        dazzle = self._item(self._player(), 'mirror_dazzle')
+        self.assertEqual((dazzle['value'], dazzle['uses_left']), ('bob', 1))
+        self.assertEqual(self._xp(), 1000 - c)
+        c = data.ITEM_COSTS['sand']
+        texts = self._shopRun('15 bob', setup=lambda p: p['items'].clear())
+        self.assertEqual(texts, [messages.get('en', 'shield_sand', nick=self.nick, cost=c,
+                                              xpword=self._word(c), target='bob')])
+        self.assertTrue(self._item(self._bob(), 'sand') is None)
+        self.assertTrue(self._item(self._bob(), 'grease') is not None)   # not used up
+        self.assertEqual(self._item(self._player(), 'sand')['value'], 'bob')
+
+    def testMirrorShieldStillLandsOnAShieldedThrower(self):
+        bob = self._target('bob')
+        db.giveItem(bob, 'mirror_shield', time.time(), duration=86400)
+        self._cb().db.save()
+        def shielded(p):
+            p['items'].clear()
+            db.giveItem(p, 'mirror_shield', time.time(), duration=86400)
+        self._shopRun('14 bob', setup=shielded)
+        self.assertTrue(self._item(self._player(), 'mirror_dazzle') is not None)
+        self.assertTrue(self._item(self._bob(), 'mirror_dazzle') is None)
+
+    def testMirrorShieldKeepsTheOriginalRefusals(self):
+        bob = self._target('bob', gun_state='confiscated')
+        db.giveItem(bob, 'mirror_shield', time.time(), duration=86400)
+        self._cb().db.save()
+        self.assertEqual(self._shopRun('15 bob'), [self._msg('m367', self.nick, 'bob')])
+        self.assertEqual(self._xp(), 1000)
+
+    def testBribedRangerWaivesWildFireAndGlares(self):
+        self.assertEqual(self._shopRun('27'), [self._own('bribed_ranger', msg='ranger_bought')])
+        self._addHunter('bob')
+        lvl = data.LEVELS[data.levelForXp(500)]
+        cb = self._cb()
+        cb._rng = ScriptedRNG([100, 100, 0])     # no jam, no stray bullet, bystander #0
+        def prep(p):
+            self._tidy(p, ammo=lvl.clip_size, clips=lvl.clip_count, xp=500)
+            db.giveItem(p, 'bribed_ranger', time.time(), duration=43200)
+        texts = self._texts(self._cmd('bang', setup=prep))
+        self.assertEqual(self._xp(), 500 + lvl.xp_missed_shot)      # the miss still costs
+        self.assertIn('[bribed ranger: penalty waived]', ' '.join(texts))
+        self.assertIn(messages.get('en', 'ranger_glare', victim='bob'), texts)
+        self.assertEqual(self._player()['stats']['wild_shots'], 1)
+
+    def testBribedRangerWaivesTheAccidentPenalty(self):
+        self._addHunter('bob', xp=50)
+        lvl = data.LEVELS[data.levelForXp(500)]
+        cb = self._putDuck()
+        # no jam, miss, stray bullet hits someone, victim #0 (bob), no
+        # deflection, no armor -> bob is hit; then the ranger glares at bob
+        cb._rng = ScriptedRNG([100, 100, 0, 0, 100, 100, 0])
+        def prep(p):
+            self._tidy(p, ammo=lvl.clip_size, clips=lvl.clip_count, xp=500)
+            db.giveItem(p, 'bribed_ranger', time.time(), duration=43200)
+        texts = self._texts(self._cmd('bang', setup=prep))
+        self.assertEqual(self._player()['stats']['humans_shot'], 1)
+        self.assertEqual(self._xp(), 500 + lvl.xp_missed_shot)
+        self.assertIn('[bribed ranger: penalty waived]', ' '.join(texts))
+        self.assertNotIn('liability insurance', ' '.join(texts))
+
+    def testDrunkSnowmanScaresTheNextDuckThenCoolsDown(self):
+        self.assertEqual(self._shopRun('28'), [self._own(
+            'drunk_snowman', msg='snowman_bought', channel=self.channel)])
+        self.assertEqual(self._shopRun('28'), [messages.get('en', 'snowman_pending', nick=self.nick)])
+        self.assertEqual(self._xp(), 1000)        # the refusal costs nothing
+        cb = self._cb()
+        self._sent()
+        cb._rng = ScriptedRNG([100])
+        cb._spawnDuck(self.irc, self.channel)
+        sent = [x for c, t, x in self._sent()]
+        self.assertIn(messages.get('en', 'snowman_scares'), sent)
+        self.assertTrue(self._key() not in cb._activeDuck)
+        self.assertEqual(self._chanData()['last_duck_outcome'], 'fled')
+        self.assertNotIn('snowman_pending', self._chanData())
+        # shooting now is wild fire
+        cb._rng = ScriptedRNG([100])
+        self._cmd('bang')
+        self.assertEqual(self._player()['stats']['wild_shots'], 1)
+        # the cooldown
+        texts = self._shopRun('28')
+        self.assertTrue(texts[0].startswith('%s > Snowman is still sleeping it off' % self.nick), texts)
+        conf.supybot.plugins.DuckHuntPro.snowmanCooldown.setValue(0)
+        self.assertEqual(len(self._shopRun('28')), 1)
+        self.assertTrue(self._chanData().get('snowman_pending'))
+        # the next duck after that flies normally
+        cb._rng = ScriptedRNG([100])
+        cb._spawnDuck(self.irc, self.channel)
+        cb._rng = ScriptedRNG([100])
+        cb._spawnDuck(self.irc, self.channel)
+        self.assertEqual(len(cb._activeDuck[self._key()]), 1)
+        cb._removeDuck(self.irc.network, self.channel)
+        self._sent()
+
+    def testOwnItemsAreLoggedAndShownInStats(self):
+        lines = []
+        cb = self._cb()
+        orig = cb._huntLog
+        cb._huntLog = lambda *a, **k: lines.append((a, k)) or orig(*a, **k)
+        try:
+            self._shopRun('26')
+        finally:
+            cb._huntLog = orig
+        self.assertTrue(any(a[1] == 'item_26' for a, k in lines), lines)
+        conf.supybot.plugins.DuckHuntPro.huntingLogs.setValue(True)
+        self._shopRun('27')
+        text = ' '.join(self._texts(self._cmd('duckstats'), 'NOTICE'))
+        self.assertIn('mirror shield', text)
+        self.assertIn('bribed ranger', text)
+
+    def testWebShopPageListsTheNewItems(self):
+        cb = self._cb()
+        en, fr = cb._renderWeb('/shop/en'), cb._renderWeb('/shop/fr')
+        for name in ('Golden magnet', 'Golden feather', 'Mirror shield', 'Bribed ranger',
+                     'Drunk Snowman'):
+            self.assertIn(name, en)
+        for name in ('Aimant doré', 'Plume dorée', 'Bouclier miroir', 'Garde-chasse soudoyé',
+                     'Snowman ivre'):
+            self.assertIn(name, fr)
 
     def testMirrorTargetChecks(self):
         self.assertEqual(self._shopRun('14 newbie'), [self._msg('m362', self.nick)])

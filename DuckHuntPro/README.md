@@ -1,7 +1,7 @@
 # DuckHuntPro
 
 A Limnoria port of the Eggdrop Tcl script **Duck Hunt v2.11** by Menz Agitat:
-XP-based levels, ammo and jamming, golden ducks, a 23-item shop, accidents and
+XP-based levels, ammo and jamming, golden ducks, a 28-item shop, accidents and
 ricochets, weapon confiscation, nick-change stat fusion and the staff tools,
 with the original's message catalogue (English and French) and numbers. It is
 a separate plugin from `PT/DuckHunt`; see "Known differences" if you run both.
@@ -30,7 +30,7 @@ needed in private):
 | `duckreload` | Reload, or unjam your weapon (named so to avoid the Owner plugin's `reload`). |
 | `duckstats [<nick>]` | Hunting stats (a NOTICE). |
 | `lastduck` | How long ago the last duck flew, and what became of it: still in the air, shot by whom, or flown away (an addition from the original's beta). In private it needs channel op/halfop. |
-| `shop [<id> [<target>]]` | The catalogue, or buy item 1-23 (14-17 need a target). |
+| `shop [<id> [<target>]]` | The catalogue, or buy item 1-28 (14-17 need a target). |
 | `duckshooters`, `duckchampions` | Top shooters of the season / of the last reset. |
 
 Staff commands need `#channel,op`, `#channel,halfop` or the global `admin`
@@ -81,8 +81,26 @@ the daily `.bak` is the only undo.
 - **Weapons** are confiscated after accidents (and optionally wild fire) and are
   handed back daily at `autoGunHandBackTime`, when the channel's ducks have all
   gone, or never (`gunHandBackMode` 1/2/3). `unarm -static` is permanent.
-- **Shop and drops**: 23 items at the original's prices; kills may drop an item
-  or an xp book, rolled in the original's order.
+- **Shop and drops**: the original's 23 items at its prices; kills may drop an
+  item or an xp book, rolled in the original's order.
+- **Extra shop items** (not in the original, ids 24-28):
+  - **24 Golden magnet**: for 12h, golden ducks are twice as likely on the
+    channel, for everyone (capped at 100%). Buying one while another is
+    active adds 12h. Decoys that may be golden get the doubled chance too.
+  - **25 Golden feather**: single use; your next ordinary duck kill pays
+    golden-duck xp (`xpPerGoldenDuckHp` per hit point, rolled as for a golden
+    duck). It still counts as an ordinary duck in the stats; golden and
+    mechanical ducks don't use it up.
+  - **26 Mirror shield**: for 24h, a mirror or sand thrown at you hits the
+    thrower instead, whatever the thrower wears or owns (even their own
+    shield). It wins over your sunglasses and grease. The original's refusals
+    (already dazzled, already sanded, unarmed target) still come first.
+  - **27 Bribed ranger**: for 12h, no xp penalty for hunting accidents or wild
+    fire (the miss itself still costs). A random hunter gets glared at, for
+    show only. Confiscations still apply.
+  - **28 Drunk Snowman**: the next duck flies off as soon as it appears, for
+    everyone, buyer included. One pending per channel, then `snowmanCooldown`.
+  - `shop 69` is a joke answer (Snowman's Aunt), free and never an item.
 - **Flights**: `method` 2 plans the day in advance (hours drawn without
   replacement, replanned at midnight and when bread is bought or expires);
   method 1 rolls every minute. After a (re)start the day is planned afresh
@@ -159,6 +177,7 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `minXpForShopping` | channel, network | `0` | The lowest a player's xp balance is allowed to go after a shop purchase; a purchase that would drop them below this floor is refused. |
 | `shopEnabled` | channel, network | `True` | Whether the shop command is available at all (Duck_Hunt.tcl's shop_enabled; when off the command does nothing). |
 | `shopPreferredDisplayMode` | channel, network | `0` | What `shop` without arguments shows: 0 = the catalogue of items and prices, anything else = a message pointing to shopUrl instead. |
+| `snowmanCooldown` | channel, network | `21600` | Seconds after a duck scared off by the drunk Snowman (item 28) before anyone on the channel can hire him again; 0 = no cooldown. |
 | `shopUrl` | channel, network | (empty) | The web page listing the shop items, shown when shopPreferredDisplayMode is non-zero. With web.enable on, this can be the dashboard's own shop page: <the bot's web address>/duckhuntpro/shop. |
 | `dropsEnabled` | channel, network | `True` | Whether killing a duck can also drop a bonus item/xp-book on top of the normal xp reward. |
 | `maxBreadOnChan` | channel, network | `20` | Maximum number of active bread pieces on a channel at once; further bread purchases are refused (and not charged) once this cap is hit. |
@@ -243,6 +262,11 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `bread` | 2 |
 | `duck_detector` | 5 |
 | `fake_duck` | 50 |
+| `golden_magnet` | 30 |
+| `golden_feather` | 35 |
+| `mirror_shield` | 12 |
+| `bribed_ranger` | 25 |
+| `drunk_snowman` | 8 |
 
 ### Kill drop chances (`dropChances.<drop>`, out of 1000)
 

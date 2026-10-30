@@ -195,19 +195,30 @@ ITEM_COSTS = {
     'bread': 2,
     'duck_detector': 5,
     'fake_duck': 50,
+    # Not in the original (DuckHuntPro's own items, ids 24-28).
+    'golden_magnet': 30,
+    'golden_feather': 35,
+    'mirror_shield': 12,
+    'bribed_ranger': 25,
+    'drunk_snowman': 8,
 }
 
 MAX_BREAD_ON_CHAN = 20
 
-# Tcl shop item id (1-23) -> ITEM_COSTS key, in the order of the original's
-# catalogue (id N is SHOP_ITEMS[N - 1]).
+# Shop item id -> ITEM_COSTS key (id N is SHOP_ITEMS[N - 1]): 1-23 are the
+# original's catalogue in its order, 24-28 DuckHuntPro's own items.
 SHOP_ITEMS = (
     'extra_ammo', 'extra_clip', 'ap_ammo', 'explosive_ammo', 'buyback_weapon',
     'grease', 'sight', 'infrared_detector', 'silencer', 'four_leaf_clover',
     'sunglasses', 'spare_clothes', 'brush', 'mirror', 'sand', 'water_bucket',
     'sabotage', 'life_insurance', 'liability_insurance', 'decoy', 'bread',
     'duck_detector', 'fake_duck',
+    'golden_magnet', 'golden_feather', 'mirror_shield', 'bribed_ranger', 'drunk_snowman',
 )
+ORIGINAL_SHOP_SIZE = 23
+
+# "shop 69" is a joke answer (Snowman's Aunt), never an item.
+SHOP_JOKE_ID = 69
 
 # Kill drop table (cfg lines 404-438): per-1000 chance, keyed by drop name.
 DROP_TABLE = {
@@ -275,7 +286,15 @@ ITEM_META = {
     'duck_detector': {'duration': None, 'uses': 1},
     'life_insurance': {'duration': 604800, 'uses': 1},
     'liability_insurance': {'duration': 172800, 'uses': None},
+    'golden_feather': {'duration': None, 'uses': 1},
+    'mirror_shield': {'duration': 86400, 'uses': None},
+    'bribed_ranger': {'duration': 43200, 'uses': None},
 }
+
+# Golden magnet: a channel-wide effect, kept on the channel (not a player
+# item). A purchase while one is active adds this much to it.
+GOLDEN_MAGNET_DURATION = 43200
+GOLDEN_MAGNET_MULTIPLIER = 2
 
 # Ammo-type items are mutually exclusive (buying one silently replaces the
 # other) and boost per-shot damage against multi-hit (golden) ducks only --
@@ -328,4 +347,9 @@ ITEM_DESCRIPTIONS = {
     'bread': "1h, stacks: more ducks per day + longer escape time",
     'duck_detector': 'next duck spawn: you get an advance notice',
     'fake_duck': 'a decoy duck arrives in exactly 10 minutes, worth 0 xp',
+    'golden_magnet': '12h, whole channel: golden ducks twice as likely (adds 12h if active)',
+    'golden_feather': 'single use: your next ordinary duck kill pays golden-duck xp',
+    'mirror_shield': '24h: mirrors and sand thrown at you hit the thrower instead',
+    'bribed_ranger': '12h: no accident or wild-fire xp penalty',
+    'drunk_snowman': 'the next duck flies off before anyone can shoot it (channel cooldown)',
 }

@@ -417,6 +417,12 @@ for _i, (_name, _what) in enumerate(_TIERS):
         registry.NonNegativeInteger(data.ACCIDENT_CHANCE_WILD_FIRE[_i][1],
             "Percent chance that a wild shot (no duck) hits someone, in %s." % _what))
 
+conf.registerChannelValue(DuckHuntPro, 'snowmanCooldown',
+    registry.NonNegativeInteger(21600, """Seconds. After a duck has been
+    scared off by the drunk Snowman (shop item 28), nobody on the channel can
+    hire him again for this long. 0 = no cooldown (still only one pending at
+    a time)."""))
+
 conf.registerGroup(DuckHuntPro, 'shopCosts')
 for _key, _cost in data.ITEM_COSTS.items():
     conf.registerGlobalValue(DuckHuntPro.shopCosts, _key,
