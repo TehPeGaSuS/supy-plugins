@@ -47,6 +47,7 @@ def _newPlayer(nick):
         },
         'items': {},
         'last_activity': None,
+        'hosts': {},                # user@host -> last time seen acting from it
     }
 
 
@@ -255,6 +256,40 @@ class Database:
         with self.lock:
             return chan['players'].get(nick.lower())
 
+    MAX_HOSTS_PER_PLAYER = 10
+
+    def touchHost(self, network, channelName, nick, userhost, maxAge, now=None):
+        """Remembers that `nick`'s profile was seen acting from `userhost`
+        (the host memory behind host linking). Entries older than `maxAge`
+        seconds are forgotten and at most MAX_HOSTS_PER_PLAYER are kept.
+        Does nothing (and creates nothing) when the nick has no profile.
+        Returns whether the profile changed."""
+        now = time.time() if now is None else now
+        with self.lock:
+            p = self.getPlayer(network, channelName, nick)
+            if p is None or not userhost:
+                return False
+            hosts = p.setdefault('hosts', {})
+            before = dict(hosts)
+            hosts[userhost] = now
+            for host in [h for h, t in hosts.items() if now - t > maxAge]:
+                del hosts[host]
+            while len(hosts) > self.MAX_HOSTS_PER_PLAYER:
+                del hosts[min(hosts, key=hosts.get)]
+            return hosts != before
+
+    def profilesByHost(self, network, channelName, userhost, maxAge, exclude=None, now=None):
+        """The display nicks of the channel's profiles seen from `userhost`
+        within the last `maxAge` seconds, other than `exclude`'s."""
+        now = time.time() if now is None else now
+        chan = self.getChannel(network, channelName)
+        if not chan or not userhost:
+            return []
+        skip = exclude.lower() if exclude else None
+        with self.lock:
+            return [p['display_nick'] for key, p in chan['players'].items()
+                    if key != skip and now - p.get('hosts', {}).get(userhost, float('-inf')) <= maxAge]
+
     def topPlayers(self, network, channelName, n=3):
         """Returns up to `n` players ranked by ducks shot (xp as tiebreaker),
         highest first. Empty list if the channel has no players yet."""
@@ -387,6 +422,10 @@ class Database:
             dst['items'] = {k: items[k] for k in sorted(items, key=lambda k: ids.get(k, k))}
             activity = [a for a in (dst.get('last_activity'), src.get('last_activity')) if a]
             dst['last_activity'] = max(activity) if activity else None
+            hosts = dict(src.get('hosts', {}))
+            for host, seen in dst.get('hosts', {}).items():
+                hosts[host] = max(seen, hosts.get(host, 0))
+            dst['hosts'] = hosts
             if srcKey != dstKey:
                 del chan['players'][srcKey]
         self.save()
@@ -472,3 +511,33 @@ class Database:
                 self.data['pending_transfers_at'] = time.time()
         if existed:
             self.save()
+
+    def markPendingTransferLeft(self, network, channelName, nick, now=None):
+        """Notes that the renamed nick left before acting: the transfer is
+        kept (pendingTransfersAfterLeave) but from now on only fires for a
+        player coming from one of the old profile's hosts. Returns whether
+        there was a transfer to mark."""
+        key = self._transferKey(network, channelName, nick)
+        with self.lock:
+            entry = self.data['pending_transfers'].get(key)
+            if entry is None:
+                return False
+            entry['left_at'] = time.time() if now is None else now
+            self.data['pending_transfers_at'] = entry['left_at']
+        self.save()
+        return True
+
+    def dropExpiredLeftTransfers(self, maxAge, now=None):
+        """Forgets the transfers whose renamed nick left more than `maxAge`
+        seconds ago. Returns how many were dropped."""
+        now = time.time() if now is None else now
+        with self.lock:
+            expired = [k for k, e in self.data['pending_transfers'].items()
+                       if e.get('left_at') is not None and now - e['left_at'] > maxAge]
+            for k in expired:
+                del self.data['pending_transfers'][k]
+            if expired:
+                self.data['pending_transfers_at'] = now
+        if expired:
+            self.save()
+        return len(expired)

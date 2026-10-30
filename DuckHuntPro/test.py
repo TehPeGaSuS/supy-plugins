@@ -2646,12 +2646,212 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertEqual(newP['stats']['killed'], 3)
         self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, self.nick) is None)
 
-    def testDoPartDiscardsPendingTransfer(self):
+    def testDoPartDiscardsPendingTransferWhenNotKeptAfterLeave(self):
         cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.pendingTransfersAfterLeave.setValue(0)
         cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
         msg = ircmsgs.part(self.channel, prefix='new!x@y')
         cb.doPart(self.irc, msg)
         self.assertTrue(cb.db.popPendingTransfer(self.irc.network, self.channel, 'new') is None)
+
+    def testDoPartKeepsThePendingTransferMarkedLeft(self):
+        cb = self._cb()
+        cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
+        cb.doPart(self.irc, ircmsgs.part(self.channel, prefix='new!x@y'))
+        entry = cb.db.getPendingTransfer(self.irc.network, self.channel, 'new')
+        self.assertTrue(entry is not None and entry['left_at'] is not None)
+        cb.doQuit(self.irc, ircmsgs.quit(prefix='new!x@y'))
+        self.assertTrue(cb.db.getPendingTransfer(self.irc.network, self.channel, 'new') is not None)
+
+    # -----------------------------------------------------------------
+    # Host memory / host linking
+    # -----------------------------------------------------------------
+
+    def _online(self, nick, userhost):
+        self._addOnlineNick(nick)
+        self.irc.state.nicksToHostmasks[nick] = '%s!%s' % (nick, userhost)
+
+    def _hosts(self, nick):
+        p = self._cb().db.getPlayer(self.irc.network, self.channel, nick)
+        return sorted(p.get('hosts', {})) if p else None
+
+    def testActingRemembersTheHost(self):
+        cb = self._cb()
+        self._profile('Nick', xp=10)
+        self._online('Nick', 'ident@host.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        self.assertEqual(self._hosts('Nick'), ['ident@host.example'])
+        self._online('Nick', 'ident@other.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        self.assertEqual(self._hosts('Nick'), ['ident@host.example', 'ident@other.example'])
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'Ghost') is None)
+
+    def testHostMemoryForgetsOldHostsAndCapsTheList(self):
+        cb = self._cb()
+        self._profile('Nick', xp=10)
+        net, chan = self.irc.network, self.channel
+        cb.db.touchHost(net, chan, 'Nick', 'a@old', 100, now=1000)
+        cb.db.touchHost(net, chan, 'Nick', 'a@new', 100, now=1150)
+        self.assertEqual(self._hosts('Nick'), ['a@new'])
+        for i in range(15):
+            cb.db.touchHost(net, chan, 'Nick', 'a@h%d' % i, 10**6, now=2000 + i)
+        self.assertEqual(len(self._hosts('Nick')), db.Database.MAX_HOSTS_PER_PLAYER)
+        self.assertTrue('a@h14' in self._hosts('Nick') and 'a@h0' not in self._hosts('Nick'))
+
+    def testReconnectAsAnAlternateIsLinkedByHost(self):
+        cb = self._cb()
+        self._profile('Nick', xp=120, stats={'killed': 4})
+        self._online('Nick', 'me@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        # ping timeout: back as Nick_ with no NICK event in between
+        self._online('Nick_', 'me@dsl.example')
+        self.assertTrue(cb._checkPendingRename(self.irc, self.channel, 'Nick_'))
+        p = cb.db.getPlayer(self.irc.network, self.channel, 'Nick_')
+        self.assertEqual((p['xp'], p['stats']['killed']), (120, 4))
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'Nick') is None)
+        self.assertEqual(self._hosts('Nick_'), ['me@dsl.example'])
+
+    def testStubUnderAnAlternateIsAbsorbedWhenTheNickIsBack(self):
+        cb = self._cb()
+        self._profile('Nick', xp=500)
+        self._online('Nick', 'me@a.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        # new host, back as Nick_, plays a bit, quits without renaming
+        self._profile('Nick_', xp=30)
+        self._online('Nick_', 'me@b.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick_')
+        # later, Nick is back from the new host: the stub is folded in
+        self._online('Nick', 'me@b.example')
+        self.assertTrue(cb._checkPendingRename(self.irc, self.channel, 'Nick'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Nick')['xp'], 530)
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'Nick_') is None)
+        self.assertEqual(self._hosts('Nick'), ['me@a.example', 'me@b.example'])
+
+    def testHostLinkingNeedsTheNickShapeInStrictMode(self):
+        cb = self._cb()
+        self._profile('Alice', xp=90)
+        self._online('Alice', 'u@nat.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Alice')
+        self._online('Bob', 'u@nat.example')
+        self.assertFalse(cb._checkPendingRename(self.irc, self.channel, 'Bob'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Alice')['xp'], 90)
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'Bob') is None)
+
+    def testLooseHostLinkingTakesASingleMatchWhateverTheNick(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.hostLinking.setValue('loose')
+        self._profile('Alice', xp=90)
+        self._online('Alice', 'u@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Alice')
+        self._online('Guest4242', 'u@dsl.example')
+        self.assertTrue(cb._checkPendingRename(self.irc, self.channel, 'Guest4242'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Guest4242')['xp'], 90)
+        # but never when the host matches two profiles of different shapes
+        self._profile('Carol', xp=5)
+        cb.db.touchHost(self.irc.network, self.channel, 'Carol', 'u@dsl.example', 10**6)
+        self._online('Guest1', 'u@dsl.example')
+        self.assertFalse(cb._checkPendingRename(self.irc, self.channel, 'Guest1'))
+
+    def testHostLinkingBreaksTiesByNickShape(self):
+        cb = self._cb()
+        self._profile('Alice', xp=90)
+        self._profile('Bob', xp=40)
+        for nick in ('Alice', 'Bob'):
+            self._online(nick, 'u@nat.example')
+            cb._checkPendingRename(self.irc, self.channel, nick)
+        self._online('Bob|away', 'u@nat.example')
+        self.assertTrue(cb._checkPendingRename(self.irc, self.channel, 'Bob|away'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Bob|away')['xp'], 40)
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Alice')['xp'], 90)
+
+    def testHostLinkingCanBeTurnedOff(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.hostLinking.setValue('off')
+        self._profile('Nick', xp=120)
+        self._online('Nick', 'me@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        self._online('Nick_', 'me@dsl.example')
+        self.assertFalse(cb._checkPendingRename(self.irc, self.channel, 'Nick_'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Nick')['xp'], 120)
+
+    def testHostLinkingNeverFeedsAnAnonymousNick(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.hostLinking.setValue('loose')
+        conf.supybot.plugins.DuckHuntPro.anonymPrefix.setValue('Anonyme')
+        self._profile('Nick', xp=120)
+        self._online('Nick', 'me@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        self._online('Anonyme777', 'me@dsl.example')
+        self.assertFalse(cb._checkPendingRename(self.irc, self.channel, 'Anonyme777'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Nick')['xp'], 120)
+
+    def testHostLinkingHonoursConfiscationEnforcement(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.confiscationEnforcementOnFusion.setValue(True)
+        self._profile('Nick', xp=300)
+        self._online('Nick', 'me@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        self._profile('Nick_', xp=10, gun_state='confiscated')
+        self._online('Nick_', 'me@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick_')
+        # the armed old stats are dropped, the disarmed nick keeps its confiscation
+        p = cb.db.getPlayer(self.irc.network, self.channel, 'Nick_')
+        self.assertEqual((p['xp'], p['gun_state']), (10, 'confiscated'))
+        self.assertTrue(cb.db.getPlayer(self.irc.network, self.channel, 'Nick') is None)
+
+    def testNickShapes(self):
+        shape = self._cb()._nickShape
+        for nick in ('Nick', 'nick_', 'Nick__', 'Nick_2', 'Nick|away', 'Nick[brb]', 'Nick^',
+                     'Nick`', 'Nick{home}', 'Nick\\', 'Nick-2'):
+            self.assertEqual(shape(nick), 'nick', nick)
+        self.assertEqual(shape('Guest123'), 'guest123')
+        self.assertNotEqual(shape('Guest123'), shape('Guest456'))
+        self.assertEqual(shape('_42_'), '_42_')
+        self.assertNotEqual(shape('Nicky'), 'nick')
+        self.assertNotEqual(shape('Nick2'), 'nick')
+
+    def testPendingTransferAfterLeaveFiresOnlyFromAKnownHost(self):
+        cb = self._cb()
+        self._profile('Nick', xp=200)
+        self._online('Nick', 'me@dsl.example')
+        cb._checkPendingRename(self.irc, self.channel, 'Nick')
+        self._renamed('Nick', 'Nick|zzz')
+        cb.doQuit(self.irc, ircmsgs.quit(prefix='Nick|zzz!me@dsl.example'))
+        # somebody else takes the nick from elsewhere: no transfer, and it is spent
+        conf.supybot.plugins.DuckHuntPro.hostLinking.setValue('off')
+        self._online('Nick|zzz', 'thief@far.example')
+        self.assertFalse(cb._checkPendingRename(self.irc, self.channel, 'Nick|zzz'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Nick')['xp'], 200)
+        self.assertTrue(self._pending('Nick|zzz') is None)
+        # the real player, back from a remembered host, gets it
+        self._renamed('Nick', 'Nick|zzz')
+        cb.doQuit(self.irc, ircmsgs.quit(prefix='Nick|zzz!me@dsl.example'))
+        self._online('Nick|zzz', 'me@dsl.example')
+        self.assertTrue(cb._checkPendingRename(self.irc, self.channel, 'Nick|zzz'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Nick|zzz')['xp'], 200)
+
+    def testPendingTransferAfterLeaveExpires(self):
+        cb = self._cb()
+        self._profile('Nick', xp=200)
+        self._renamed('Nick', 'Nick|zzz')
+        cb.db.markPendingTransferLeft(self.irc.network, self.channel, 'Nick|zzz',
+                                      now=time.time() - 259201)
+        self.assertEqual(cb.db.dropExpiredLeftTransfers(259200), 1)
+        self.assertTrue(self._pending('Nick|zzz') is None)
+        self._renamed('Nick', 'Nick|zzz')
+        cb.db.markPendingTransferLeft(self.irc.network, self.channel, 'Nick|zzz',
+                                      now=time.time() - 259201)
+        self._online('Nick|zzz', 'me@dsl.example')
+        self.assertFalse(cb._checkPendingRename(self.irc, self.channel, 'Nick|zzz'))
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'Nick')['xp'], 200)
+
+    def testMergeUnitesTheHostLists(self):
+        cb = self._cb()
+        self._profile('a', hosts={'x@1': 10, 'x@2': 20})
+        self._profile('b', hosts={'x@2': 30, 'x@3': 40})
+        cb.db.mergeStats(self.irc.network, self.channel, 'b', 'a')
+        self.assertEqual(cb.db.getPlayer(self.irc.network, self.channel, 'b')['hosts'],
+                         {'x@1': 10, 'x@2': 30, 'x@3': 40})
 
     def testConfiscationEnforcementDiscardsDisarmedOldStats(self):
         cb = self._cb()
@@ -4157,6 +4357,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
     def testPendingTransfersGoOnAnyPart(self):
         cb = self._cb()
         conf.supybot.plugins.DuckHuntPro.enabled.setValue(False)
+        conf.supybot.plugins.DuckHuntPro.pendingTransfersAfterLeave.setValue(0)
         self._sent()
         cb.db.recordPendingTransfer(self.irc.network, self.channel, 'old', 'new')
         cb.doPart(self.irc, ircmsgs.part(self.channel, prefix='new!x@y'))

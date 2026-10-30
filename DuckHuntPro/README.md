@@ -90,7 +90,18 @@ the daily `.bak` is the only undo.
   midnight or when its game is switched on, as in the original. Bread, decoys
   and fake ducks work as in the original. Ammo is refilled daily at `autoRefillAmmoTime` (or several times a day, with a comma-separated list).
 - **Nick changes**: the stats follow a renamed player when they next act (the
-  original's deferral against stat theft), using its exact merge rules.
+  original's deferral against stat theft), using its exact merge rules. Unlike
+  the original, a player who renames and leaves before acting keeps the link
+  for `pendingTransfersAfterLeave` (3 days), host-guarded.
+- **Host linking** (extra, not in the original): every profile remembers the
+  `user@host`s it acted from (`hostMemoryDays`). A player acting under a nick
+  with no NICK-change link to their stats (ping timeout and back as `Nick_`,
+  playing as `Nick|home` from another box, a stub left under an alternate)
+  gets the matching profile merged in when the host matches and the nick has
+  the same shape (`Nick`, `Nick_`, `Nick_2`, `Nick|away`, `Nick[brb]`...).
+  `hostLinking loose` also accepts a lone host match whatever the nick
+  (Guest nicks), at the price of possibly merging two people behind one NAT.
+  Anything ambiguous is logged and left to `duckfusion`.
 - **Antiflood**: per player and command (`floodShoot` 30:600, `floodReload`
   15:120, `floodStats` 2:120, `floodLastduck` 1:300, `floodShop` 3:600) and
   channel-wide (`floodGlobal` 30:600), with the original's throttled warnings.
@@ -168,6 +179,9 @@ Numbers, costs and the level table (`levelGrantings`) default to the original
 | `warnOnRename` | global | `False` | Log a notice when a player who changed nick already has stats under the new nick. |
 | `warnOnTakeover` | global | `True` | Log what happened (and the stats involved) when a nick change makes two profiles merge, one replace the other, or a profile get claimed. |
 | `pendingTransfersMaxAge` | global | `3600` | Seconds. When the plugin starts, nick-change transfers still waiting are forgotten if nothing about them changed for longer than this. |
+| `pendingTransfersAfterLeave` | global | `259200` | Seconds. A player who changed nick and then left before acting again keeps their pending transfer for this long, but it then only fires for a player coming from one of the old profile's remembered hosts. `0` forgets the transfer when the player leaves, as the original does. |
+| `hostLinking` | channel, network | `strict` | `off`, `strict` (same `user@host` and same nick shape) or `loose` (also a lone `user@host` match whatever the nick). See host linking above. |
+| `hostMemoryDays` | global | `30` | Days a profile remembers the `user@host`s it acted from (at most 10 per profile). |
 | `confiscationEnforcementOnFusion` | channel, network | `False` | When a renamed player's stats would be merged into their new nick (see nick-change stat fusion), whether a disarmed profile should have its stats discarded instead of merged (an anti-confiscation-dodging measure). Off by default, matching the original script. |
 | `antifloodEnabled` | channel, network | `True` | Whether to rate-limit the game commands (the original's antiflood). |
 | `floodShoot` | channel, network | `30:600` | Individual flood limit for the shooting command as "<requests>:<seconds>": no more than that many uses of the command per player in that many seconds (a rolling window). |

@@ -372,6 +372,16 @@ commands, antiflood) rather than guessed.
   at rename time, matching the original's "reduce risk of stat theft"
   reasoning. `confiscationEnforcementOnFusion` (off by default) discards a
   disarmed profile's stats instead of merging.
+  Added 2026-10-30, beyond the original (whose nick-keyed tracking loses
+  stats on every reconnect under another nick): **host memory + host
+  linking**. Each profile keeps `hosts` (`user@host` -> last seen,
+  `hostMemoryDays`, 10 max); `_checkPendingRename` now also runs
+  `_linkByHost` (same `user@host` + same `_nickShape`, or a lone host
+  match in `hostLinking loose`; ambiguity is logged, never merged) and
+  stamps the host. Part/quit no longer drop a pending transfer: it is
+  marked `left_at`, kept for `pendingTransfersAfterLeave`, and only fires
+  from one of the old profile's hosts. The merge itself is the shared
+  `_absorbProfile` (the original's rules, incl. confiscation enforcement).
 - **Admin toolbox** (`class admin(callbacks.Commands)`, `admin`
   capability): list/fusion/rename/delete/planning/replanning/launch/export,
   plus top-level `unarm`/`rearm` (channel `op` capability, matching the

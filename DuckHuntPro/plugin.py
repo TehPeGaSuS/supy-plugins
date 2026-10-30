@@ -98,6 +98,7 @@ class DuckHuntPro(callbacks.Plugin):
         self._enabledHooks = {}      # (network, channel) -> (registry value, callback)
         data.setLevels(data.parseLevelGrantings(self.registryValue('levelGrantings')))
         self.db.dropStalePendingTransfers(self.registryValue('pendingTransfersMaxAge'))
+        self.db.dropExpiredLeftTransfers(self.registryValue('pendingTransfersAfterLeave'))
         self._scheduleEvent("DuckHuntPro:postinit",
                             time.time() + self.registryValue('postInitDelay'),
                             self._setPostInitDone, ())
@@ -646,30 +647,117 @@ class DuckHuntPro(callbacks.Plugin):
         elif pending and pending['old_nick'].lower() == lowNew:
             self.db.popPendingTransfer(network, channel, oldNick)
 
+    def _pendingLeft(self, irc, channel, nick):
+        """The original forgets a pending transfer when its nick leaves
+        (update_nickchange_tracking). With pendingTransfersAfterLeave the
+        transfer is kept instead, host-guarded, for that long."""
+        if self.registryValue('pendingTransfersAfterLeave') > 0:
+            self.db.markPendingTransferLeft(irc.network, channel, nick)
+        else:
+            self.db.discardPendingTransfer(irc.network, channel, nick)
+
     @_viaIrc
     def doPart(self, irc, msg):
-        """A pending transfer is forgotten when its nick leaves, on any
-        channel (update_nickchange_tracking)."""
         for channel in msg.args[0].split(','):
-            self.db.discardPendingTransfer(irc.network, channel, msg.nick)
+            self._pendingLeft(irc, channel, msg.nick)
 
     @_viaIrc
     def doQuit(self, irc, msg):
-        network = irc.network
         for cname in list(irc.state.channels.keys()):
-            self.db.discardPendingTransfer(network, cname, msg.nick)
+            self._pendingLeft(irc, cname, msg.nick)
 
     def _checkPendingRename(self, irc, channel, nick):
+        """Links `nick` to the stats it may own, now that it is playing:
+        first the original's deferred nick-change transfer
+        (ckeck_for_pending_rename), then host linking (another profile seen
+        recently from the same user@host). Then remembers the host the nick
+        acts from. Returns True when stats were moved (the original then
+        saves)."""
+        moved = self._applyPendingRename(irc, channel, nick)
+        moved = self._linkByHost(irc, channel, nick) or moved
+        self.db.touchHost(irc.network, channel, nick, self._hostOf(irc, nick),
+                          self.registryValue('hostMemoryDays') * 86400)
+        return moved
+
+    def _applyPendingRename(self, irc, channel, nick):
         """Duck_Hunt.tcl's ckeck_for_pending_rename: if `nick` just took over
         a nick that had stats, move or merge them now that the new nick is
-        playing. With confiscationEnforcementOnFusion, a disarmed new nick
-        can't escape its confiscation by inheriting an armed profile.
-        Returns True when stats were moved (the original then saves)."""
+        playing. A transfer whose nick had left in the meantime only fires
+        from one of the old profile's remembered hosts (and is dropped once
+        pendingTransfersAfterLeave is over)."""
         network = irc.network
         entry = self.db.popPendingTransfer(network, channel, nick)
         if not entry:
-            return
+            return False
         oldNick = entry['old_nick']
+        if entry.get('left_at') is not None:
+            if time.time() - entry['left_at'] > self.registryValue('pendingTransfersAfterLeave'):
+                return False
+            oldP = self.db.getPlayer(network, channel, oldNick)
+            if oldP is not None and self._hostOf(irc, nick) not in oldP.get('hosts', {}):
+                self.log.info('DuckHuntPro: %s (%s) is back on %s but not from a host %s '
+                              'was seen from; stats not transferred.',
+                              nick, self._hostOf(irc, nick), channel, oldNick)
+                return False
+        return self._absorbProfile(irc, channel, oldNick, nick)
+
+    _SHAPE_CUT = re.compile(r'[|`^\[\]{}\\]')
+    _SHAPE_TAIL = re.compile(r'[-_][-_0-9]*$')
+
+    @classmethod
+    def _nickShape(cls, nick):
+        """The part of a nick that survives the usual alternates: Nick, Nick_,
+        Nick_2, Nick|away, Nick[brb] and Nick^ all share the shape "nick".
+        Digits only drop after a separator, so Guest123 and Guest456 (two
+        people behind one NAT) stay apart."""
+        shape = cls._SHAPE_TAIL.sub('', cls._SHAPE_CUT.split(nick.lower(), 1)[0])
+        return shape or nick.lower()
+
+    def _linkByHost(self, irc, channel, nick):
+        """Host linking: merges into `nick` the profiles seen recently from
+        its user@host when they are clearly the same player (hostLinking).
+        Covers the reconnects no NICK event spans (ping timeout, Nick_, Guest
+        nicks). Ambiguous matches are logged and left alone."""
+        mode = self.registryValue('hostLinking', channel)
+        if mode == 'off':
+            return False
+        prefix = self.registryValue('anonymPrefix')
+        if prefix and re.match('^%s[0-9]+$' % re.escape(prefix), nick, re.I):
+            return False
+        userhost = self._hostOf(irc, nick)
+        if userhost == '?':
+            return False
+        network = irc.network
+        maxAge = self.registryValue('hostMemoryDays') * 86400
+        moved = False
+        for _ in range(5):          # several alternates can be waiting
+            candidates = self.db.profilesByHost(network, channel, userhost, maxAge, exclude=nick)
+            if not candidates:
+                break
+            shape = self._nickShape(nick)
+            similar = [c for c in candidates if self._nickShape(c) == shape]
+            if len(similar) == 1:
+                source = similar[0]
+            elif not similar and mode == 'loose' and len(candidates) == 1:
+                source = candidates[0]
+            else:
+                self.log.info('DuckHuntPro: %s (%s) on %s matches several profiles by host '
+                              '(%s); nothing merged, use duckfusion if they are the same player.',
+                              nick, userhost, channel, ', '.join(sorted(candidates)))
+                break
+            self.log.info('DuckHuntPro: %s (%s) on %s is linked by host to %s; merging.',
+                          nick, userhost, channel, source)
+            if not self._absorbProfile(irc, channel, source, nick):
+                break
+            moved = True
+        return moved
+
+    def _absorbProfile(self, irc, channel, oldNick, nick):
+        """Moves or merges `oldNick`'s profile into `nick`'s, with the
+        original's merge rules. With confiscationEnforcementOnFusion, a
+        disarmed new nick can't escape its confiscation by inheriting an
+        armed profile. Returns True when stats were moved."""
+        network = irc.network
         oldP = self.db.getPlayer(network, channel, oldNick)
         newP = self.db.getPlayer(network, channel, nick)
         warn = self.registryValue('warnOnTakeover')
@@ -721,6 +809,7 @@ class DuckHuntPro(callbacks.Plugin):
             if warn:
                 self._huntLog(channel, 'merge_stats_3', oldNick, nick, extra=(
                     '', stats(newP, nick), stats(newP, nick)))
+        return False
 
     # -----------------------------------------------------------------
     # Antiflood

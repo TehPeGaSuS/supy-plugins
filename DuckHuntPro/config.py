@@ -277,6 +277,32 @@ conf.registerGlobalValue(DuckHuntPro, 'pendingTransfersMaxAge',
     transfers still waiting are forgotten if nothing about them changed for
     longer than this."""))
 
+conf.registerGlobalValue(DuckHuntPro, 'pendingTransfersAfterLeave',
+    registry.NonNegativeInteger(259200, """Seconds. A player who changed nick
+    and then left (part or quit) before acting again keeps their pending
+    transfer for this long, but it then only fires for a player coming from
+    one of the old profile's remembered hosts. 0 forgets the transfer when
+    the player leaves, as the original script does."""))
+
+class HostLinking(registry.OnlySomeStrings):
+    validStrings = ('off', 'strict', 'loose')
+
+conf.registerChannelValue(DuckHuntPro, 'hostLinking',
+    HostLinking('strict', """Whether a player acting under a nick that has
+    no NICK-change link to their stats is matched to them by user@host
+    (the host memory, see hostMemoryDays): "strict" merges another profile
+    seen recently from the same user@host only when its nick has the same
+    shape (Nick, Nick_, Nick|away, Nick2...); "loose" also merges when that
+    user@host matches exactly one other profile, whatever its nick (covers
+    Guest nicks, but a shared host or NAT could merge two people); "off"
+    disables host matching. Ambiguous cases are never merged, only
+    logged."""))
+
+conf.registerGlobalValue(DuckHuntPro, 'hostMemoryDays',
+    registry.PositiveInteger(30, """Days. How long a profile remembers the
+    user@hosts it was seen acting from, for host linking and for pending
+    transfers after the player left."""))
+
 conf.registerChannelValue(DuckHuntPro, 'confiscationEnforcementOnFusion',
     registry.Boolean(False, """When a renamed player's stats would be merged
     into their new nick (see nick-change stat fusion), whether a disarmed
