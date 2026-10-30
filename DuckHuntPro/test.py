@@ -945,7 +945,7 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
         self.assertIn('href="/duckhuntpro%sleaderboard/en">leaderboard</a>' % path, body)
         self.assertIn('<td>1</td>', body)              # one player there
         self.assertIn('href="/duckhuntpro/fr">Lisez-le en Français', body)
-        self.assertIn('<th>Canal</th>', cb._renderWeb('/fr'))
+        self.assertIn('<th>Salon</th>', cb._renderWeb('/fr'))
         self.assertIn('href="/duckhuntpro/en">Read it in English', cb._renderWeb('/fr'))
         for bad in ('/xx', path + 'leaderboard/xx', path + 'leaderboard/en/x', '/shop/xx'):
             self._assertRendersNotFound(cb, bad)

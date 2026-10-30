@@ -157,7 +157,7 @@ TEXTS = {
                           "pénalité d'xp<br />tir manqué", "pénalité d'xp<br />tir sauvage",
                           "pénalité d'xp<br />accident"),
         'indexTitle': 'Duck Hunt',
-        'indexHeaders': ('Réseau', 'Canal', 'Joueurs', 'Pages'),
+        'indexHeaders': ('Réseau', 'Salon', 'Joueurs', 'Pages'),
         'indexNote': '<a href="/duckhuntpro/shop/fr">Shop</a> &nbsp;&middot;&nbsp; '
                      '<a href="/duckhuntpro/levels/fr">Niveaux et bonus</a>',
         'indexEmpty': 'Aucune partie enregistrée pour le moment.',
