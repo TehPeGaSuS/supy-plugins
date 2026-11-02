@@ -888,71 +888,173 @@ class GitHooks(callbacks.Plugin):
         list = wrap(list, ['channel'])
 
     class feed(callbacks.Commands):
-        """Which channels announce the gh-rss-service pushes of which repos.
-        Kept apart from the "announce" list (webhooks), so a repo can come
-        from its webhook in one channel and from a feed in another."""
-        def _entries(self):
-            return self.plugin.announce._load('feeds')
+        """gh-rss-service feeds, for repos you can't add a webhook to. Like
+        the RSS plugin: "feed add" registers a repo's feeds with the
+        service, "feed announce add" picks the channels. Kept apart from the
+        "announce" list (webhooks), so a repo can come from its webhook in
+        one channel and from a feed in another."""
 
-        def _save(self, data):
-            self.plugin.announce._save(data, 'feeds')
+        def _service(self):
+            return instance.registryValue('feedService').rstrip('/')
+
+        def _routes(self, owner, name):
+            return [string.Template(r).safe_substitute(owner=owner,
+                                                       name=name)
+                    for r in instance.registryValue('feedRoutes')]
+
+        def _register(self, irc, owner, name):
+            """Runs in a thread: the service fetches GitHub on the first
+            request of each route, which can take a few seconds."""
+            repo = '%s/%s' % (owner, name)
+            ok, failed = [], []
+            for route in self._routes(owner, name):
+                try:
+                    utils.web.getUrl('%s/github/%s' % (self._service(), route),
+                                     timeout=30)
+                    ok.append(route)
+                except Exception as e:
+                    failed.append('%s (%s)' % (route, e))
+            if ok:
+                repos = set(instance.registryValue('feedRepos'))
+                repos.add(repo)
+                instance.setRegistryValue('feedRepos', value=repos)
+            if failed:
+                irc.error(format(_('gh-rss-service failed for %L.'), failed)
+                          + (format(_(' Registered: %L.'), ok) if ok else ''))
+            if ok:
+                irc.reply(format(_('%s is registered with gh-rss-service '
+                                   '(%L). Announce it with: %s'), repo, ok,
+                                 ircutils.bold('githooks feed announce add '
+                                               '[<channel>] %s %s' %
+                                               (owner, name))))
 
         @internationalizeDocstring
-        def add(self, irc, msg, args, channel, owner, name):
-            """[<channel>] <owner> <name>
+        def add(self, irc, msg, args, owner, name):
+            """<owner> <name>
 
-            Announce the gh-rss-service pushes (new PRs, issues, releases,
-            notifications...) for the repository <owner>/<name> in
-            <channel>. Globs are supported for <owner> and <name>. Webhook
-            announces are managed separately, with "announce add".
-            <channel> defaults to the current channel."""
+            Registers the feeds of the repository <owner>/<name> with
+            gh-rss-service (supybot.plugins.GitHooks.feedService), which then
+            polls them and pushes new items here. Which feeds: see
+            supybot.plugins.GitHooks.feedRoutes. Announce them in a channel
+            with "feed announce add"."""
+            # plain loop/regex: supybot.commands' "any"/"all" shadow the
+            # builtins in this module
+            if not re.match(r'^[\w.-]+/[\w.-]+$', '%s/%s' % (owner, name)):
+                irc.error(_('<owner> and <name> must be plain GitHub names '
+                            '(no globs here).'), Raise=True)
+            if not self._service():
+                irc.error(format(_('Set %s to the URL of gh-rss-service '
+                                   'first, e.g. http://127.0.0.1:8080'),
+                                 ircutils.bold('supybot.plugins.GitHooks.'
+                                               'feedService')), Raise=True)
+            threading.Thread(target=self._register, args=(irc, owner, name),
+                             name='GitHooks feed add', daemon=True).start()
+        add = wrap(add, ['something', 'something'])
+
+        @internationalizeDocstring
+        def remove(self, irc, msg, args, owner, name):
+            """<owner> <name>
+
+            Forgets the repository <owner>/<name> and stops announcing its
+            feeds everywhere. gh-rss-service keeps polling it until it is
+            removed from the service's config.json; its pushes are then
+            ignored."""
             repo = '%s/%s' % (owner, name)
-            entries = self._entries()
-            for (dbRepo, net, chan) in entries:
-                if dbRepo == repo and (net == '' or net == irc.network) and \
-                        chan == channel:
-                    irc.error(_('This repository\'s feed is already '
-                                'announced to this channel.'))
-                    return
-            entries.append((repo, irc.network, channel))
-            self._save(entries)
+            repos = set(instance.registryValue('feedRepos'))
+            if repo not in repos:
+                irc.error(_('%s is not registered.') % repo, Raise=True)
+            repos.discard(repo)
+            instance.setRegistryValue('feedRepos', value=repos)
+            entries = [e for e in instance.announce._load('feeds')
+                       if e[0] != repo]
+            instance.announce._save(entries, 'feeds')
             irc.replySuccess()
-        add = wrap(add, ['channel', 'something', 'something'])
+        remove = wrap(remove, ['something', 'something'])
 
-        @internationalizeDocstring
-        def remove(self, irc, msg, args, channel, owner, name):
-            """[<channel>] <owner> <name>
+        def list(self, irc, msg, args):
+            """takes no arguments
 
-            Stop announcing the gh-rss-service pushes for <owner>/<name> in
-            <channel>. <channel> defaults to the current channel."""
-            repo = '%s/%s' % (owner, name)
-            entries = self._entries()
-            for entry in entries:
-                if entry[0] == repo and \
-                        (entry[1] == '' or entry[1] == irc.network) and \
-                        entry[2] == channel:
-                    entries.remove(entry)
-                    self._save(entries)
-                    irc.replySuccess()
-                    return
-            irc.error(_('This repository\'s feed is not announced to this '
-                        'channel.'))
-        remove = wrap(remove, ['channel', 'something', 'something'])
-
-        def list(self, irc, msg, args, channel):
-            """[<channel>]
-
-            Lists the repositories whose gh-rss-service pushes are announced
-            to <channel>. <channel> defaults to the current channel."""
-            results = [e[0] for e in self._entries()
-                       if (e[1] == '' or e[1] == irc.network) and
-                       ircutils.strEqual(e[2], channel)]
-            if results:
-                irc.reply(format(_('Feeds announced to %s: %L'), channel,
-                                 results))
+            Lists the repositories registered with gh-rss-service."""
+            repos = sorted(instance.registryValue('feedRepos'))
+            if repos:
+                irc.reply(format(_('Registered feeds: %L'), repos))
             else:
-                irc.reply(_('No feeds announced to %s.') % channel)
-        list = wrap(list, ['channel'])
+                irc.reply(format(_('No feeds registered. Add one with: %s'),
+                                 ircutils.bold('githooks feed add <owner> '
+                                               '<name>')))
+        list = wrap(list)
+
+        class announce(callbacks.Commands):
+            """Which channels announce which registered feeds."""
+            def _entries(self):
+                return instance.announce._load('feeds')
+
+            def _save(self, data):
+                instance.announce._save(data, 'feeds')
+
+            @internationalizeDocstring
+            def add(self, irc, msg, args, channel, owner, name):
+                """[<channel>] <owner> <name>
+
+                Announce the gh-rss-service pushes for the repository
+                <owner>/<name> in <channel>. Globs are supported for <owner>
+                and <name>. The repo must be registered with "feed add"
+                first. Webhook announces are managed separately, with
+                "announce add". <channel> defaults to the current
+                channel."""
+                repo = '%s/%s' % (owner, name)
+                if not [r for r in instance.registryValue('feedRepos')
+                        if fnmatch.fnmatch(r, repo)]:
+                    irc.error(format(_('No registered feed matches %s. '
+                                       'Register it first with: %s'), repo,
+                                     ircutils.bold('githooks feed add %s %s'
+                                                   % (owner, name))),
+                              Raise=True)
+                entries = self._entries()
+                for (dbRepo, net, chan) in entries:
+                    if dbRepo == repo and (net == '' or
+                                           net == irc.network) and \
+                            chan == channel:
+                        irc.error(_('This feed is already announced to '
+                                    'this channel.'), Raise=True)
+                entries.append((repo, irc.network, channel))
+                self._save(entries)
+                irc.replySuccess()
+            add = wrap(add, ['channel', 'something', 'something'])
+
+            @internationalizeDocstring
+            def remove(self, irc, msg, args, channel, owner, name):
+                """[<channel>] <owner> <name>
+
+                Stop announcing the gh-rss-service pushes for <owner>/<name>
+                in <channel>. <channel> defaults to the current channel."""
+                repo = '%s/%s' % (owner, name)
+                entries = self._entries()
+                for entry in entries:
+                    if entry[0] == repo and \
+                            (entry[1] == '' or entry[1] == irc.network) and \
+                            entry[2] == channel:
+                        entries.remove(entry)
+                        self._save(entries)
+                        irc.replySuccess()
+                        return
+                irc.error(_('This feed is not announced to this channel.'))
+            remove = wrap(remove, ['channel', 'something', 'something'])
+
+            def list(self, irc, msg, args, channel):
+                """[<channel>]
+
+                Lists the feeds announced to <channel>. <channel> defaults
+                to the current channel."""
+                results = [e[0] for e in self._entries()
+                           if (e[1] == '' or e[1] == irc.network) and
+                           ircutils.strEqual(e[2], channel)]
+                if results:
+                    irc.reply(format(_('Feeds announced to %s: %L'), channel,
+                                     results))
+                else:
+                    irc.reply(_('No feeds announced to %s.') % channel)
+            list = wrap(list, ['channel'])
 
     class repo(callbacks.Commands):
         def _url(self):

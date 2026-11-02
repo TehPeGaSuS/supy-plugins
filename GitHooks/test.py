@@ -755,7 +755,9 @@ class GitHooksFeedTestCase(ChannelPluginTestCase):
         self.cb = self.irc.getCallback('GitHooks')
         self.assertNotError('config supybot.plugins.GitHooks.announces ""')
         self.assertNotError('config supybot.plugins.GitHooks.feeds ""')
-        self.assertNotError('githooks feed add %s o r' % self.channel)
+        conf.supybot.plugins.GitHooks.feedRepos.setValue({'o/r', 'a/b'})
+        self.assertNotError('githooks feed announce add %s o r' %
+                            self.channel)
 
     def push(self, items, feed=FEED):
         self.cb.announce.onPayload(dict(FEED_HEADERS),
@@ -778,7 +780,8 @@ class GitHooksFeedTestCase(ChannelPluginTestCase):
             'v1.2.0 - https://github.com/o/r/releases/tag/v1.2.0')
 
     def testNotificationRoutedByItemRepo(self):
-        self.assertNotError('githooks feed add %s a b' % self.channel)
+        self.assertNotError('githooks feed announce add %s a b' %
+                            self.channel)
         feed = {'id': 'notifications', 'route': 'notifications', 'params': {},
                 'title': 'GitHub Notifications',
                 'link': 'https://github.com/notifications'}
@@ -872,19 +875,55 @@ class GitHooksFeedTestCase(ChannelPluginTestCase):
             self.assertRegexp(' ', r'merged .*#7')
             self.assertNoResponse(' ')
 
-    def testFeedCommands(self):
-        self.assertError('githooks feed add %s o r' % self.channel)
-        self.assertNotError('githooks feed add %s x *' % self.channel)
+    def testFeedAnnounceCommands(self):
+        self.assertError('githooks feed announce add %s o r' % self.channel)
+        self.assertRegexp('githooks feed announce add %s x y' % self.channel,
+                          'Register it first with: .*githooks feed add x y')
+        self.assertNotError('githooks feed announce add %s a *' %
+                            self.channel)
         self.assertResponse('config supybot.plugins.GitHooks.feeds',
-                            'o/r | test | %s || x/* | test | %s' %
+                            'o/r | test | %s || a/* | test | %s' %
                             (self.channel, self.channel))
-        self.assertRegexp('githooks feed list %s' % self.channel,
-                          'Feeds announced to .*o/r.*x/\\*')
-        self.assertNotError('githooks feed remove %s o r' % self.channel)
-        self.assertError('githooks feed remove %s o r' % self.channel)
-        self.assertNotError('githooks feed remove %s x *' % self.channel)
-        self.assertRegexp('githooks feed list %s' % self.channel,
-                          'No feeds announced')
+        self.assertRegexp('githooks feed announce list %s' % self.channel,
+                          'Feeds announced to .*o/r.*a/\\*')
+        self.assertNotError('githooks feed announce remove %s o r' %
+                            self.channel)
+        self.assertError('githooks feed announce remove %s o r' %
+                         self.channel)
+
+    def testFeedAddRegistersWithService(self):
+        import sys
+        plugin = sys.modules[type(self.cb).__module__]
+        GitHooks = conf.supybot.plugins.GitHooks
+        GitHooks.feedRepos.setValue(set())
+        self.assertRegexp('githooks feed add u r', 'feedService')
+        fetched = []
+        def fake_get(url, timeout=None):
+            if 'issue' in url:
+                raise plugin.utils.web.Error('HTTP Error 502')
+            fetched.append(url)
+            return b'<rss/>'
+        real = plugin.utils.web.getUrl
+        plugin.utils.web.getUrl = fake_get
+        try:
+            with GitHooks.feedService.context('http://svc:8080/'):
+                self.assertRegexp('githooks feed add u r',
+                                  'failed for issue/u/r/all')
+                self.assertRegexp(' ', 'u/r is registered .*pull/u/r/all.*'
+                                  'releases/u/r.*githooks feed announce add')
+                self.assertError('githooks feed add u r*')
+        finally:
+            plugin.utils.web.getUrl = real
+        self.assertEqual(fetched, ['http://svc:8080/github/pull/u/r/all',
+                                   'http://svc:8080/github/releases/u/r'])
+        self.assertResponse('githooks feed list', 'Registered feeds: u/r')
+        self.assertNotError('githooks feed announce add %s u r' %
+                            self.channel)
+        self.assertNotError('githooks feed remove u r')
+        self.assertRegexp('githooks feed list', 'No feeds registered')
+        self.assertNotRegexp('githooks feed announce list %s' % self.channel,
+                             'u/r')
+        self.assertError('githooks feed remove u r')
 
     def testListsAreIndependent(self):
         # o/r is only in the feed list: its webhooks are not announced

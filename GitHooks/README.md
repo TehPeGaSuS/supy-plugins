@@ -72,25 +72,52 @@ On top of those, the plugin offers **shorthand** such as `$user`, `$repo`,
 
 Only a repo's admins can add webhooks. For other people's repos,
 [gh-rss-service](https://github.com/TehPeGaSuS/gh-rss-service) polls GitHub
-(cheaply, with ETags) and can push each new item to GitHooks: set its
-`WEBHOOK_URL` to the same `http://<host>:<port>/githooks` URL and its
-`WEBHOOK_SECRET` to one of `supybot.plugins.GitHooks.announces.secret`. The
-pushes carry an `X-GH-RSS-Event` header.
+(cheaply, with ETags) and can push each new item to GitHooks, within about a
+minute with `POLL_INTERVAL_MINUTES=1`. The bot and the service talk both
+ways:
 
-Feeds have their **own list**, separate from the webhooks' `announce` list,
-and nothing from them is announced until a repo is added to it:
+* **service → bot**: set the service's `WEBHOOK_URL` to the bot's usual
+  `http://<host>:<port>/githooks` URL and its `WEBHOOK_SECRET` to one of
+  `supybot.plugins.GitHooks.announces.secret`. The pushes are signed like a
+  GitHub webhook and carry an `X-GH-RSS-Event` header, which is how GitHooks
+  tells them from webhooks.
+* **bot → service**: set `supybot.plugins.GitHooks.feedService` to the
+  service's URL, so `githooks feed add` can register repos there.
+
+Feeds work like the RSS plugin: **add** a repo once, then **announce** it
+where you want it. Point the plugin at the service first:
 
 ```
-githooks announce add #A unrealircd unrealircd   # its webhook → #A
-githooks feed add #B unrealircd unrealircd       # its gh-rss-service pushes → #B
-githooks feed add #A someone otherrepo           # a channel can mix both
-githooks feed list #B
-githooks feed remove #B unrealircd unrealircd
+config supybot.plugins.GitHooks.feedService http://127.0.0.1:8080
+githooks feed add unrealircd unrealircd              # registers its feeds with gh-rss-service
+githooks feed announce add #B unrealircd unrealircd  # announce them in #B
+githooks feed list                                   # registered repos
+githooks feed announce list #B
+githooks feed announce remove #B unrealircd unrealircd
+githooks feed remove unrealircd unrealircd           # forget it, and all its announces
 ```
 
-Globs work as in `announce add`. Items are routed by their own repo, so a
-`/github/notifications` feed reaches the channels of every repo it covers
-that is in the feed list.
+`feed add` requests the repo's routes from the service, which registers and
+polls them from then on: by default `pull/$owner/$name/all`,
+`issue/$owner/$name/all` and `releases/$owner/$name`
+(`supybot.plugins.GitHooks.feedRoutes`; the `all` variants are what show
+closes and merges). `feed remove` only forgets the repo on the bot's side:
+the service keeps polling it until it's taken out of its `config.json`, and
+its pushes are ignored.
+
+The feed announce list is **separate** from the webhooks' `announce` list,
+and nothing from feeds is announced until a repo is in it:
+
+```
+githooks announce add #A unrealircd unrealircd        # its webhook → #A
+githooks feed announce add #B unrealircd unrealircd   # its feeds → #B
+githooks feed announce add #A someone *               # a channel can mix both
+```
+
+Globs work in `feed announce add`, as long as they match a registered repo.
+Items are routed by their own repo, so a `/github/notifications` feed (add
+it to the service yourself) reaches the channels of every repo it covers
+that is in the feed announce list.
 
 They are announced with `format.feed` (empty disables them):
 
@@ -108,12 +135,41 @@ user: the feed knows who opened the PR, not who closed or merged it.
 channel gets (all by default); items without such a change, like releases
 and notifications, are always announced.
 
-`$summary` is the "user verb #id: title" part, with whatever the item has;
-`$repo $owner $name $user $kind $verb $id $number $title $body $url $forge
-$feed $feed_id $feed_url $route $type $reason $action $state` are there for your own
-template (`githooks vars feed` lists the last item's values). A push
-announces at most `max_announce_feed_items` (5) per channel, the rest as one
-`format.feed.hidden` line. `ignoreBots` skips authors ending in `[bot]`.
+**Feeds have their own variables.** They are not webhooks, so the payload
+variables (`$issue__title`, `$sender__login`...) don't exist for them. The
+common shorthand names are there with the same meaning (`$repo $owner $name
+$user $kind $verb $id $number $title $body $url $forge`), plus some that only
+feeds have:
+
+| Feed-only | Meaning |
+|---|---|
+| `$summary` | `$user $verb $id: $title` with the empty parts left out, coloured like `format.global`: `bob opened #3: Fix it`, `merged #3: Fix it`, `published: v1.2.0` |
+| `$action` | `opened`, `closed`, `merged` or `reopened` (PR and issue feeds) |
+| `$state` | `open`, `closed` or `merged` (PR and issue feeds) |
+| `$feed` `$feed_id` `$feed_url` | the feed's title, gh-rss-service id and GitHub page |
+| `$route` | `pull`, `issue`, `releases`, `notifications`... |
+| `$type` `$reason` | notifications: subject type (`PullRequest`...) and reason (`mention`...) |
+| `$hidden` | in `format.feed.hidden` only: items left out |
+
+The full list, what each one holds per feed, and example templates are in
+[VARIABLES.md](VARIABLES.md#feed-variables-gh-rss-service).
+`githooks vars feed` shows the values of the last item received.
+
+All the feed settings (under `supybot.plugins.GitHooks`):
+
+| Setting | Scope | Default | What it does |
+|---|---|---|---|
+| `feedService` | global | empty | gh-rss-service's URL, for `feed add` |
+| `feedRoutes` | global | `pull/$owner/$name/all issue/$owner/$name/all releases/$owner/$name` | routes `feed add` registers for a repo |
+| `format.feed` | channel | `[$forge] ($repo) [$kind] $summary - $url` (coloured) | the line; empty disables feed announces |
+| `format.feed.actions` | channel | `opened closed merged reopened` | which PR/issue changes are announced |
+| `max_announce_feed_items` | channel | `5` | most items announced from one push |
+| `format.feed.hidden` | channel | `[$forge] (+$hidden more from $feed) - $feed_url` | line for the items over that limit; empty: none |
+| `ignoreBots` | channel | `False` | also skips feed items whose author ends in `[bot]` |
+| `announces.secret` | global | empty | shared with webhooks: checks the service's signature |
+
+`feedRepos` (registered repos) and `feeds` (feed announce list) are kept by
+the `feed` commands; don't edit them by hand.
 
 ## Announce format
 

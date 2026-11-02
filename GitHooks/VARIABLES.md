@@ -29,6 +29,7 @@ two kinds:
 * [Finding a name](#finding-a-name)
 * [Template rules](#template-rules)
 * [Ready-made templates](#ready-made-templates)
+* [Feed variables (gh-rss-service)](#feed-variables-gh-rss-service)
 
 ## Quick start
 
@@ -505,3 +506,111 @@ Announcing releases and new branches as well:
 ```
 format.global.events  push issues issue_comment pull_request create release
 ```
+
+## Feed variables (gh-rss-service)
+
+Items pushed by [gh-rss-service](https://github.com/TehPeGaSuS/gh-rss-service)
+(see [the README](README.md#repos-you-cant-add-a-webhook-to)) are not
+webhooks: they are announced with their own template, `format.feed`, and have
+**their own, smaller set of variables**. None of the payload variables above
+exist for them (no `$issue__title`, `$sender__login`...), nor `$branch`,
+`$label`, `$assignee`, `$tag` or `$count`. `format.feed` is plain text like
+`format.global`: no commands, colour codes pasted straight in.
+
+The default is:
+
+```
+\x0303[$forge]\x03 \x0314($repo)\x03 [$kind] $summary - $url
+```
+
+### Every variable
+
+| Variable | Feed only? | Meaning |
+|---|---|---|
+| `$forge` | | always `GitHub` |
+| `$repo` | | `owner/name` of the item (for notifications and event feeds, each item's own repo) |
+| `$owner` `$name` | | the two halves of `$repo` |
+| `$user` | | the item's author; **empty** on closes, merges and reopens (the feed doesn't know who did them), on notifications and on event feeds |
+| `$kind` | | `PR`, `issue`, `release`, `commit`, `comment`, `discussion`... (see below) |
+| `$verb` | | `opened`, `closed`, `merged`, `reopened`, `published`, `pushed`, `mentioned you on`... (see below) |
+| `$id` | | `#3` for PRs, issues and discussions, a short commit id for commits, else empty |
+| `$number` | | `3`, the number in `$id`, or empty |
+| `$title` | | the item's title; on a merge the `(merged)` tag gh-rss-service adds is removed, since `$verb` says it; notifications lose their `owner/repo: ` prefix |
+| `$body` | | first line of the item's text (PR/issue body, release notes...), often empty |
+| `$url` | | link to the item |
+| `$what` | | same as `$kind` |
+| `$event` | | always `feed` |
+| `$summary` | yes | `$user $verb $id: $title`, coloured like the default `format.global` (bold user, pink id), with the empty parts left out: `bob opened #3: Fix it`, `merged #3: Fix it`, `published: v1.2.0`, or just the title |
+| `$action` | yes | `opened`, `closed`, `merged` or `reopened` for PR and issue feeds, else empty |
+| `$state` | yes | `open`, `closed` or `merged` for PR and issue feeds, else empty |
+| `$feed` | yes | the feed's title, e.g. `unrealircd/unrealircd All Pull Requests` |
+| `$feed_id` | yes | the feed's id in gh-rss-service, e.g. `pull_unrealircd_unrealircd_all` |
+| `$feed_url` | yes | the feed's GitHub page, e.g. `https://github.com/unrealircd/unrealircd/pulls` |
+| `$route` | yes | the gh-rss-service route: `pull`, `issue`, `releases`, `notifications`, `repo_event`... |
+| `$type` | yes | notifications: the subject type (`PullRequest`, `Issue`, `Release`...); event feeds: the event type (`PushEvent`...); else empty |
+| `$reason` | yes | notifications: why you got it (`mention`, `review_requested`, `subscribed`...); else empty |
+| `$hidden` | yes | only in `format.feed.hidden`: how many items of the push were not shown |
+
+`$action` here is not the webhook's raw action: it only ever is one of the
+four values above.
+
+### What the main ones contain, per feed
+
+| Route | `$kind` | `$verb` | `$user` | `$id` |
+|---|---|---|---|---|
+| `pull` | `PR` | `opened` / `closed` / `merged` / `reopened` | author, only when opened | `#3` |
+| `issue` | `issue` | `opened` / `closed` / `reopened` | author, only when opened | `#3` |
+| `releases` | `release` | `published` | author, if the feed has one | |
+| `repo_commits`, `file` | `commit` | `pushed` | commit author | short commit id |
+| `comments` | `comment` | `commented on` | commenter | `#3` |
+| `discussion` | `discussion` | `opened` | author | `#3` |
+| `notifications` | from `$type`: `PR`, `issue`, `release`, `discussion`, `commit`, `CI`, `security` | from `$reason` (below) | | `#3` when the item has a number |
+| `repo_event`, `org_event`, `user_event`, `feed`, `activity` | from `$type`: `PR`, `issue`, `comment`, `review`, `release`, `push`, `create`, `delete`, `star`, `fork` | | | |
+
+For the event feeds the title already is a sentence (`bob opened pull request
+#4 on o/r`), so the user, verb and id are left empty to avoid saying them
+twice. For routes not listed, `$kind` is the route's name and `$verb` is
+empty.
+
+Notification `$verb` by `$reason`:
+
+| `$reason` | `$verb` |
+|---|---|
+| `mention` | `mentioned you on` |
+| `team_mention` | `mentioned your team on` |
+| `review_requested` | `review requested on` |
+| `assign` | `assigned you to` |
+| `comment` | `new comment on` |
+| `state_change` | `state change on` |
+| `ci_activity` | `CI activity on` |
+| `security_alert` | `security alert on` |
+| `invitation` | `invited you to` |
+| anything else (`subscribed`, `author`, `manual`...) | `activity on` |
+
+### Examples
+
+```
+# default
+\x0303[$forge]\x03 \x0314($repo)\x03 [$kind] $summary - $url
+→ [GitHub] (o/r) [PR] bob opened #3: Fix it - https://github.com/o/r/pull/3
+→ [GitHub] (o/r) [PR] merged #3: Fix it - https://github.com/o/r/pull/3
+
+# without colours, kind and verb together
+($repo) [$kind $verb] $title $url
+→ (o/r) [PR merged] Fix it https://github.com/o/r/pull/3
+
+# say which feed it came from
+[$feed] $summary - $url
+
+# notifications: show why
+[$repo] $type ($reason): $title - $url
+→ [a/b] PullRequest (mention): Fix it - https://github.com/a/b/pull/7
+```
+
+Empty variables leave double spaces, which are squeezed into one, but not
+the punctuation around them: `$user $verb $id: $title` on a release gives
+`published : v1.2.0`. That is what `$summary` is for.
+
+To see the real values, let one item arrive and run `@githooks vars feed`
+(optionally with a pattern, `@githooks vars feed feed_`).
+

@@ -71,8 +71,22 @@ conf.registerChannelValue(GitHooks, 'max_announce_commits',
         format.push.hidden.""")))
 conf.registerGlobalValue(GitHooks, 'feeds',
         registry.String('', _("""Repos whose gh-rss-service pushes are
-        announced, and where. Use '@GitHooks feed add' or '@GitHooks feed
-        remove' instead of editing it.""")))
+        announced, and where. Use '@GitHooks feed announce add' or
+        '@GitHooks feed announce remove' instead of editing it.""")))
+conf.registerGlobalValue(GitHooks, 'feedRepos',
+        registry.SpaceSeparatedSetOfStrings(set(), _("""Repos registered
+        with gh-rss-service by '@GitHooks feed add'.""")))
+conf.registerGlobalValue(GitHooks, 'feedService',
+        registry.String('', _("""URL of gh-rss-service, e.g.
+        http://127.0.0.1:8080. '@GitHooks feed add' registers the repo's
+        feeds there.""")))
+conf.registerGlobalValue(GitHooks, 'feedRoutes',
+        registry.SpaceSeparatedListOfStrings(
+            ['pull/$owner/$name/all', 'issue/$owner/$name/all',
+             'releases/$owner/$name'],
+        _("""gh-rss-service routes '@GitHooks feed add' registers for a repo,
+        without the /github/ prefix; $owner and $name are replaced. The "all"
+        variants are needed to see closes and merges.""")))
 conf.registerChannelValue(GitHooks, 'ignoreBots',
         registry.Boolean(False, _("""Whether to ignore webhook events that were
         triggered by bots like dependabot""")))
