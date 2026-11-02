@@ -369,6 +369,100 @@ def _global_vars(event, payload):
     _kind_and_verb(v, event, payload)
     return v
 
+#####################
+# gh-rss-service pushes
+#####################
+
+# Header sent by gh-rss-service instead of X-GitHub-Event; the payload is
+# {"feed": {...}, "items": [...]} (see its src/webhook.ts).
+FEED_HEADER = 'x-gh-rss-event'
+FEED_KINDS = {'pull': 'PR', 'issue': 'issue', 'releases': 'release',
+              'repo_commits': 'commit', 'file': 'commit',
+              'comments': 'comment', 'discussion': 'discussion',
+              'wiki': 'wiki', 'branches': 'branch', 'gist': 'gist',
+              'notifications': 'notification'}
+FEED_VERBS = {'pull': 'opened', 'issue': 'opened', 'discussion': 'opened',
+              'releases': 'published', 'repo_commits': 'pushed',
+              'file': 'pushed', 'comments': 'commented on'}
+# notification subject types and Events API types
+TYPE_KINDS = {'PullRequest': 'PR', 'Issue': 'issue', 'Release': 'release',
+              'Discussion': 'discussion', 'Commit': 'commit',
+              'CheckSuite': 'CI', 'RepositoryVulnerabilityAlert': 'security',
+              'RepositoryDependabotAlertsThread': 'security',
+              'PullRequestEvent': 'PR', 'IssuesEvent': 'issue',
+              'IssueCommentEvent': 'comment',
+              'PullRequestReviewEvent': 'review',
+              'PullRequestReviewCommentEvent': 'review',
+              'ReleaseEvent': 'release', 'PushEvent': 'push',
+              'CreateEvent': 'create', 'DeleteEvent': 'delete',
+              'WatchEvent': 'star', 'ForkEvent': 'fork'}
+REASON_VERBS = {'mention': 'mentioned you on',
+                'team_mention': 'mentioned your team on',
+                'review_requested': 'review requested on',
+                'assign': 'assigned you to', 'comment': 'new comment on',
+                'state_change': 'state change on',
+                'ci_activity': 'CI activity on',
+                'security_alert': 'security alert on',
+                'invitation': 'invited you to'}
+# Routes whose titles are already sentences ("bob opened pull request #3 on
+# o/r"), so the user and verb would be said twice.
+SENTENCE_ROUTES = ('repo_event', 'org_event', 'user_event', 'feed',
+                   'activity')
+
+def _feed_vars(feed, item):
+    """Template variables of one gh-rss-service item."""
+    route = feed.get('route') or ''
+    repo = item.get('repo') or ''
+    link = item.get('link') or ''
+    title = item.get('title') or ''
+    if repo and title.startswith(repo + ': '):
+        title = title[len(repo) + 2:]  # notifications prefix the repo
+    id_ = number = ''
+    m = re.search(r'/(?:pull|issues|discussions)/(\d+)', link)
+    if m:
+        number = m.group(1)
+        id_ = '#' + number
+    else:
+        m = re.search(r'/commit/([0-9a-f]{7,40})', link)
+        if m:
+            id_ = m.group(1)[:7]
+    user = item.get('author') or ''
+    action = item.get('action') or ''
+    kind = TYPE_KINDS.get(item.get('type') or '') or \
+        FEED_KINDS.get(route, route)
+    if route == 'notifications':
+        user = ''
+        verb = REASON_VERBS.get(item.get('reason') or '', 'activity on')
+    elif route in SENTENCE_ROUTES:
+        user = verb = id_ = ''
+    elif action:
+        # the feed knows the author, not who closed/merged it: say what
+        # happened only
+        verb = action
+        if action != 'opened':
+            user = ''
+        title = re.sub(r' \(merged\)$', '', title)  # the verb says it
+    else:
+        verb = FEED_VERBS.get(route, '')
+    head = ' '.join(p for p in (
+        user and '\x02%s\x02' % user, verb, id_ and '\x0313%s\x03' % id_) if p)
+    owner, _sep, name = repo.partition('/')
+    return {
+        'repo': repo, 'owner': owner, 'name': name, 'user': user,
+        'kind': kind, 'verb': verb, 'id': id_, 'number': number,
+        'title': title, 'body': _first_line(item.get('description')),
+        'url': link, 'summary': '%s: %s' % (head, title) if head else title,
+        'forge': 'GitHub', 'feed': feed.get('title') or feed.get('id') or '',
+        'feed_id': feed.get('id') or '', 'feed_url': feed.get('link') or '',
+        'route': route, 'type': item.get('type') or '',
+        'reason': item.get('reason') or '', 'action': action,
+        'state': item.get('state') or '', 'event': 'feed', 'what': kind,
+    }
+
+def _render(template, variables):
+    text = string.Template(template).safe_substitute(variables)
+    return re.sub(r' {2,}', ' ', text).strip(' ')
+
 def query(caller, type_, uri_end, args):
     args = dict([(x,y) for x,y in args.items() if y is not None])
     url = '%s/%s/%s?%s' % (caller._url(), type_, uri_end,
@@ -548,6 +642,10 @@ class GitHooks(callbacks.Plugin):
                           "of Supybot is not compatible with reply "
                           "environments, so, the GitHooks plugin can't "
                           "announce it.")
+            lheaders = {k.lower(): v for (k, v) in headers.items()}
+            if FEED_HEADER in lheaders:
+                self.onFeedPayload(payload)
+                return
             if 'full_name' in payload['repository']:
                 repo = payload['repository']['full_name']
             elif 'name' in payload['repository']['owner']:
@@ -556,7 +654,6 @@ class GitHooks(callbacks.Plugin):
             else:
                 repo = '%s/%s' % (payload['repository']['owner']['login'],
                                   payload['repository']['name'])
-            lheaders = {k.lower(): v for (k, v) in headers.items()}
             event = _event_name(lheaders)
             # Forgejo also sends the Gitea headers, so test it first
             forge = 'GitHub'
@@ -642,8 +739,68 @@ class GitHooks(callbacks.Plugin):
                 else:
                     self._createPrivmsg(irc, channel, payload, event)
 
-        def _load(self):
-            announces = instance.registryValue('announces').split(' || ')
+        def onFeedPayload(self, payload):
+            """Announce the items of a gh-rss-service push. Each item is
+            routed by its own repo (a notifications feed mixes repos), with
+            the same announce list as the webhooks."""
+            feed = payload.get('feed') or {}
+            items = [i for i in payload.get('items') or ()
+                     if isinstance(i, dict)]
+            announces = self._load('feeds')
+            targets = {}  # (irc, channel) -> [variables]
+            for item in items:
+                v = _feed_vars(feed, item)
+                if not v['repo']:
+                    log.info('GitHooks: feed %s item %s has no repo, not '
+                             'announced', v['feed_id'], item.get('link'))
+                    continue
+                matched = False
+                for (dbRepo, network, channel) in announces:
+                    if not fnmatch.fnmatch(v['repo'], dbRepo):
+                        continue
+                    matched = True
+                    if network == '':
+                        irc = next((i for i in world.ircs
+                                    if channel in i.state.channels), None)
+                    else:
+                        irc = world.getIrc(network)
+                    if irc is None or channel not in irc.state.channels:
+                        log.info('GitHooks: cannot announce feed item for '
+                                 '%s in %s: not on that channel/network',
+                                 v['repo'], channel)
+                        continue
+                    if self.plugin.registryValue('ignoreBots', channel) and \
+                            (item.get('author') or '').endswith('[bot]'):
+                        continue
+                    if v['action'] and v['action'] not in \
+                            self.plugin.registryValue('format.feed.actions',
+                                                      channel):
+                        continue
+                    targets.setdefault((irc, channel), []).append(v)
+                if not matched:
+                    log.info('Feed item for repo %s not in any feed list',
+                             v['repo'])
+                self.plugin.last_payloads['feed'] = v
+            for ((irc, channel), found) in targets.items():
+                template = self.plugin.registryValue('format.feed', channel)
+                if not template.strip():
+                    continue
+                limit = max(self.plugin.registryValue(
+                    'max_announce_feed_items', channel), 0)
+                shown = found[-limit:] if limit else []
+                for v in shown:
+                    irc.queueMsg(ircmsgs.privmsg(channel,
+                                                 _render(template, v)))
+                hidden = len(found) - len(shown)
+                hidden_tmpl = self.plugin.registryValue('format.feed.hidden',
+                                                        channel)
+                if hidden and hidden_tmpl.strip():
+                    v = dict(found[0], hidden=hidden)
+                    irc.queueMsg(ircmsgs.privmsg(channel,
+                                                 _render(hidden_tmpl, v)))
+
+        def _load(self, key='announces'):
+            announces = instance.registryValue(key).split(' || ')
             if announces == ['']:
                 return []
             announces = [x.split(' | ') for x in announces]
@@ -660,12 +817,12 @@ class GitHooks(callbacks.Plugin):
                 output.append((repo, net, chan))
             return output
 
-        def _save(self, data):
+        def _save(self, data, key='announces'):
             stringList = []
             for announcement in data:
                 stringList.extend([' | '.join(announcement)])
             string = ' || '.join(stringList)
-            instance.setRegistryValue('announces', value=string)
+            instance.setRegistryValue(key, value=string)
 
         @internationalizeDocstring
         def add(self, irc, msg, args, channel, owner, name):
@@ -728,6 +885,73 @@ class GitHooks(callbacks.Plugin):
                           channel, results))
             else:
                 irc.reply('No repositories announce to %s.' % channel)
+        list = wrap(list, ['channel'])
+
+    class feed(callbacks.Commands):
+        """Which channels announce the gh-rss-service pushes of which repos.
+        Kept apart from the "announce" list (webhooks), so a repo can come
+        from its webhook in one channel and from a feed in another."""
+        def _entries(self):
+            return self.plugin.announce._load('feeds')
+
+        def _save(self, data):
+            self.plugin.announce._save(data, 'feeds')
+
+        @internationalizeDocstring
+        def add(self, irc, msg, args, channel, owner, name):
+            """[<channel>] <owner> <name>
+
+            Announce the gh-rss-service pushes (new PRs, issues, releases,
+            notifications...) for the repository <owner>/<name> in
+            <channel>. Globs are supported for <owner> and <name>. Webhook
+            announces are managed separately, with "announce add".
+            <channel> defaults to the current channel."""
+            repo = '%s/%s' % (owner, name)
+            entries = self._entries()
+            for (dbRepo, net, chan) in entries:
+                if dbRepo == repo and (net == '' or net == irc.network) and \
+                        chan == channel:
+                    irc.error(_('This repository\'s feed is already '
+                                'announced to this channel.'))
+                    return
+            entries.append((repo, irc.network, channel))
+            self._save(entries)
+            irc.replySuccess()
+        add = wrap(add, ['channel', 'something', 'something'])
+
+        @internationalizeDocstring
+        def remove(self, irc, msg, args, channel, owner, name):
+            """[<channel>] <owner> <name>
+
+            Stop announcing the gh-rss-service pushes for <owner>/<name> in
+            <channel>. <channel> defaults to the current channel."""
+            repo = '%s/%s' % (owner, name)
+            entries = self._entries()
+            for entry in entries:
+                if entry[0] == repo and \
+                        (entry[1] == '' or entry[1] == irc.network) and \
+                        entry[2] == channel:
+                    entries.remove(entry)
+                    self._save(entries)
+                    irc.replySuccess()
+                    return
+            irc.error(_('This repository\'s feed is not announced to this '
+                        'channel.'))
+        remove = wrap(remove, ['channel', 'something', 'something'])
+
+        def list(self, irc, msg, args, channel):
+            """[<channel>]
+
+            Lists the repositories whose gh-rss-service pushes are announced
+            to <channel>. <channel> defaults to the current channel."""
+            results = [e[0] for e in self._entries()
+                       if (e[1] == '' or e[1] == irc.network) and
+                       ircutils.strEqual(e[2], channel)]
+            if results:
+                irc.reply(format(_('Feeds announced to %s: %L'), channel,
+                                 results))
+            else:
+                irc.reply(_('No feeds announced to %s.') % channel)
         list = wrap(list, ['channel'])
 
     class repo(callbacks.Commands):
@@ -816,9 +1040,12 @@ class GitHooks(callbacks.Plugin):
                         '"Redeliver" in the webhook settings of your '
                         'forge).') % event)
             return
-        repl = self.announce._variables(payload, event, with_global=True,
-                                        aliases=False)
-        shorthand = sorted(_global_vars(event, payload))
+        if event == 'feed':  # already the template variables
+            repl, shorthand = payload, sorted(payload)
+        else:
+            repl = self.announce._variables(payload, event, with_global=True,
+                                            aliases=False)
+            shorthand = sorted(_global_vars(event, payload))
         names = sorted((k for (k, val) in repl.items()
                         if isinstance(val, (str, int, float, bool))
                         and k not in INTERNAL_VARS

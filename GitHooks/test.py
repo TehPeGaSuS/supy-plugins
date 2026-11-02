@@ -733,4 +733,185 @@ class GitHooksForgeTestCase(ChannelPluginTestCase):
         self.assertFalse(ok({'s3'}, {'x-gogs-signature': 'bad'}, body, {}))
         self.assertFalse(ok({'s3'}, {}, body, {}))
 
+FEED = {'id': 'pull_o_r_open', 'route': 'pull',
+        'params': {'user': 'o', 'repo': 'r', 'state': 'open'},
+        'title': 'o/r Open Pull Requests', 'link': 'https://github.com/o/r/pulls'}
+
+def feed_item(n, **extra):
+    item = {'guid': 'o/r#pr-%d' % n, 'title': 'PR %d' % n,
+            'link': 'https://github.com/o/r/pull/%d' % n, 'author': 'bob',
+            'description': None, 'pubDate': '2026-11-01T10:00:00Z',
+            'repo': 'o/r', 'type': None, 'reason': None}
+    item.update(extra)
+    return item
+
+FEED_HEADERS = {'X-GH-RSS-Event': 'items'}
+
+class GitHooksFeedTestCase(ChannelPluginTestCase):
+    plugins = ('GitHooks', 'Config', 'Utilities')
+
+    def setUp(self):
+        super().setUp()
+        self.cb = self.irc.getCallback('GitHooks')
+        self.assertNotError('config supybot.plugins.GitHooks.announces ""')
+        self.assertNotError('config supybot.plugins.GitHooks.feeds ""')
+        self.assertNotError('githooks feed add %s o r' % self.channel)
+
+    def push(self, items, feed=FEED):
+        self.cb.announce.onPayload(dict(FEED_HEADERS),
+                                   {'source': 'gh-rss-service', 'feed': feed,
+                                    'items': items})
+
+    def testPullItem(self):
+        self.push([feed_item(3)])
+        self.assertResponse(' ',
+            '\x0303[GitHub]\x03 \x0314(o/r)\x03 [PR] \x02bob\x02 opened '
+            '\x0313#3\x03: PR 3 - https://github.com/o/r/pull/3')
+
+    def testRelease(self):
+        feed = dict(FEED, id='releases_o_r', route='releases')
+        self.push([feed_item(1, title='v1.2.0', author=None,
+                             link='https://github.com/o/r/releases/tag/v1.2.0')],
+                  feed)
+        self.assertResponse(' ',
+            '\x0303[GitHub]\x03 \x0314(o/r)\x03 [release] published: '
+            'v1.2.0 - https://github.com/o/r/releases/tag/v1.2.0')
+
+    def testNotificationRoutedByItemRepo(self):
+        self.assertNotError('githooks feed add %s a b' % self.channel)
+        feed = {'id': 'notifications', 'route': 'notifications', 'params': {},
+                'title': 'GitHub Notifications',
+                'link': 'https://github.com/notifications'}
+        self.push([feed_item(7, repo='a/b', title='a/b: Fix it', author=None,
+                             link='https://github.com/a/b/pull/7',
+                             type='PullRequest', reason='mention')], feed)
+        self.assertResponse(' ',
+            '\x0303[GitHub]\x03 \x0314(a/b)\x03 [PR] mentioned you on '
+            '\x0313#7\x03: Fix it - https://github.com/a/b/pull/7')
+
+    def testEventRouteTitleIsTheSentence(self):
+        feed = dict(FEED, id='repo_event_o_r', route='repo_event')
+        self.push([feed_item(4, title='bob opened pull request #4 on o/r',
+                             type='PullRequestEvent')], feed)
+        self.assertResponse(' ',
+            '\x0303[GitHub]\x03 \x0314(o/r)\x03 [PR] bob opened pull '
+            'request #4 on o/r - https://github.com/o/r/pull/4')
+
+    def testUnannouncedRepoAndNoRepo(self):
+        self.push([feed_item(1, repo='x/y'), feed_item(2, repo=None)])
+        self.assertNoResponse(' ')
+
+    def testCapAndHidden(self):
+        with conf.supybot.plugins.GitHooks.max_announce_feed_items.context(2):
+            self.push([feed_item(n) for n in (1, 2, 3, 4)])
+            self.assertRegexp(' ', 'PR 3 -')
+            self.assertRegexp(' ', 'PR 4 -')
+            self.assertResponse(' ',
+                '\x0303[GitHub]\x03 (+2 more from o/r Open Pull Requests) - '
+                'https://github.com/o/r/pulls')
+
+    def testCustomAndDisabledFormat(self):
+        fmt = conf.supybot.plugins.GitHooks.format.feed
+        with fmt.context('$kind $id $user $route'):
+            self.push([feed_item(5)])
+            self.assertResponse(' ', 'PR #5 bob pull')
+        with fmt.context(''):
+            self.push([feed_item(5)])
+            self.assertNoResponse(' ')
+
+    def testIgnoreBots(self):
+        with conf.supybot.plugins.GitHooks.ignoreBots.context(True):
+            self.push([feed_item(6, author='dependabot[bot]')])
+            self.assertNoResponse(' ')
+
+    def testSignedHttpPush(self):
+        import hashlib, hmac, io, json, sys
+        plugin = sys.modules[type(self.cb).__module__]
+        body = json.dumps({'source': 'gh-rss-service', 'feed': FEED,
+                           'items': [feed_item(8)]}).encode()
+        sig = 'sha256=' + hmac.new(b's3', body, hashlib.sha256).hexdigest()
+        class Handler:
+            def address_string(self):
+                return '127.0.0.1'
+        def post(signature):
+            callback = plugin.GithubCallback()
+            callback.plugin = self.cb
+            callback.headers = {'Content-Type': 'application/json',
+                                'X-GH-RSS-Event': 'items',
+                                'X-Hub-Signature-256': signature}
+            codes = []
+            callback.send_response = codes.append
+            callback.send_header = lambda *a: None
+            callback.end_headers = lambda: None
+            callback.wfile = io.BytesIO()
+            callback.doPost(Handler(), '/', body)
+            return codes[0]
+        with conf.supybot.plugins.GitHooks.announces.secret.context({'s3'}):
+            self.assertEqual(post('sha256=bad'), 403)
+            self.assertNoResponse(' ')
+            self.assertEqual(post(sig), 200)
+            self.assertRegexp(' ', r'opened .*#8.*: PR 8 -')
+
+    def testStateChanges(self):
+        feed = dict(FEED, id='pull_o_r_all',
+                    params={'user': 'o', 'repo': 'r', 'state': 'all'})
+        self.push([feed_item(3, title='PR 3 (merged)', state='merged',
+                             action='merged'),
+                   feed_item(4, state='closed', action='closed'),
+                   feed_item(5, state='open', action='reopened'),
+                   feed_item(6, state='open', action='opened')], feed)
+        self.assertResponse(' ', '\x0303[GitHub]\x03 \x0314(o/r)\x03 [PR] '
+            'merged \x0313#3\x03: PR 3 - https://github.com/o/r/pull/3')
+        self.assertRegexp(' ', r'\[PR\] closed .*#4.*: PR 4 -')
+        self.assertRegexp(' ', r'\[PR\] reopened .*#5.*: PR 5 -')
+        self.assertRegexp(' ', r'\[PR\] \x02bob\x02 opened .*#6')
+        actions = conf.supybot.plugins.GitHooks.format.feed.actions
+        with actions.context({'opened', 'merged'}):
+            self.push([feed_item(4, state='closed', action='closed'),
+                       feed_item(7, state='merged', action='merged')], feed)
+            self.assertRegexp(' ', r'merged .*#7')
+            self.assertNoResponse(' ')
+
+    def testFeedCommands(self):
+        self.assertError('githooks feed add %s o r' % self.channel)
+        self.assertNotError('githooks feed add %s x *' % self.channel)
+        self.assertResponse('config supybot.plugins.GitHooks.feeds',
+                            'o/r | test | %s || x/* | test | %s' %
+                            (self.channel, self.channel))
+        self.assertRegexp('githooks feed list %s' % self.channel,
+                          'Feeds announced to .*o/r.*x/\\*')
+        self.assertNotError('githooks feed remove %s o r' % self.channel)
+        self.assertError('githooks feed remove %s o r' % self.channel)
+        self.assertNotError('githooks feed remove %s x *' % self.channel)
+        self.assertRegexp('githooks feed list %s' % self.channel,
+                          'No feeds announced')
+
+    def testListsAreIndependent(self):
+        # o/r is only in the feed list: its webhooks are not announced
+        hook = dict(ISSUE_EVENT, repository=dict(ISSUE_EVENT['repository'],
+                                                 full_name='o/r'))
+        self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, hook)
+        self.assertNoResponse(' ')
+        # progval/Supybot-plugins is only in the announce list: its feed
+        # items are not announced, its webhooks are
+        self.assertNotError('githooks announce add %s progval Supybot-plugins'
+                            % self.channel)
+        self.push([feed_item(1, repo='progval/Supybot-plugins')])
+        self.assertNoResponse(' ')
+        self.cb.announce.onPayload({'X-GitHub-Event': 'issues'}, ISSUE_EVENT)
+        self.assertResponse(' ', DEFAULT_ISSUE_ANNOUNCE)
+        self.push([feed_item(1)])
+        self.assertRegexp(' ', r'opened .*#1')
+        self.assertRegexp('githooks announce list %s' % self.channel,
+                          'Supybot-plugins')
+        self.assertNotRegexp('githooks announce list %s' % self.channel,
+                             'o/r')
+
+    def testVars(self):
+        self.push([feed_item(3)])
+        self.assertResponse(' ', '\x0303[GitHub]\x03 \x0314(o/r)\x03 [PR] '
+            '\x02bob\x02 opened \x0313#3\x03: PR 3 - '
+            'https://github.com/o/r/pull/3')
+        self.assertRegexp('githooks vars feed number', r'\$number=3')
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:

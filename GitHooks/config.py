@@ -69,6 +69,10 @@ conf.registerChannelValue(GitHooks, 'max_announce_commits',
         registry.Integer(3, _("""Determines the maximum number of commits that
         will be announced for a single push. The rest are summarized by
         format.push.hidden.""")))
+conf.registerGlobalValue(GitHooks, 'feeds',
+        registry.String('', _("""Repos whose gh-rss-service pushes are
+        announced, and where. Use '@GitHooks feed add' or '@GitHooks feed
+        remove' instead of editing it.""")))
 conf.registerChannelValue(GitHooks, 'ignoreBots',
         registry.Boolean(False, _("""Whether to ignore webhook events that were
         triggered by bots like dependabot""")))
@@ -233,6 +237,38 @@ conf.registerChannelValue(GitHooks.format, 'pull_request_review_comment',
         _("""Format for pull request review comment events. This is for
         individual review comments, you probably only want to use the
         pull_request_review event to avoid clutter.""")))
+
+# Items pushed by gh-rss-service (https://github.com/TehPeGaSuS/gh-rss-service)
+# for repos you can't add a webhook to. $summary is "user verb #id: title"
+# with the parts the item has, coloured like format.global.
+DEFAULT_FEED = ('\x0303[$forge]\x03 \x0314($repo)\x03 [$kind] $summary - $url')
+DEFAULT_FEED_HIDDEN = ('\x0303[$forge]\x03 (+$hidden more from $feed) - '
+                       '$feed_url')
+conf.registerChannelValue(GitHooks.format, 'feed',
+        registry.String(DEFAULT_FEED,
+        _("""Plain-text template for items pushed by gh-rss-service (new
+        PRs, issues, releases, notifications... of repos you can't add a
+        webhook to). Variables: $repo $owner $name $user $kind $verb $id
+        $number $title $body $url $summary $forge $feed $feed_id $feed_url
+        $route $type $reason $action $state; "vars feed" lists them. Empty disables it.""")))
+conf.registerChannelValue(GitHooks.format.feed, 'hidden',
+        registry.String(DEFAULT_FEED_HIDDEN,
+        _("""Line announced after the shown items when a push has more than
+        max_announce_feed_items for the channel. $hidden is the number left
+        out, $feed and $feed_url the feed's title and link. Empty: no
+        line.""")))
+conf.registerChannelValue(GitHooks.format.feed, 'actions',
+        registry.SpaceSeparatedSetOfStrings(
+            'opened closed merged reopened'.split(),
+        _("""PR/issue changes announced from gh-rss-service pull and issue
+        feeds (opened, closed, merged, reopened). Closes and merges are only
+        seen by the "all" feeds, e.g. /github/pull/<owner>/<repo>/all. Items
+        without such a change (releases, notifications...) are always
+        announced.""")))
+conf.registerChannelValue(GitHooks, 'max_announce_feed_items',
+        registry.Integer(5, _("""Maximum number of items announced from one
+        gh-rss-service push (the most recent ones). The rest are summarized
+        by format.feed.hidden.""")))
 
 # Copy-paste this from the table of contents here:
 # https://docs.github.com/en/developers/webhooks-and-events/webhooks/webhook-events-and-payloads

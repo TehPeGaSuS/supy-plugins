@@ -68,6 +68,53 @@ Variables are named after where the value sits in the webhook's JSON, with
 On top of those, the plugin offers **shorthand** such as `$user`, `$repo`,
 `$title` and `$url` for the common events. See [VARIABLES.md](VARIABLES.md).
 
+## Repos you can't add a webhook to
+
+Only a repo's admins can add webhooks. For other people's repos,
+[gh-rss-service](https://github.com/TehPeGaSuS/gh-rss-service) polls GitHub
+(cheaply, with ETags) and can push each new item to GitHooks: set its
+`WEBHOOK_URL` to the same `http://<host>:<port>/githooks` URL and its
+`WEBHOOK_SECRET` to one of `supybot.plugins.GitHooks.announces.secret`. The
+pushes carry an `X-GH-RSS-Event` header.
+
+Feeds have their **own list**, separate from the webhooks' `announce` list,
+and nothing from them is announced until a repo is added to it:
+
+```
+githooks announce add #A unrealircd unrealircd   # its webhook → #A
+githooks feed add #B unrealircd unrealircd       # its gh-rss-service pushes → #B
+githooks feed add #A someone otherrepo           # a channel can mix both
+githooks feed list #B
+githooks feed remove #B unrealircd unrealircd
+```
+
+Globs work as in `announce add`. Items are routed by their own repo, so a
+`/github/notifications` feed reaches the channels of every repo it covers
+that is in the feed list.
+
+They are announced with `format.feed` (empty disables them):
+
+```
+[GitHub] (DIYgod/RSSHub) [PR] bob opened #123: Fix the thing - https://github.com/DIYgod/RSSHub/pull/123
+[GitHub] (a/b) [PR] mentioned you on #7: Fix it - https://github.com/a/b/pull/7
+[GitHub] (o/r) [release] published: v1.2.0 - https://github.com/o/r/releases/tag/v1.2.0
+[GitHub] (o/r) [PR] merged #3: Fix the thing - https://github.com/o/r/pull/3
+```
+
+PR and issue feeds also report closes, merges and reopens when they are the
+`all` variant (`/github/pull/<owner>/<repo>/all`). Those lines leave out the
+user: the feed knows who opened the PR, not who closed or merged it.
+`format.feed.actions` picks which of `opened closed merged reopened` a
+channel gets (all by default); items without such a change, like releases
+and notifications, are always announced.
+
+`$summary` is the "user verb #id: title" part, with whatever the item has;
+`$repo $owner $name $user $kind $verb $id $number $title $body $url $forge
+$feed $feed_id $feed_url $route $type $reason $action $state` are there for your own
+template (`githooks vars feed` lists the last item's values). A push
+announces at most `max_announce_feed_items` (5) per channel, the rest as one
+`format.feed.hidden` line. `ignoreBots` skips authors ending in `[bot]`.
+
 ## Announce format
 
 This plugin has a default configuration to announce events most people want to
