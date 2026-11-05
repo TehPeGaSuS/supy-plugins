@@ -130,7 +130,8 @@ conf.registerGlobalValue(DuckHuntPro.web, 'enable',
     registry.Boolean(False, """Enables the built-in web dashboard served through
     Limnoria's HTTP server: each channel's leaderboard and champions at
     /duckhuntpro/<network>/<channel>/<page>, and the original's shop and
-    progression pages at /duckhuntpro/shop and /duckhuntpro/levels (add /en or
+    progression pages at /duckhuntpro/shop and /duckhuntpro/levels, and a guide
+    to the game at /duckhuntpro/whatis (add /en or
     /fr for one language; each links to the other)."""))
 
 conf.registerChannelValue(DuckHuntPro, 'minXpForShopping',

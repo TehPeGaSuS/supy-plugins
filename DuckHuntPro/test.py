@@ -982,6 +982,47 @@ class DuckHuntProTestCase(ChannelPluginTestCase):
             urllib.parse.quote(self.irc.network, safe=''),
             urllib.parse.quote(self.channel, safe='')))
 
+    def testRenderWebWhatIsExplainsTheGameWithLiveNumbers(self):
+        cb = self._cb()
+        conf.supybot.plugins.DuckHuntPro.dropsEnabled.setValue(True)     # (setUp's False)
+        body = cb._renderWeb('/whatis/en')
+        self.assertIn('<title>Duck Hunt - what is it?</title>', body)
+        self.assertIn('<a href="/duckhuntpro/whatis/fr">Lisez-le en Français</a>', body)
+        self.assertIn('<a href="/duckhuntpro/en">Home</a>', body)
+        self.assertIn('escapes after <b>5 minutes</b>', body)
+        # Weapon tiers and penalty tiers come from the level table.
+        row = lambda *cells: '\t    <tr>\n%s\t    </tr>\n' % ''.join(
+            '\t      <td>%s</td>\n' % c for c in cells)
+        self.assertIn(row('1&ndash;6', 'machine gun', '55%&ndash;60%', '85%&ndash;90%',
+                          '0%&ndash;12%', '0%&ndash;6%', 6, 2), body)
+        self.assertIn(row('30&ndash;40', -5, -8, -20), body)
+        self.assertIn(row('up to 10', '10%', '1%'), body)
+        self.assertIn(row('more than 30', '15%', '4%'), body)
+        self.assertIn('given back every day at 00:00', body)
+        self.assertIn('About 14% of kills', body)
+        self.assertIn('<h2>Seasons</h2>', body)
+        # ...and from the settings.
+        plugin = conf.supybot.plugins.DuckHuntPro
+        try:
+            plugin.escapeTime.setValue(90)
+            plugin.dropsEnabled.setValue(False)
+            plugin.quarterlyResetEnabled.setValue(False)
+            plugin.gunHandBackMode.setValue(3)
+            body = cb._renderWeb('/whatis')
+            self.assertIn('escapes after <b>90 s</b>', body)
+            self.assertNotIn('in the bushes', body)
+            self.assertNotIn('<h2>Seasons</h2>', body)
+            self.assertIn('only an operator can give it back', body)
+        finally:
+            for name in ('escapeTime', 'quarterlyResetEnabled', 'gunHandBackMode'):
+                plugin.get(name).resetToDefault()
+        fr = cb._renderWeb('/whatis/fr')
+        self.assertIn('<title>Duck Hunt - qu&#x27;est-ce que c&#x27;est ?</title>', fr)
+        self.assertIn('<h2>Accidents de chasse</h2>', fr)
+        self.assertIn('<a href="/duckhuntpro/whatis/en">Read it in English</a>', fr)
+        self.assertIn('/duckhuntpro/whatis/en">What is Duck Hunt?</a>', cb._renderWeb('/en'))
+        self._assertRendersNotFound(cb, '/whatis/de')
+
     def testRenderWebLevelsIsTheOriginalsProgressionTable(self):
         cb = self._cb()
         body = cb._renderWeb('/levels/en')

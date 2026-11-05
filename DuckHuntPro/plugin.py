@@ -161,15 +161,17 @@ class DuckHuntPro(callbacks.Plugin):
 
     def _renderWeb(self, path):
         parts = [urllib.parse.unquote(p) for p in path.split('/') if p]
-        if len(parts) <= 1 and parts != ['shop'] and parts != ['levels']:
+        if len(parts) <= 1 and parts not in (['shop'], ['levels'], ['whatis']):
             lang = self._webLang(parts)
             if lang:
                 return webpages.renderIndex(lang, [
                     (network, cname, len(self.db.getChannel(network, cname)['players']))
                     for network in self.db.networks() for cname in self.db.channels(network)])
-        elif parts[0] in ('shop', 'levels') and len(parts) <= 2:
+        elif parts[0] in ('shop', 'levels', 'whatis') and len(parts) <= 2:
             lang = self._webLang(parts[1:])
             if lang:
+                if parts[0] == 'whatis':
+                    return webpages.renderWhatIs(lang, data.LEVELS, self._whatIsSettings())
                 if parts[0] == 'shop':
                     return webpages.renderShop(lang, [self._shopCost(k) for k in data.SHOP_ITEMS])
                 return webpages.renderLevels(lang, data.LEVELS)
@@ -183,6 +185,35 @@ class DuckHuntPro(callbacks.Plugin):
                     if lang:
                         return self._renderWebChampions(lang, network, channel)
         raise _WebNotFound()
+
+    def _whatIsSettings(self):
+        """The bot-wide settings the 'what is' page quotes."""
+        value = self.registryValue
+        tiers = lambda group: [(ceiling, value('%s.%s' % (group, name))) for ceiling, name in
+                               ((10, 'upTo10'), (20, 'upTo20'), (30, 'upTo30'), (None, 'above30'))]
+        dry = 1.0
+        for key in data.DROP_TABLE:
+            dry *= 1 - min(max(value('dropChances.' + key), 0), 1000) / 1000.0
+        chars = conf.supybot.reply.whenAddressedBy.chars()
+        return {
+            'prefix': chars[0] if chars else '', 'reload': value('reloadCommand'),
+            'ducksPerDay': value('ducksPerDay'), 'goldenPerDay': value('approxGoldenDucksPerDay'),
+            'goldenMinHP': value('goldenDuckMinHP'), 'goldenMaxHP': value('goldenDuckMaxHP'),
+            'escapeTime': value('escapeTime'), 'scareShots': value('shotsBeforeDuckFlee'),
+            'successScares': value('successfulShotsAlsoScareDucks'),
+            'xpPerDuck': value('xpPerDuck'), 'xpPerGoldenHp': value('xpPerGoldenDuckHp'),
+            'xpLucky': value('xpLuckyShot'), 'maxRicochets': value('maxRicochets'),
+            'ricochetDuck': value('chanceRicochetTowardsDuck'),
+            'accidentDuck': tiers('chancesToHitSomeoneElse'),
+            'accidentWild': tiers('chancesWildFireHitSomeone'),
+            'onlyHunters': value('onlyHuntersCanBeShot'),
+            'confiscateAccident': value('gunConfiscationWhenShootingSomeone'),
+            'confiscateWild': value('gunConfiscationOnWildFire'),
+            'handBackMode': value('gunHandBackMode'), 'handBackTime': value('autoGunHandBackTime'),
+            'refillTime': value('autoRefillAmmoTime'), 'minXpShop': value('minXpForShopping'),
+            'drops': round(100 * (1 - dry)) if value('dropsEnabled') else 0,
+            'quarterly': value('quarterlyResetEnabled'),
+        }
 
     def _renderWebLeaderboard(self, lang, network, channel):
         chan = self.db.getChannel(network, channel)
