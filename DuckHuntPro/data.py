@@ -75,7 +75,7 @@ LEVELS = [
     Level(7400, 96, 48, 90, 1, 1, 5, -5, -8, -20),
     Level(7790, 96, 49, 92, 1, 1, 5, -5, -8, -20),
     Level(8200, 97, 49, 95, 1, 1, 5, -5, -8, -20),
-    Level(9999999999, 97, 50, 98, 99, 1, 5, -5, -8, -20),
+    Level(9999999999, 97, 50, 98, 1, 1, 5, -5, -8, -20),   # (jam 99 in the cfg: a typo, its own table says 99% reliability)
 ]
 
 MAX_LEVEL = len(LEVELS) - 1
