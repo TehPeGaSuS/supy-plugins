@@ -191,6 +191,21 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Gemini,
+    "timeout",
+    registry.NonNegativeInteger(
+        60,
+        _(
+            """
+            Seconds to wait for Gemini before giving up and logging an error.
+            0 waits forever (not recommended: a stalled request then hangs
+            silently).
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    Gemini,
     "full_reply",
     registry.Boolean(
         True,

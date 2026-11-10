@@ -81,7 +81,7 @@ class GeminiTestCase(ChannelPluginTestCase):
         self.fake = FakeClient()
         cb = self.irc.getCallback("Gemini")
         cb.history.clear()
-        cb._client = lambda api_key: self.fake
+        cb._client = lambda api_key, timeout: self.fake
 
     def testNoApiKey(self):
         with conf.supybot.plugins.Gemini.api_key.context(""):
@@ -266,6 +266,17 @@ class GeminiTestCase(ChannelPluginTestCase):
         self.fake.reply = None
         self.assertNoResponse("chat hi", 1)
         self.fake.reply = RuntimeError("boom")
+        self.assertNoResponse("chat hi", 1)
+
+    def testClientTimeout(self):
+        cb = self.irc.getCallback("Gemini")
+        client = type(cb)._client(cb, "k", 60)
+        self.assertIs(type(cb)._client(cb, "k", 60), client)
+        self.assertEqual(client._api_client._http_options.timeout, 60000)
+        self.assertIsNone(type(cb)._client(cb, "k", 0)._api_client._http_options.timeout)
+
+    def testWhitespaceAnswerIsSilent(self):
+        self.fake.reply = "  \n \n"
         self.assertNoResponse("chat hi", 1)
 
     def testDisabled(self):

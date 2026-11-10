@@ -34,6 +34,7 @@ from supybot.i18n import PluginInternationalization
 import supybot.log as log
 import copy
 import re
+import time
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
@@ -51,15 +52,21 @@ class Gemini(callbacks.Plugin):
         self.__parent.__init__(irc)
         # (network, channel or nick) -> list of types.Content
         self.history = {}
-        # api_key -> genai.Client, so connections are reused between calls
+        # (api_key, timeout) -> genai.Client, so connections are reused
         self.clients = {}
         # network -> {"ident", "host"} from our own CHGHOST / 396
         self.own_hosts = {}
 
-    def _client(self, api_key):
-        client = self.clients.get(api_key)
+    def _client(self, api_key, timeout):
+        client = self.clients.get((api_key, timeout))
         if client is None:
-            client = self.clients[api_key] = genai.Client(api_key=api_key)
+            http_options = None
+            if timeout:
+                # Without it the SDK never times out, and a stalled request
+                # leaves the command thread hanging with nothing logged.
+                http_options = types.HttpOptions(timeout=timeout * 1000)
+            client = genai.Client(api_key=api_key, http_options=http_options)
+            self.clients[(api_key, timeout)] = client
         return client
 
     @staticmethod
@@ -180,6 +187,12 @@ class Gemini(callbacks.Plugin):
         channel = msg.channel
         network = irc.network
         if not self.registryValue("enabled", channel, network):
+            log.debug(
+                "Gemini: plugins.Gemini.enabled is False for %s on %s, "
+                "ignoring",
+                channel or msg.nick,
+                network,
+            )
             return
         api_key = self.registryValue("api_key", channel, network)
         if not api_key:
@@ -209,21 +222,35 @@ class Gemini(callbacks.Plugin):
             history = []
         else:
             history = self._trim(self.history.get(key, []), max_history)
-        chat = self._client(api_key).chats.create(
-            model=self.registryValue("model", channel, network),
+        model = self.registryValue("model", channel, network)
+        timeout = self.registryValue("timeout", channel, network)
+        chat = self._client(api_key, timeout).chats.create(
+            model=model,
             config=config,
             history=history,
         )
         if self.registryValue("nick_include", channel, network):
             text = "%s: %s" % (msg.nick, text)
+        log.debug(
+            "Gemini: asking %s (history: %s turns, timeout: %ss)",
+            model,
+            len(history),
+            timeout or "none",
+        )
+        started = time.monotonic()
         try:
             response = chat.send_message(text)
         except genai_errors.APIError as e:
             log.error("Gemini: API error %s: %s", e.code, e.message)
             return
         except Exception as e:
-            log.error("Gemini failed to fetch response: %s", e)
+            log.error(
+                "Gemini failed to fetch response: %s: %s", type(e).__name__, e
+            )
             return
+        log.debug(
+            "Gemini: %s answered in %.1fs", model, time.monotonic() - started
+        )
         content = response.text
         if not content:
             reason = None
@@ -237,6 +264,9 @@ class Gemini(callbacks.Plugin):
             content = re.sub(r"^%s: " % re.escape(irc.nick), "", content)
         prefix = self.registryValue("nick_prefix", channel, network)
         lines = [line for line in content.splitlines() if line.strip()]
+        if not lines:
+            log.warning("Gemini: answer was only whitespace: %r", content)
+            return
         if self.registryValue("full_reply", channel, network):
             self._send_full(irc, msg, lines, prefix)
         else:
