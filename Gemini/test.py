@@ -311,6 +311,16 @@ class GeminiTestCase(ChannelPluginTestCase):
             400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT"
         )
         self.assertRegexp("chat hi", "plugins.Gemini.api_key")
+        self.fake.reply = self._apiError(
+            400, "Thinking level is not supported for this model.", "INVALID_ARGUMENT"
+        )
+        self.assertRegexp("chat hi", 'support thinking levels, use: config plugins.Gemini.thinking_level ""')
+        self.fake.reply = self._apiError(
+            400,
+            "Thinking level MINIMAL is not supported for this model. Please retry with other thinking level.",
+            "INVALID_ARGUMENT",
+        )
+        self.assertRegexp("chat hi", "support this thinking level, try another one")
         self.fake.reply = self._apiError(404, "models/nope is not found", "NOT_FOUND")
         self.assertRegexp("chat hi", "plugins.Gemini.model")
         self.fake.reply = type("ReadTimeout", (Exception,), {})("timed out")

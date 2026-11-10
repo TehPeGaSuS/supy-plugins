@@ -221,6 +221,20 @@ class Gemini(callbacks.Plugin):
                 "Gemini rejected the API key, check: "
                 "config plugins.Gemini.api_key"
             )
+        text = (e.message or "").lower()
+        if e.code == 400 and "thinking level" in text:
+            if "thinking level is not supported" in text:
+                # The model has no thinking levels at all (Gemma, Gemini 2.5).
+                return _(
+                    "%s doesn't support thinking levels, use: "
+                    'config plugins.Gemini.thinking_level ""'
+                ) % model
+            # This level isn't supported (minimal on Gemini 3 Pro models).
+            return _(
+                "%s doesn't support this thinking level, try another one "
+                "(minimal, low, medium, high) or none, with: "
+                "config plugins.Gemini.thinking_level"
+            ) % model
         return _("Gemini error %s: %s") % (e.code, e.message)
 
     def _send_full(self, irc, msg, lines, prefix):
