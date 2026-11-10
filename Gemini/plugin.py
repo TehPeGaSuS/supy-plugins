@@ -159,6 +159,49 @@ class Gemini(callbacks.Plugin):
             length = min(length, configured)
         return max(length, 50)
 
+    def _fail(self, irc, msg, text):
+        """Tells the user why there is no answer, but only when they ran the
+        command themselves: when MessageParser turns a nick mention into
+        'chat $1', the line wasn't addressed to the bot, and an error on
+        every failed mention would be noise."""
+        if not self.registryValue("error_reply", msg.channel, irc.network):
+            return
+        if not callbacks.addressed(irc, msg):
+            return
+        irc.error(text)
+
+    @staticmethod
+    def _is_timeout(e):
+        # google-genai uses httpx (1.x/2.x) or httpx2 (3.x); match their
+        # *Timeout classes by name rather than importing either.
+        # (No any() here: supybot.commands' * import shadows it.)
+        if isinstance(e, TimeoutError):
+            return True
+        for cls in type(e).__mro__:
+            if "Timeout" in cls.__name__:
+                return True
+        return False
+
+    @staticmethod
+    def _api_error_text(e, model):
+        if e.code == 429:
+            return _("Gemini rate limit or quota reached, try again later.")
+        if e.code in (500, 502, 503, 504):
+            return _(
+                "Gemini is busy right now (%s), try again in a bit."
+            ) % model
+        if e.code == 404:
+            return _(
+                "Gemini doesn't know the model %s, check: "
+                "config plugins.Gemini.model"
+            ) % model
+        if e.code in (400, 401, 403) and "api key" in (e.message or "").lower():
+            return _(
+                "Gemini rejected the API key, check: "
+                "config plugins.Gemini.api_key"
+            )
+        return _("Gemini error %s: %s") % (e.code, e.message)
+
     def _send_full(self, irc, msg, lines, prefix):
         """Sends every line, splitting long ones ourselves so nothing is
         held back for the 'more' command. supybot.reply.mores.maximum still
@@ -242,10 +285,28 @@ class Gemini(callbacks.Plugin):
             response = chat.send_message(text)
         except genai_errors.APIError as e:
             log.error("Gemini: API error %s: %s", e.code, e.message)
+            self._fail(irc, msg, self._api_error_text(e, model))
             return
         except Exception as e:
-            log.error(
-                "Gemini failed to fetch response: %s: %s", type(e).__name__, e
+            if not self._is_timeout(e):
+                log.error(
+                    "Gemini failed to fetch response: %s: %s",
+                    type(e).__name__,
+                    e,
+                )
+                self._fail(
+                    irc,
+                    msg,
+                    _("Couldn't reach Gemini (%s), see the bot's log.")
+                    % type(e).__name__,
+                )
+                return
+            log.error("Gemini: no answer within %ss: %r", timeout, e)
+            self._fail(
+                irc,
+                msg,
+                _("Gemini didn't answer within %s seconds, try again later.")
+                % timeout,
             )
             return
         log.debug(
@@ -259,6 +320,8 @@ class Gemini(callbacks.Plugin):
             elif response.prompt_feedback:
                 reason = response.prompt_feedback.block_reason
             log.warning("Gemini: empty response (reason: %s)", reason)
+            name = getattr(reason, "name", None) or str(reason)
+            self._fail(irc, msg, _("Gemini gave no answer (%s).") % name)
             return
         if self.registryValue("nick_strip", channel, network):
             content = re.sub(r"^%s: " % re.escape(irc.nick), "", content)

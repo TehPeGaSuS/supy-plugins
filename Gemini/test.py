@@ -30,6 +30,7 @@
 
 from supybot.test import *
 
+from google.genai import errors as genai_errors
 from google.genai import types
 
 
@@ -73,7 +74,7 @@ class FakeClient:
 
 
 class GeminiTestCase(ChannelPluginTestCase):
-    plugins = ("Gemini",)
+    plugins = ("Gemini", "MessageParser")
     config = {"supybot.plugins.Gemini.api_key": "testkey"}
 
     def setUp(self):
@@ -262,11 +263,54 @@ class GeminiTestCase(ChannelPluginTestCase):
             self.assertIn("more message", m.args[1])
             self.assertIsNone(self.irc.takeMsg())
 
-    def testEmptyAndErrorsAreSilent(self):
-        self.fake.reply = None
-        self.assertNoResponse("chat hi", 1)
+    def _apiError(self, code, message, status):
+        return genai_errors.APIError(
+            code, {"error": {"code": code, "message": message, "status": status}}
+        )
+
+    def testErrorReplies(self):
+        self.fake.reply = self._apiError(
+            503, "This model is currently experiencing high demand.", "UNAVAILABLE"
+        )
+        self.assertRegexp("chat hi", "busy right now .gemini-3.8-flash.")
+        self.fake.reply = self._apiError(429, "Resource exhausted", "RESOURCE_EXHAUSTED")
+        self.assertRegexp("chat hi", "rate limit or quota")
+        self.fake.reply = self._apiError(
+            400, "API key not valid. Please pass a valid API key.", "INVALID_ARGUMENT"
+        )
+        self.assertRegexp("chat hi", "plugins.Gemini.api_key")
+        self.fake.reply = self._apiError(404, "models/nope is not found", "NOT_FOUND")
+        self.assertRegexp("chat hi", "plugins.Gemini.model")
+        self.fake.reply = type("ReadTimeout", (Exception,), {})("timed out")
+        self.assertRegexp("chat hi", "within 60 seconds")
         self.fake.reply = RuntimeError("boom")
-        self.assertNoResponse("chat hi", 1)
+        self.assertRegexp("chat hi", "RuntimeError")
+        self.fake.reply = None
+        self.assertRegexp("chat hi", "no answer .SAFETY.")
+
+    def testErrorReplyOff(self):
+        self.fake.reply = RuntimeError("boom")
+        with conf.supybot.plugins.Gemini.error_reply.context(False):
+            self.assertNoResponse("chat hi", 1)
+
+    def testNoErrorForMessageParser(self):
+        # a nick mention turned into "chat $1" by MessageParser: the line
+        # itself isn't addressed to the bot
+        self.assertNotError(
+            'messageparser add "(?i)(.*%s.*)" "chat $1"' % self.irc.nick
+        )
+        self.fake.reply = RuntimeError("boom")
+        self.irc.feedMsg(
+            ircmsgs.privmsg(self.channel, "hey %s there" % self.irc.nick, prefix=self.prefix)
+        )
+        self.assertNoResponse(" ", 2)
+        self.assertEqual(self.fake.texts[-1], "%s: hey %s there" % (self.nick, self.irc.nick))
+        # and it still answers through MessageParser when all is well
+        self.fake.reply = "Hello there"
+        self.irc.feedMsg(
+            ircmsgs.privmsg(self.channel, "hey %s there" % self.irc.nick, prefix=self.prefix)
+        )
+        self.assertResponse(" ", "Hello there")
 
     def testClientTimeout(self):
         cb = self.irc.getCallback("Gemini")

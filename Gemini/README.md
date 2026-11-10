@@ -42,3 +42,8 @@ Answers are sent in full by default: long lines are split into several messages 
 @messageparser add "(?i)(.*BOT_NICK_HERE.*)" "chat $1"
 ```
 ^^ replace BOT_NICK_HERE with your bot nick and add automatic replies to nick mentions
+
+When `chat` fails (model busy, rate limit or quota, timeout, bad API key or model), the bot replies with a short error saying why. This only happens when someone runs the command directly; lines that MessageParser turns into `chat` stay silent, so a busy API doesn't spam the channel. To turn it off:
+```
+@config plugins.gemini.error_reply False
+```

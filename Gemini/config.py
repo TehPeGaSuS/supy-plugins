@@ -191,6 +191,22 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Gemini,
+    "error_reply",
+    registry.Boolean(
+        True,
+        _(
+            """
+            Reply with a short error (busy, rate limited, timeout, bad API
+            key...) when the chat command fails. Only for the command run
+            directly, never for lines MessageParser turns into chat (nick
+            mentions), so a busy API doesn't spam the channel.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    Gemini,
     "timeout",
     registry.NonNegativeInteger(
         60,
