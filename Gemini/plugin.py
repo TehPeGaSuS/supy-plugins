@@ -481,7 +481,16 @@ class Gemini(callbacks.Plugin):
                 reason = response.candidates[0].finish_reason
             elif response.prompt_feedback:
                 reason = response.prompt_feedback.block_reason
-            log.warning("Gemini: empty response (reason: %s)", reason)
+            usage = response.usage_metadata
+            log.warning(
+                "Gemini: empty response (reason: %s; tokens: thinking %s, "
+                "answer %s, prompt %s, total %s)",
+                reason,
+                getattr(usage, "thoughts_token_count", None),
+                getattr(usage, "candidates_token_count", None),
+                getattr(usage, "prompt_token_count", None),
+                getattr(usage, "total_token_count", None),
+            )
             name = getattr(reason, "name", None) or str(reason)
             if name == "MAX_TOKENS":
                 # Thinking counts towards max_output_tokens and isn't shown,
