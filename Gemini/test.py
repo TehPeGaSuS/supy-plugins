@@ -72,7 +72,7 @@ class FakeChat:
                     ],
                 )
         else:
-            candidate = types.Candidate(finish_reason=types.FinishReason.SAFETY)
+            candidate = types.Candidate(finish_reason=self.parent.finish_reason)
         return types.GenerateContentResponse(candidates=[candidate])
 
     def get_history(self, curated=False):
@@ -85,6 +85,7 @@ class FakeClient:
         self.texts = []
         self.reply = "Hello there"
         self.grounding = None
+        self.finish_reason = types.FinishReason.SAFETY  # when reply is None
         self.api_key = None
         self.chats = self
 
@@ -329,6 +330,10 @@ class GeminiTestCase(ChannelPluginTestCase):
         self.assertRegexp("chat hi", "RuntimeError")
         self.fake.reply = None
         self.assertRegexp("chat hi", "no answer .SAFETY.")
+        self.fake.finish_reason = types.FinishReason.MAX_TOKENS
+        self.assertRegexp(
+            "chat hi", "ran out of tokens before answering .max_tokens 200, thinking included., raise it with: config plugins.Gemini.max_tokens"
+        )
 
     def testErrorReplyOff(self):
         self.fake.reply = RuntimeError("boom")

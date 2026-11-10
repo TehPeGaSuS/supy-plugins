@@ -483,7 +483,17 @@ class Gemini(callbacks.Plugin):
                 reason = response.prompt_feedback.block_reason
             log.warning("Gemini: empty response (reason: %s)", reason)
             name = getattr(reason, "name", None) or str(reason)
-            self._fail(irc, msg, _("Gemini gave no answer (%s).") % name)
+            if name == "MAX_TOKENS":
+                # Thinking counts towards max_output_tokens and isn't shown,
+                # so a thinking model can use it all up before answering.
+                why = _(
+                    "Gemini ran out of tokens before answering (max_tokens "
+                    "%s, thinking included), raise it with: "
+                    "config plugins.Gemini.max_tokens"
+                ) % self.registryValue("max_tokens", channel, network)
+            else:
+                why = _("Gemini gave no answer (%s).") % name
+            self._fail(irc, msg, why)
             return
         if self.registryValue("nick_strip", channel, network):
             content = re.sub(r"^%s: " % re.escape(irc.nick), "", content)
