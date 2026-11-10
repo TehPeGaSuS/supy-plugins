@@ -33,7 +33,11 @@ from supybot.commands import *
 from supybot.i18n import PluginInternationalization
 import supybot.log as log
 import copy
+import datetime
+import json
+import os
 import re
+import threading
 import time
 from google import genai
 from google.genai import errors as genai_errors
@@ -56,6 +60,12 @@ class Gemini(callbacks.Plugin):
         self.clients = {}
         # network -> {"ident", "host"} from our own CHGHOST / 396
         self.own_hosts = {}
+        # Google searches used by the search command, shared by every
+        # network, channel and key, and kept across restarts.
+        self.usage_file = conf.supybot.directories.data.dirize(
+            "Gemini/search_usage.json"
+        )
+        self.usage_lock = threading.Lock()
 
     def _client(self, api_key, timeout):
         client = self.clients.get((api_key, timeout))
@@ -222,11 +232,105 @@ class Gemini(callbacks.Plugin):
         for chunk in chunks[:maximum]:
             irc.reply(chunk, prefixNick=prefix, noLengthCheck=True)
 
-    def chat(self, irc, msg, args, text):
-        """<text>
+    # --- search usage counter -----------------------------------------------
 
-        Sends <text> to the Gemini API and replies with the answer.
-        """
+    @staticmethod
+    def _google_today():
+        """Google resets its quotas at midnight Pacific time."""
+        try:
+            from zoneinfo import ZoneInfo
+
+            tz = ZoneInfo("America/Los_Angeles")
+        except Exception:
+            tz = datetime.timezone(datetime.timedelta(hours=-8))
+        return datetime.datetime.now(tz).date()
+
+    def _load_usage(self):
+        try:
+            with open(self.usage_file) as f:
+                usage = json.load(f)
+        except FileNotFoundError:
+            usage = {}
+        except Exception:
+            log.exception("Gemini: could not read %s", self.usage_file)
+            usage = {}
+        today = self._google_today()
+        day, month = today.isoformat(), today.isoformat()[:7]
+        if usage.get("day") != day:
+            usage["day"], usage["day_count"] = day, 0
+        if usage.get("month") != month:
+            usage["month"], usage["month_count"] = month, 0
+        return usage
+
+    def _save_usage(self, usage):
+        try:
+            os.makedirs(os.path.dirname(self.usage_file), exist_ok=True)
+            tmp = self.usage_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(usage, f)
+            os.replace(tmp, self.usage_file)
+        except Exception:
+            log.exception("Gemini: could not write %s", self.usage_file)
+
+    def _limits(self):
+        return (
+            self.registryValue("search_daily_limit"),
+            self.registryValue("search_monthly_limit"),
+        )
+
+    def _reserve_search(self):
+        """Counts one search before the request, so two requests at the
+        same time can't both slip under the limit. Returns False when a
+        limit is reached."""
+        (daily, monthly) = self._limits()
+        with self.usage_lock:
+            usage = self._load_usage()
+            if (
+                not daily
+                or not monthly
+                or usage["day_count"] >= daily
+                or usage["month_count"] >= monthly
+            ):
+                return False
+            usage["day_count"] += 1
+            usage["month_count"] += 1
+            self._save_usage(usage)
+            return True
+
+    def _settle_search(self, used):
+        """Replaces the one search reserved by _reserve_search() with the
+        number of queries Google actually ran (and bills)."""
+        with self.usage_lock:
+            usage = self._load_usage()
+            for name in ("day_count", "month_count"):
+                usage[name] = max(0, usage[name] + used - 1)
+            self._save_usage(usage)
+
+    @staticmethod
+    def _grounding(response):
+        """(number of search queries run, list of source domains)."""
+        if not response.candidates:
+            return (0, [])
+        meta = response.candidates[0].grounding_metadata
+        if meta is None:
+            return (0, [])
+        queries = len(meta.web_search_queries or [])
+        sources = []
+        for chunk in meta.grounding_chunks or []:
+            web = chunk.web
+            if web is None:
+                continue
+            name = web.domain or web.title or web.uri
+            if name and name not in sources:
+                sources.append(name)
+        if not queries and (sources or meta.search_entry_point):
+            # Searched without telling us the queries: count it anyway.
+            queries = 1
+        return (queries, sources)
+
+    # --- commands ------------------------------------------------------------
+
+    def _ask(self, irc, msg, text, search=False):
         channel = msg.channel
         network = irc.network
         if not self.registryValue("enabled", channel, network):
@@ -238,6 +342,11 @@ class Gemini(callbacks.Plugin):
             )
             return
         api_key = self.registryValue("api_key", channel, network)
+        if search:
+            api_key = (
+                self.registryValue("search_api_key", channel, network)
+                or api_key
+            )
         if not api_key:
             irc.error(
                 _(
@@ -247,13 +356,29 @@ class Gemini(callbacks.Plugin):
                 ),
                 Raise=True,
             )
-        prompt = self.registryValue("prompt", channel, network).replace(
-            "$botnick", irc.nick
-        )
+        if search and not self._reserve_search():
+            (daily, monthly) = self._limits()
+            if not daily or not monthly:
+                why = _("Web search is disabled on this bot.")
+            else:
+                why = _(
+                    "Web search limit reached (%s a day, %s a month). "
+                    "Try again after midnight Pacific time, or use: chat"
+                ) % (daily, monthly)
+            self._fail(irc, msg, why)
+            return
+        prompt = self.registryValue("prompt", channel, network)
+        if search:
+            extra = self.registryValue("search_prompt", channel, network)
+            if extra:
+                prompt = "%s\n\n%s" % (prompt, extra)
+        prompt = prompt.replace("$botnick", irc.nick)
         config = types.GenerateContentConfig(
             system_instruction=prompt,
             max_output_tokens=self.registryValue("max_tokens", channel, network),
         )
+        if search:
+            config.tools = [types.Tool(google_search=types.GoogleSearch())]
         thinking_level = self.registryValue("thinking_level", channel, network)
         if thinking_level:
             config.thinking_config = types.ThinkingConfig(
@@ -275,20 +400,34 @@ class Gemini(callbacks.Plugin):
         if self.registryValue("nick_include", channel, network):
             text = "%s: %s" % (msg.nick, text)
         log.debug(
-            "Gemini: asking %s (history: %s turns, timeout: %ss)",
+            "Gemini: asking %s%s (history: %s turns, timeout: %ss)",
             model,
+            " with Google Search" if search else "",
             len(history),
             timeout or "none",
         )
         started = time.monotonic()
         try:
             response = chat.send_message(text)
-        except genai_errors.APIError as e:
-            log.error("Gemini: API error %s: %s", e.code, e.message)
-            self._fail(irc, msg, self._api_error_text(e, model))
-            return
         except Exception as e:
-            if not self._is_timeout(e):
+            if search:
+                # Nothing billed that we can see: give the reservation back.
+                self._settle_search(0)
+            if isinstance(e, genai_errors.APIError):
+                log.error("Gemini: API error %s: %s", e.code, e.message)
+                self._fail(irc, msg, self._api_error_text(e, model))
+            elif self._is_timeout(e):
+                log.error("Gemini: no answer within %ss: %r", timeout, e)
+                self._fail(
+                    irc,
+                    msg,
+                    _(
+                        "Gemini didn't answer within %s seconds, "
+                        "try again later."
+                    )
+                    % timeout,
+                )
+            else:
                 log.error(
                     "Gemini failed to fetch response: %s: %s",
                     type(e).__name__,
@@ -300,15 +439,12 @@ class Gemini(callbacks.Plugin):
                     _("Couldn't reach Gemini (%s), see the bot's log.")
                     % type(e).__name__,
                 )
-                return
-            log.error("Gemini: no answer within %ss: %r", timeout, e)
-            self._fail(
-                irc,
-                msg,
-                _("Gemini didn't answer within %s seconds, try again later.")
-                % timeout,
-            )
             return
+        sources = []
+        if search:
+            (queries, sources) = self._grounding(response)
+            self._settle_search(queries)
+            log.info("Gemini: search ran %s Google queries", queries)
         log.debug(
             "Gemini: %s answered in %.1fs", model, time.monotonic() - started
         )
@@ -330,6 +466,9 @@ class Gemini(callbacks.Plugin):
         if not lines:
             log.warning("Gemini: answer was only whitespace: %r", content)
             return
+        max_sources = self.registryValue("search_sources", channel, network)
+        if sources and max_sources:
+            lines.append(_("Sources: %s") % ", ".join(sources[:max_sources]))
         if self.registryValue("full_reply", channel, network):
             self._send_full(irc, msg, lines, prefix)
         else:
@@ -337,7 +476,45 @@ class Gemini(callbacks.Plugin):
                 irc.reply(line, prefixNick=prefix)
         self.history[key] = chat.get_history(curated=True)
 
+    def chat(self, irc, msg, args, text):
+        """<text>
+
+        Sends <text> to Gemini and replies with the answer. Never searches
+        the web, see the search command for that.
+        """
+        self._ask(irc, msg, text)
+
     chat = wrap(chat, ["text"])
+
+    def search(self, irc, msg, args, text):
+        """<text>
+
+        Like chat, but Gemini may search the web with Google Search before
+        answering. Uses plugins.Gemini.search_api_key when set, and stops
+        at plugins.Gemini.search_daily_limit / search_monthly_limit.
+        """
+        self._ask(irc, msg, text, search=True)
+
+    search = wrap(search, ["text"])
+
+    def searches(self, irc, msg, args):
+        """takes no arguments
+
+        Shows how many Google searches the search command used today and
+        this month (Google's days start at midnight Pacific time).
+        """
+        (daily, monthly) = self._limits()
+        with self.usage_lock:
+            usage = self._load_usage()
+        irc.reply(
+            _(
+                "Web searches today: %s/%s, this month: %s/%s "
+                "(days reset at midnight Pacific time)."
+            )
+            % (usage["day_count"], daily, usage["month_count"], monthly)
+        )
+
+    searches = wrap(searches)
 
 
 Class = Gemini

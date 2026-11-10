@@ -30,6 +30,9 @@
 
 from supybot.test import *
 
+import json
+import os
+
 from google.genai import errors as genai_errors
 from google.genai import types
 
@@ -43,6 +46,7 @@ class FakeChat:
 
     def send_message(self, text):
         self.parent.sent.append(self)
+        self.api_key = self.parent.api_key
         self.parent.texts.append(text)
         if isinstance(self.parent.reply, Exception):
             raise self.parent.reply
@@ -54,6 +58,19 @@ class FakeChat:
             candidate = types.Candidate(
                 content=self.history[-1], finish_reason=types.FinishReason.STOP
             )
+            if self.parent.grounding is not None:
+                (queries, domains) = self.parent.grounding
+                candidate.grounding_metadata = types.GroundingMetadata(
+                    web_search_queries=queries,
+                    grounding_chunks=[
+                        types.GroundingChunk(
+                            web=types.GroundingChunkWeb(
+                                domain=d, title=d, uri="https://%s/" % d
+                            )
+                        )
+                        for d in domains
+                    ],
+                )
         else:
             candidate = types.Candidate(finish_reason=types.FinishReason.SAFETY)
         return types.GenerateContentResponse(candidates=[candidate])
@@ -67,6 +84,8 @@ class FakeClient:
         self.sent = []
         self.texts = []
         self.reply = "Hello there"
+        self.grounding = None
+        self.api_key = None
         self.chats = self
 
     def create(self, model, config, history):
@@ -82,7 +101,13 @@ class GeminiTestCase(ChannelPluginTestCase):
         self.fake = FakeClient()
         cb = self.irc.getCallback("Gemini")
         cb.history.clear()
-        cb._client = lambda api_key, timeout: self.fake
+        def client(api_key, timeout):
+            self.fake.api_key = api_key
+            return self.fake
+
+        cb._client = client
+        if os.path.exists(cb.usage_file):
+            os.remove(cb.usage_file)
 
     def testNoApiKey(self):
         with conf.supybot.plugins.Gemini.api_key.context(""):
@@ -322,6 +347,89 @@ class GeminiTestCase(ChannelPluginTestCase):
     def testWhitespaceAnswerIsSilent(self):
         self.fake.reply = "  \n \n"
         self.assertNoResponse("chat hi", 1)
+
+    def _usage(self):
+        cb = self.irc.getCallback("Gemini")
+        with open(cb.usage_file) as f:
+            return json.load(f)
+
+    def _chatPrompt(self):
+        self.assertNotError("chat hi")
+        return self.fake.sent[-1].config.system_instruction
+
+    def testSearchPromptEmpty(self):
+        with conf.supybot.plugins.Gemini.search_prompt.context(""):
+            self.assertNotError("gemini search hi")
+        self.assertEqual(
+            self.fake.sent[-1].config.system_instruction, self._chatPrompt()
+        )
+
+    def testChatNeverSearches(self):
+        with conf.supybot.plugins.Gemini.search_api_key.context("billed"):
+            self.assertResponse("chat hi", "Hello there")
+        chat = self.fake.sent[-1]
+        self.assertFalse(chat.config.tools)
+        self.assertEqual(chat.api_key, "testkey")
+
+    def testSearch(self):
+        self.fake.reply = "Benfica won 2-1"
+        self.fake.grounding = (["benfica porto result"] * 2, ["record.pt", "abola.pt", "x.com", "y.org"])
+        with conf.supybot.plugins.Gemini.search_api_key.context("billed"):
+            self.assertResponse("gemini search who won?", "Benfica won 2-1")
+            self.assertResponse(" ", "Sources: record.pt, abola.pt, x.com")
+        chat = self.fake.sent[-1]
+        self.assertEqual(chat.api_key, "billed")
+        self.assertIsNotNone(chat.config.tools[0].google_search)
+        # the search prompt is added to the normal prompt
+        self.assertIn("IRC bot", chat.config.system_instruction)
+        self.assertIn("no Markdown", chat.config.system_instruction)
+        self.assertNotIn("no Markdown", self._chatPrompt())
+        usage = self._usage()
+        self.assertEqual((usage["day_count"], usage["month_count"]), (2, 2))
+        self.assertResponse("searches", "Web searches today: 2/150, this month: 2/4800 (days reset at midnight Pacific time).")
+        # search answers go into the shared history, so chat can follow up
+        # (search, then _chatPrompt's "chat hi", then this one)
+        self.assertNotError("chat and then?")
+        history = self.fake.sent[-1].history
+        self.assertEqual(len(history), 6)
+        self.assertEqual(history[1].parts[0].text, "Benfica won 2-1")
+
+    def testSearchWithoutSearchingCountsNothing(self):
+        self.fake.grounding = None
+        self.assertResponse("gemini search hi", "Hello there")
+        self.assertEqual(self.fake.sent[-1].api_key, "testkey")  # falls back
+        self.assertEqual(self._usage()["day_count"], 0)
+
+    def testSearchLimits(self):
+        self.fake.grounding = (["q"], ["a.com"])
+        with conf.supybot.plugins.Gemini.search_daily_limit.context(2):
+            self.assertNotError("gemini search one")
+            self.assertNotError(" ")  # sources line
+            self.assertNotError("gemini search two")
+            self.assertNotError(" ")
+            before = len(self.fake.sent)
+            self.assertRegexp("gemini search three", "limit reached .2 a day, 4800 a month.")
+            self.assertEqual(len(self.fake.sent), before)
+            # chat still works
+            self.assertResponse("chat hi", "Hello there")
+        with conf.supybot.plugins.Gemini.search_monthly_limit.context(2):
+            self.assertRegexp("gemini search three", "limit reached")
+        with conf.supybot.plugins.Gemini.search_daily_limit.context(0):
+            self.assertRegexp("gemini search three", "disabled")
+
+    def testSearchErrorGivesReservationBack(self):
+        self.fake.reply = RuntimeError("boom")
+        self.assertRegexp("gemini search hi", "RuntimeError")
+        self.assertEqual(self._usage()["day_count"], 0)
+
+    def testUsageResets(self):
+        cb = self.irc.getCallback("Gemini")
+        os.makedirs(os.path.dirname(cb.usage_file), exist_ok=True)
+        with open(cb.usage_file, "w") as f:
+            json.dump({"day": "2000-01-01", "day_count": 150,
+                       "month": cb._google_today().isoformat()[:7],
+                       "month_count": 300}, f)
+        self.assertResponse("searches", "Web searches today: 0/150, this month: 300/4800 (days reset at midnight Pacific time).")
 
     def testDisabled(self):
         with conf.supybot.plugins.Gemini.enabled.context(False):

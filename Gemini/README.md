@@ -49,6 +49,32 @@ Gemini 3 models think before answering, and thinking tokens count towards `max_t
 @config plugins.Gemini.thinking_level ""
 ```
 
+## Web search
+
+```
+@gemini search <text>
+```
+Like `chat`, but Gemini may search the web with Google Search before answering, and the answer ends with a short list of the source websites. `chat` never searches. Use the plugin prefix here: a bare `search` is Limnoria's own `config search` command.
+
+Google Search grounding needs a Google project with **billing enabled**: the free tier doesn't include it. A billed project gets 5,000 searches a month free (shared across Gemini 3 models), then $14 per 1,000. But billing applies to the whole project, so every `chat` on it would be billed too. To keep chat free, you can have two projects:
+
+- a project **without billing** for chat: its key goes in `api_key`;
+- a project **with billing** (ideally with a spending cap) for search only: its key goes in `search_api_key`.
+
+```
+@config plugins.Gemini.api_key FREE_PROJECT_KEY
+@config plugins.Gemini.search_api_key BILLED_PROJECT_KEY
+```
+With a single billed project, just leave `search_api_key` empty and `api_key` is used for both.
+
+To stay inside the free 5,000 searches, the plugin counts the searches Google runs (one answer can run several) and stops at `search_daily_limit` (default 150) and `search_monthly_limit` (default 4,800), whichever comes first. The count covers every network, channel and key, is kept across restarts, and resets at midnight Pacific time like Google's. When a limit is reached, `search` says so and `chat` keeps working. See the usage with:
+```
+@gemini searches
+```
+The limits only know about this bot: other bots or programs using the same billed project share Google's 5,000 but not this count.
+
+`search_prompt` is added to `prompt` for searches. By default it asks for plain IRC text: no Markdown, no citation markers, no footnotes and no URLs (Google's source links are long redirects; the bot lists the source sites itself, see `search_sources`).
+
 ## Replies and errors
 
 Answers are sent in full: long lines are split into several messages that fit the IRC line limit (taking the bot's real `nick!ident@host`, the channel and any nick prefix into account) instead of being held back for `@more`, whatever `supybot.reply.mores.instant` says. `supybot.reply.mores.maximum` still caps the number of messages. Set `full_reply` to `False` for the normal `@more` behaviour.
@@ -57,7 +83,7 @@ When `chat` fails (model busy, rate limit or quota, timeout, bad API key or mode
 
 ## Options
 
-All options can be set globally, per network or per channel.
+Options marked global apply to the whole bot; the others can be set globally, per network or per channel.
 
 | Option | Default | Description |
 |---|---|---|
@@ -74,3 +100,8 @@ All options can be set globally, per network or per channel.
 | `full_reply` | `True` | Send the whole answer instead of holding the rest back for `@more`. |
 | `error_reply` | `True` | Reply with a short error when `chat` fails (not for MessageParser triggers). |
 | `timeout` | `60` | Seconds to wait for Gemini; `0` waits forever (not recommended). |
+| `search_api_key` | (empty) | Key for the `search` command (a billed project); empty uses `api_key`. |
+| `search_prompt` | "This answer may use Google Search results. Reply in plain text for IRC: …" | Added to `prompt` for searches; empty adds nothing. |
+| `search_sources` | `3` | Source websites listed after a search answer; `0` hides them. |
+| `search_daily_limit` | `150` | Google searches per day, all networks and channels; `0` disables search. Global. |
+| `search_monthly_limit` | `4800` | Google searches per month, all networks and channels; `0` disables search. Global. |

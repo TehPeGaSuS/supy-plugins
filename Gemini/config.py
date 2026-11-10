@@ -236,4 +236,85 @@ conf.registerChannelValue(
     ),
 )
 
+conf.registerChannelValue(
+    Gemini,
+    "search_api_key",
+    registry.String(
+        "",
+        _(
+            """
+            API key used by the search command only. Google Search grounding
+            needs a Google project with billing enabled, so this lets chat
+            stay on a free project (api_key) while search uses a billed one.
+            Empty uses api_key.
+            """
+        ),
+        private=True,
+    ),
+)
+
+conf.registerChannelValue(
+    Gemini,
+    "search_prompt",
+    registry.String(
+        "This answer may use Google Search results. Reply in plain text "
+        "for IRC: no Markdown (no bold, headings, tables or bullet "
+        "lists), no citation markers like [1], no footnotes, and no URLs; "
+        "the bot lists the sources itself. Keep it short.",
+        _(
+            """
+            Extra instructions added to the prompt for the search command
+            only ($botnick works here too). Empty adds nothing.
+            """
+        ),
+    ),
+)
+
+conf.registerGlobalValue(
+    Gemini,
+    "search_daily_limit",
+    registry.NonNegativeInteger(
+        150,
+        _(
+            """
+            Maximum Google searches per day for the search command, across
+            all networks, channels and keys (Google's days start at midnight
+            Pacific time). A single answer can run several searches. 0
+            disables searching. The default keeps a 31-day month under
+            Google's 5,000 free searches a month.
+            """
+        ),
+    ),
+)
+
+conf.registerGlobalValue(
+    Gemini,
+    "search_monthly_limit",
+    registry.NonNegativeInteger(
+        4800,
+        _(
+            """
+            Maximum Google searches per month for the search command, across
+            all networks, channels and keys. 0 disables searching. Keep it a
+            bit under Google's 5,000 free searches a month, since the last
+            answer before the limit can run a few searches.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    Gemini,
+    "search_sources",
+    registry.NonNegativeInteger(
+        3,
+        _(
+            """
+            Number of source websites listed after a search answer. 0 hides
+            them.
+            """
+        ),
+    ),
+)
+
 # vim:set shiftwidth=4 tabstop=4 expandtab textwidth=79:
