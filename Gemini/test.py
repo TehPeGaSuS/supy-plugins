@@ -417,11 +417,12 @@ class GeminiTestCase(ChannelPluginTestCase):
             self.assertNotIn("RUDE", self.fake.sent[-1].config.system_instruction)
             self.assertEqual(self._chatPrompt(), "Be RUDE")
 
-    def testSearchWithoutSearchingCountsNothing(self):
+    def testSearchWithoutSearchingCountsOne(self):
+        # Google's quota counts the request even if the model didn't search
         self.fake.grounding = None
         self.assertResponse("gemini search hi", "Hello there")
         self.assertEqual(self.fake.sent[-1].api_key, "testkey")  # falls back
-        self.assertEqual(self._usage()["day_count"], 0)
+        self.assertEqual(self._usage()["day_count"], 1)
 
     def testSearchLimits(self):
         self.fake.grounding = (["q"], ["a.com"])

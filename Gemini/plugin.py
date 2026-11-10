@@ -310,7 +310,7 @@ class Gemini(callbacks.Plugin):
 
     def _settle_search(self, used):
         """Replaces the one search reserved by _reserve_search() with the
-        number of queries Google actually ran (and bills)."""
+        number actually used (at least 1 per request, see _ask)."""
         with self.usage_lock:
             usage = self._load_usage()
             for name in ("day_count", "month_count"):
@@ -452,7 +452,10 @@ class Gemini(callbacks.Plugin):
             return
         if search:
             queries = self._search_count(response)
-            self._settle_search(queries)
+            # Google's search quota counts every request sent with the
+            # search tool, even when the model didn't search; billing is per
+            # query. Count whichever is higher.
+            self._settle_search(max(queries, 1))
             log.info("Gemini: search ran %s Google queries", queries)
         log.debug(
             "Gemini: %s answered in %.1fs", model, time.monotonic() - started

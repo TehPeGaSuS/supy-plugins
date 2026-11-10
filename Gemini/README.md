@@ -67,7 +67,7 @@ Google Search grounding needs a Google project with **billing enabled**: the fre
 ```
 With a single billed project, just leave `search_api_key` empty and `api_key` is used for both.
 
-To stay inside the free 5,000 searches, the plugin counts the searches Google runs (one answer can run several) and stops at `search_daily_limit` (default 150) and `search_monthly_limit` (default 4,800), whichever comes first. The count covers every network, channel and key, is kept across restarts, and resets at midnight Pacific time like Google's. When a limit is reached, `search` says so and `chat` keeps working. See the usage with:
+To stay inside the free 5,000 searches, the plugin counts the searches Google runs (one answer can run several, and a `search` that didn't end up searching still counts as one, as it does in Google's quota) and stops at `search_daily_limit` (default 150) and `search_monthly_limit` (default 4,800), whichever comes first. The count covers every network, channel and key, is kept across restarts, and resets at midnight Pacific time like Google's. When a limit is reached, `search` says so and `chat` keeps working. See the usage with:
 ```
 @gemini searches
 ```
