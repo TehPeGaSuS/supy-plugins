@@ -318,23 +318,35 @@ class GeminiTestCase(ChannelPluginTestCase):
         with conf.supybot.plugins.Gemini.error_reply.context(False):
             self.assertNoResponse("chat hi", 1)
 
-    def testNoErrorForMessageParser(self):
+    def testMessageParserErrorCooldown(self):
         # a nick mention turned into "chat $1" by MessageParser: the line
-        # itself isn't addressed to the bot
+        # itself isn't addressed to the bot, so errors are rate limited
         self.assertNotError(
             'messageparser add "(?i)(.*%s.*)" "gemini chat $1"' % self.irc.nick
         )
+        cb = self.irc.getCallback("Gemini")
+        line = "hey %s there" % self.irc.nick
         self.fake.reply = RuntimeError("boom")
-        self.irc.feedMsg(
-            ircmsgs.privmsg(self.channel, "hey %s there" % self.irc.nick, prefix=self.prefix)
-        )
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
+        self.assertRegexp(" ", "RuntimeError")
+        self.assertEqual(self.fake.texts[-1], "%s: %s" % (self.nick, line))
+        # within error_cooldown: silent
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
         self.assertNoResponse(" ", 2)
-        self.assertEqual(self.fake.texts[-1], "%s: hey %s there" % (self.nick, self.irc.nick))
+        # commands run directly always get their error
+        self.assertRegexp("chat hi", "RuntimeError")
+        # once the cooldown has passed, the next one is sent again
+        for key in cb.last_error:
+            cb.last_error[key] -= 601
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
+        self.assertRegexp(" ", "RuntimeError")
+        # 0 sends every error
+        with conf.supybot.plugins.Gemini.error_cooldown.context(0):
+            self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
+            self.assertRegexp(" ", "RuntimeError")
         # and it still answers through MessageParser when all is well
         self.fake.reply = "Hello there"
-        self.irc.feedMsg(
-            ircmsgs.privmsg(self.channel, "hey %s there" % self.irc.nick, prefix=self.prefix)
-        )
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
         self.assertResponse(" ", "Hello there")
 
     def testClientTimeout(self):

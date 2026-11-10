@@ -212,15 +212,26 @@ class ChatGPTTestCase(ChannelPluginTestCase):
         with conf.supybot.plugins.ChatGPT.error_reply.context(False):
             self.assertNoResponse("chat hi", 1)
 
-    def testNoErrorForMessageParser(self):
+    def testMessageParserErrorCooldown(self):
         self.assertNotError(
             'messageparser add "(?i)(.*%s.*)" "chatgpt chat $1"' % self.irc.nick
         )
-        self.fake.reply = RuntimeError("boom")
+        cb = self.irc.getCallback("ChatGPT")
         line = "hey %s there" % self.irc.nick
+        self.fake.reply = RuntimeError("boom")
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
+        self.assertRegexp(" ", "RuntimeError")
         self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
         self.assertNoResponse(" ", 2)
-        self.assertEqual(len(self.fake.calls), 1)
+        self.assertEqual(len(self.fake.calls), 2)
+        self.assertRegexp("chat hi", "RuntimeError")
+        for key in cb.last_error:
+            cb.last_error[key] -= 601
+        self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
+        self.assertRegexp(" ", "RuntimeError")
+        with conf.supybot.plugins.ChatGPT.error_cooldown.context(0):
+            self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
+            self.assertRegexp(" ", "RuntimeError")
         self.fake.reply = "Hello there"
         self.irc.feedMsg(ircmsgs.privmsg(self.channel, line, prefix=self.prefix))
         self.assertResponse(" ", "Hello there")

@@ -58,6 +58,9 @@ class ChatGPT(callbacks.Plugin):
         self.clients = {}
         # network -> {"ident", "host"} from our own CHGHOST / 396
         self.own_hosts = {}
+        # (network, channel or nick) -> time of the last error sent for a
+        # MessageParser-triggered command
+        self.last_error = {}
 
     def _client(self, api_key, base_url, timeout):
         key = (api_key, base_url, timeout)
@@ -90,14 +93,22 @@ class ChatGPT(callbacks.Plugin):
     # --- error replies -----------------------------------------------------
 
     def _fail(self, irc, msg, text):
-        """Tells the user why there is no answer, but only when they ran the
-        command themselves: when MessageParser turns a nick mention into
-        'chat $1', the line wasn't addressed to the bot, and an error on
-        every failed mention would be noise."""
-        if not self.registryValue("error_reply", msg.channel, irc.network):
+        """Tells the user why there is no answer. Always when they ran the
+        command themselves; when MessageParser turned a nick mention into
+        'chat $1' (the line wasn't addressed to the bot), at most once every
+        error_cooldown seconds per channel, so a busy API doesn't spam it."""
+        channel, network = msg.channel, irc.network
+        if not self.registryValue("error_reply", channel, network):
             return
         if not callbacks.addressed(irc, msg):
-            return
+            cooldown = self.registryValue("error_cooldown", channel, network)
+            key = (network, channel or msg.nick)
+            now = time.monotonic()
+            last = self.last_error.get(key)
+            if cooldown and last is not None and now - last < cooldown:
+                log.debug("%s: error reply skipped (error_cooldown)", self.name())
+                return
+            self.last_error[key] = now
         irc.error(text)
 
     @staticmethod

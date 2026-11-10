@@ -318,9 +318,25 @@ conf.registerChannelValue(
         _(
             """
             Reply with a short error (busy, rate limited, timeout, bad API
-            key...) when the chat command fails. Only for the command run
-            directly, never for lines MessageParser turns into chat (nick
-            mentions), so a busy API doesn't spam the channel.
+            key...) when a command fails. Commands run directly always get
+            the error; lines MessageParser turns into a command (nick
+            mentions) get one at most every error_cooldown seconds.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    ChatGPT,
+    "error_cooldown",
+    registry.NonNegativeInteger(
+        600,
+        _(
+            """
+            Seconds between error replies to lines MessageParser turns into
+            a command (nick mentions), per channel, so a busy API doesn't
+            spam the channel. 0 sends every error. Commands run directly
+            always get their error.
             """
         ),
     ),
