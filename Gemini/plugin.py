@@ -360,11 +360,16 @@ class Gemini(callbacks.Plugin):
             (daily, monthly) = self._limits()
             if not daily or not monthly:
                 why = _("Web search is disabled on this bot.")
+            elif self._load_usage()["month_count"] >= monthly:
+                why = _(
+                    "Monthly web search limit reached (%s). Try again "
+                    "next month, or use: chat"
+                ) % monthly
             else:
                 why = _(
-                    "Web search limit reached (%s a day, %s a month). "
-                    "Try again after midnight Pacific time, or use: chat"
-                ) % (daily, monthly)
+                    "Daily web search limit reached (%s). Try again after "
+                    "midnight Pacific time, or use: chat"
+                ) % daily
             self._fail(irc, msg, why)
             return
         prompt = self.registryValue("prompt", channel, network)

@@ -71,7 +71,7 @@ To stay inside the free 5,000 searches, the plugin counts the searches Google ru
 ```
 @gemini searches
 ```
-The limits only know about this bot: other bots or programs using the same billed project share Google's 5,000 but not this count.
+The limits only know about this bot: other bots or programs using the same billed project share Google's 5,000 but not this count. If several bots use the same key, split the limits between them, e.g. three bots with `search_daily_limit 50` and `search_monthly_limit 1600` each.
 
 `search_prompt` is added to `prompt` for searches. By default it asks for plain IRC text: no Markdown, no citation markers, no footnotes and no URLs (Google's source links are long redirects; the bot lists the source sites itself, see `search_sources`).
 

@@ -408,12 +408,14 @@ class GeminiTestCase(ChannelPluginTestCase):
             self.assertNotError("gemini search two")
             self.assertNotError(" ")
             before = len(self.fake.sent)
-            self.assertRegexp("gemini search three", "limit reached .2 a day, 4800 a month.")
+            self.assertRegexp("gemini search three", "Daily web search limit reached .2.. Try again after midnight")
             self.assertEqual(len(self.fake.sent), before)
             # chat still works
             self.assertResponse("chat hi", "Hello there")
         with conf.supybot.plugins.Gemini.search_monthly_limit.context(2):
-            self.assertRegexp("gemini search three", "limit reached")
+            self.assertRegexp(
+                "gemini search three", "Monthly web search limit reached .2.. Try again next month"
+            )
         with conf.supybot.plugins.Gemini.search_daily_limit.context(0):
             self.assertRegexp("gemini search three", "disabled")
 
