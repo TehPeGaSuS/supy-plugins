@@ -73,7 +73,7 @@ To stay inside the free 5,000 searches, the plugin counts the searches Google ru
 ```
 The limits only know about this bot: other bots or programs using the same billed project share Google's 5,000 but not this count. If several bots use the same key, split the limits between them, e.g. three bots with `search_daily_limit 50` and `search_monthly_limit 1600` each.
 
-`search_prompt` replaces `prompt` for searches, so search answers stay factual whatever personality the bot has for `chat`. By default it asks for neutral, plain IRC text: no jokes or roleplay, no Markdown, no citation markers, no footnotes and no URLs (Google's source links are long redirects). Set it to empty to use `prompt` for searches too.
+`search_prompt` replaces `prompt` for searches, so search answers stay factual whatever personality the bot has for `chat`. By default it tells Gemini to search before answering anything that can change (weather, news, scores...), even if the history seems to answer it, and never to say "let me check" instead of checking; and it asks for neutral, plain IRC text: no jokes or roleplay, no Markdown, no citation markers, no footnotes and no URLs (Google's source links are long redirects). Set it to empty to use `prompt` for searches too.
 
 ## Replies and errors
 

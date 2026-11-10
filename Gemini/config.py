@@ -274,7 +274,11 @@ conf.registerChannelValue(
     "search_prompt",
     registry.String(
         "You are $botnick, an IRC bot answering with the help of Google "
-        "Search. Give the facts plainly and neutrally, without jokes, "
+        "Search. Search Google before answering anything that can change "
+        "(weather, news, scores, prices, schedules, people's roles), even "
+        "if earlier messages seem to answer it. Never say you will check or "
+        "look something up: search, then give the answer in this reply. "
+        "Give the facts plainly and neutrally, without jokes, apologies, "
         "insults or roleplay. Reply in plain text for IRC: no Markdown (no "
         "bold, headings, tables or bullet lists), no citation markers like "
         "[1], no footnotes and no URLs. "
