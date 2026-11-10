@@ -104,10 +104,38 @@ conf.registerChannelValue(
     ChatGPT,
     "model",
     registry.String(
-        "gpt-4o-mini",
+        "gpt-6-luna",
         _(
             """
-            OpenAI endpoint model, default: "gpt-3.5-turbo"
+            Model to use, default: "gpt-6-luna". See
+            https://developers.openai.com/api/docs/models for the current
+            list, or your provider's list when base_url points elsewhere.
+            """
+        ),
+    ),
+)
+
+
+class ReasoningEffort(registry.OnlySomeStrings):
+    validStrings = (
+        "", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    )
+
+
+conf.registerChannelValue(
+    ChatGPT,
+    "reasoning_effort",
+    ReasoningEffort(
+        "none",
+        _(
+            """
+            How much a reasoning model thinks before answering. Reasoning
+            tokens count towards max_tokens, so higher efforts need a higher
+            max_tokens or the answer comes back empty. Supported values
+            depend on the model: gpt-6-luna takes none/low/medium/high/
+            xhigh/max, older GPT-5 models take minimal instead of none. Set
+            to an empty string for models or OpenAI-compatible servers
+            without reasoning (it is then not sent at all).
             """
         ),
     ),
@@ -121,7 +149,9 @@ conf.registerChannelValue(
         False,
         _(
             """
-            Get spammy and enable line per line reply...
+            Keep the answer's line breaks, one message per line. When False,
+            the lines are joined with spaces into a single reply (still split
+            when longer than one IRC line, see full_reply).
             """
         ),
     ),
@@ -147,7 +177,8 @@ conf.registerChannelValue(
         1,
         _(
             """
-            What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. We generally recommend altering this or top_p but not both.
+            Only sent when changed from the default (reasoning models reject
+            it). What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. We generally recommend altering this or top_p but not both.
             """
         ),
     ),
@@ -160,7 +191,8 @@ conf.registerChannelValue(
         1,
         _(
             """
-            An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered. We generally recommend altering this or temperature but not both.
+            Only sent when changed from the default (reasoning models reject
+            it). An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered. We generally recommend altering this or temperature but not both.
             """
         ),
     ),
@@ -169,11 +201,13 @@ conf.registerChannelValue(
 conf.registerChannelValue(
     ChatGPT,
     "max_tokens",
-    registry.Integer(
+    registry.PositiveInteger(
         200,
         _(
             """
-            The maximum number of tokens to generate in the chat completion. The total length of input tokens and generated tokens is limited by the model's context length.
+            The maximum number of tokens to generate, reasoning tokens
+            included. Sent as max_completion_tokens to OpenAI and as
+            max_tokens to other base_url servers.
             """
         ),
     ),
@@ -186,7 +220,8 @@ conf.registerChannelValue(
         0,
         _(
             """
-            Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far, increasing the model's likelihood to talk about new topics.
+            Only sent when changed from the default (reasoning models reject
+            it). Number between -2.0 and 2.0. Positive values penalize new tokens based on whether they appear in the text so far, increasing the model's likelihood to talk about new topics.
             """
         ),
     ),
@@ -199,7 +234,8 @@ conf.registerChannelValue(
         0,
         _(
             """
-            Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far, decreasing the model's likelihood to repeat the same line verbatim.
+            Only sent when changed from the default (reasoning models reject
+            it). Number between -2.0 and 2.0. Positive values penalize new tokens based on their existing frequency in the text so far, decreasing the model's likelihood to repeat the same line verbatim.
             """
         ),
     ),
@@ -208,7 +244,7 @@ conf.registerChannelValue(
 conf.registerChannelValue(
     ChatGPT,
     "max_history",
-    registry.Integer(
+    registry.NonNegativeInteger(
         10,
         _(
             """
@@ -239,6 +275,52 @@ conf.registerChannelValue(
         _(
             """
             Prevent the bot from starting replies with its own nick.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    ChatGPT,
+    "timeout",
+    registry.NonNegativeInteger(
+        60,
+        _(
+            """
+            Seconds to wait for the API before giving up (one retry is
+            made). 0 uses the SDK default of 10 minutes.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    ChatGPT,
+    "full_reply",
+    registry.Boolean(
+        True,
+        _(
+            """
+            Send the whole answer at once, splitting long lines into several
+            messages, instead of holding the rest back for the 'more' command
+            (supybot.reply.mores.instant). supybot.reply.mores.maximum still
+            caps the number of messages per answer.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    ChatGPT,
+    "error_reply",
+    registry.Boolean(
+        True,
+        _(
+            """
+            Reply with a short error (busy, rate limited, timeout, bad API
+            key...) when the chat command fails. Only for the command run
+            directly, never for lines MessageParser turns into chat (nick
+            mentions), so a busy API doesn't spam the channel.
             """
         ),
     ),
