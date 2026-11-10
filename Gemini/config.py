@@ -78,10 +78,34 @@ conf.registerChannelValue(
     Gemini,
     "model",
     registry.String(
-        "gemini-1.5-flash-latest",
+        "gemini-3.8-flash",
         _(
             """
-            GoogleAI endpoint model, default: "gemini-1.5-flash-latest"
+            Gemini model to use, default: "gemini-3.8-flash". See
+            https://ai.google.dev/gemini-api/docs/models for the current list.
+            "gemini-flash-latest" always points at the newest Flash model.
+            """
+        ),
+    ),
+)
+
+
+class ThinkingLevel(registry.OnlySomeStrings):
+    validStrings = ("", "minimal", "low", "medium", "high")
+
+
+conf.registerChannelValue(
+    Gemini,
+    "thinking_level",
+    ThinkingLevel(
+        "minimal",
+        _(
+            """
+            How much the model thinks before answering (Gemini 3 models).
+            Thinking tokens count towards max_tokens, so higher levels need a
+            higher max_tokens or replies get cut short. "minimal" is not
+            supported by Gemini 3 Pro models. Set to an empty string for
+            models without thinking levels (Gemini 2.5 and older).
             """
         ),
     ),
@@ -103,7 +127,7 @@ conf.registerChannelValue(
 conf.registerChannelValue(
     Gemini,
     "max_tokens",
-    registry.Integer(
+    registry.PositiveInteger(
         200,
         _(
             """
@@ -160,6 +184,22 @@ conf.registerChannelValue(
         _(
             """
             Prevent the bot from starting replies with its own nick.
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    Gemini,
+    "full_reply",
+    registry.Boolean(
+        True,
+        _(
+            """
+            Send the whole answer at once, splitting long lines into several
+            messages, instead of holding the rest back for the 'more' command
+            (supybot.reply.mores.instant). supybot.reply.mores.maximum still
+            caps the number of messages per answer.
             """
         ),
     ),

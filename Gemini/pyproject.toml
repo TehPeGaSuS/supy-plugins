@@ -10,6 +10,7 @@ authors = [
 readme = "README.md"
 dependencies = [
     "limnoria",
+    "google-genai>=1.51",
 ]
 classifiers = [
     'Environment :: Plugins',

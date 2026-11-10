@@ -28,12 +28,15 @@
 
 ###
 
-from supybot import utils, plugins, ircutils, callbacks
+from supybot import conf, utils, plugins, ircmsgs, ircutils, callbacks
 from supybot.commands import *
 from supybot.i18n import PluginInternationalization
 import supybot.log as log
+import copy
 import re
-import google.generativeai as genai
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types
 
 _ = PluginInternationalization("Gemini")
 
@@ -46,45 +49,200 @@ class Gemini(callbacks.Plugin):
     def __init__(self, irc):
         self.__parent = super(Gemini, self)
         self.__parent.__init__(irc)
+        # (network, channel or nick) -> list of types.Content
         self.history = {}
+        # api_key -> genai.Client, so connections are reused between calls
+        self.clients = {}
+        # network -> {"ident", "host"} from our own CHGHOST / 396
+        self.own_hosts = {}
+
+    def _client(self, api_key):
+        client = self.clients.get(api_key)
+        if client is None:
+            client = self.clients[api_key] = genai.Client(api_key=api_key)
+        return client
+
+    @staticmethod
+    def _trim(history, max_history):
+        history = history[-max_history:]
+        # A conversation must start with a user turn.
+        while history and history[0].role != "user":
+            history = history[1:]
+        return history
+
+    def do001(self, irc, msg):
+        # New connection: forget hosts from the previous one.
+        self.own_hosts.pop(irc.network, None)
+
+    def do396(self, irc, msg):
+        # RPL_HOSTHIDDEN / RPL_VISIBLEHOST: "<nick> <host> :is now your
+        # displayed host". Some ircds send "<ident>@<host>" instead.
+        # Limnoria only learns the new host from our next own-sourced
+        # message, so remember it for _own_prefix_length().
+        if len(msg.args) >= 2:
+            (_, _, host) = msg.args[1].rpartition("@")
+            self.own_hosts.setdefault(irc.network, {})["host"] = host
+
+    def doChghost(self, irc, msg):
+        # Limnoria keeps irc.prefix on the old host after our own CHGHOST,
+        # and its echo-message emulation then puts that stale prefix back
+        # into irc.state.nicksToHostmasks, so track it ourselves.
+        if ircutils.strEqual(msg.nick, irc.nick) and len(msg.args) >= 2:
+            (ident, host) = msg.args[:2]
+            self.own_hosts[irc.network] = {"ident": ident, "host": host}
+
+    def _own_prefix_length(self, irc):
+        """Bytes of the 'nick!ident@host' the server will put in front of
+        our messages when relaying them. Takes the longest ident and host
+        known from every source, since Limnoria's irc.prefix is not updated
+        on our own CHGHOST or on 396, and is a placeholder before we joined
+        anything. The longest wins: a line that is a bit short is harmless,
+        one the server cuts loses text. Falls back to ISUPPORT USERLEN/HOSTLEN (or 10/63)."""
+        idents, hosts = [], []
+        masks = (irc.prefix, irc.state.nicksToHostmasks.get(irc.nick))
+        for mask in masks:
+            if mask and ircutils.isUserHostmask(mask):
+                (_nick, ident, host) = ircutils.splitHostmask(mask)
+                idents.append(ident)
+                if host != "unset.domain":
+                    hosts.append(host)
+        own = self.own_hosts.get(irc.network, {})
+        if own.get("ident"):
+            idents.append(own["ident"])
+        if own.get("host"):
+            hosts.append(own["host"])
+        supported = irc.state.supported
+        if not hosts:
+            hosts.append("x" * supported.get("hostlen", 63))
+        if not idents:
+            # +1 for the "~" of a missing identd reply
+            idents.append("x" * (supported.get("userlen", 10) + 1))
+        return (
+            len(irc.nick.encode())
+            + 1
+            + max(len(i.encode()) for i in idents)
+            + 1
+            + max(len(h.encode()) for h in hosts)
+        )
+
+    def _max_payload(self, irc, msg, prefix):
+        """Bytes of text that fit in one reply, accounting for our hostmask,
+        the command (PRIVMSG/NOTICE), the target (channel or nick, with
+        supybot.reply.inPrivate etc.), the 'nick: ' prefix and CRLF, within
+        the 512-byte IRC line limit (tags have their own budget)."""
+        try:
+            # Same trick as Limnoria's _replyOverhead: build a dummy reply
+            # and measure it. deepcopy because _makeReply tags the message.
+            probe = copy.deepcopy(msg)
+            probe.channel = msg.channel
+            reply = callbacks._makeReply(irc, probe, "x", prefixNick=prefix)
+            sender = "p" * self._own_prefix_length(irc)
+            line = ircmsgs.IrcMsg(msg=reply, server_tags={}, prefix=sender)
+            overhead = len(str(line).encode()) - len(b"x")
+        except Exception:
+            log.exception("Gemini: could not compute the reply overhead")
+            overhead = 512 - 350
+        length = 512 - overhead
+        configured = conf.get(
+            conf.supybot.reply.mores.length,
+            channel=msg.channel,
+            network=irc.network,
+        )
+        if configured:
+            length = min(length, configured)
+        return max(length, 50)
+
+    def _send_full(self, irc, msg, lines, prefix):
+        """Sends every line, splitting long ones ourselves so nothing is
+        held back for the 'more' command. supybot.reply.mores.maximum still
+        caps the total number of messages."""
+        channel, network = msg.channel, irc.network
+        length = self._max_payload(irc, msg, prefix)
+        maximum = conf.get(
+            conf.supybot.reply.mores.maximum, channel=channel, network=network
+        )
+        chunks = [c for line in lines for c in ircutils.wrap(line, length)]
+        if len(chunks) > maximum:
+            log.warning(
+                "Gemini: reply truncated to %s of %s messages "
+                "(supybot.reply.mores.maximum)",
+                maximum,
+                len(chunks),
+            )
+        for chunk in chunks[:maximum]:
+            irc.reply(chunk, prefixNick=prefix, noLengthCheck=True)
 
     def chat(self, irc, msg, args, text):
-        """Chat Call to the Gemini API"""
+        """<text>
+
+        Sends <text> to the Gemini API and replies with the answer.
+        """
         channel = msg.channel
-        if not irc.isChannel(channel):
-            channel = msg.nick
-        if not self.registryValue("enabled", msg.channel):
+        network = irc.network
+        if not self.registryValue("enabled", channel, network):
             return
-        genai.configure(api_key=self.registryValue("api_key", msg.channel))
-        prompt = self.registryValue("prompt", msg.channel).replace("$botnick", irc.nick)
-        max_tokens = self.registryValue("max_tokens", msg.channel)
-        model = genai.GenerativeModel(
-            self.registryValue("model", msg.channel),
-            generation_config={"max_output_tokens": max_tokens},
-            system_instruction=prompt,
+        api_key = self.registryValue("api_key", channel, network)
+        if not api_key:
+            irc.error(
+                _(
+                    "No API key set. Get one at "
+                    "https://aistudio.google.com/app/apikey then use: "
+                    "config plugins.Gemini.api_key <key>"
+                ),
+                Raise=True,
+            )
+        prompt = self.registryValue("prompt", channel, network).replace(
+            "$botnick", irc.nick
         )
-        max_history = self.registryValue("max_history", msg.channel)
-        self.history.setdefault(channel, None)
-        if not self.history[channel] or max_history < 1:
-            self.history[channel] = []
-        chat = model.start_chat(history=self.history[channel][-max_history:])
+        config = types.GenerateContentConfig(
+            system_instruction=prompt,
+            max_output_tokens=self.registryValue("max_tokens", channel, network),
+        )
+        thinking_level = self.registryValue("thinking_level", channel, network)
+        if thinking_level:
+            config.thinking_config = types.ThinkingConfig(
+                thinking_level=thinking_level.upper()
+            )
+        key = (network, channel or msg.nick)
+        max_history = self.registryValue("max_history", channel, network)
+        if max_history < 1:
+            history = []
+        else:
+            history = self._trim(self.history.get(key, []), max_history)
+        chat = self._client(api_key).chats.create(
+            model=self.registryValue("model", channel, network),
+            config=config,
+            history=history,
+        )
+        if self.registryValue("nick_include", channel, network):
+            text = "%s: %s" % (msg.nick, text)
         try:
-            if self.registryValue("nick_include", msg.channel):
-                response = chat.send_message("%s: %s" % (msg.nick, text))
-            else:
-                response = chat.send_message(text)
+            response = chat.send_message(text)
+        except genai_errors.APIError as e:
+            log.error("Gemini: API error %s: %s", e.code, e.message)
+            return
         except Exception as e:
             log.error("Gemini failed to fetch response: %s", e)
             return
-        if self.registryValue("nick_strip", msg.channel):
-            content = re.sub(r"^%s: " % (irc.nick), "", response.text)
+        content = response.text
+        if not content:
+            reason = None
+            if response.candidates:
+                reason = response.candidates[0].finish_reason
+            elif response.prompt_feedback:
+                reason = response.prompt_feedback.block_reason
+            log.warning("Gemini: empty response (reason: %s)", reason)
+            return
+        if self.registryValue("nick_strip", channel, network):
+            content = re.sub(r"^%s: " % re.escape(irc.nick), "", content)
+        prefix = self.registryValue("nick_prefix", channel, network)
+        lines = [line for line in content.splitlines() if line.strip()]
+        if self.registryValue("full_reply", channel, network):
+            self._send_full(irc, msg, lines, prefix)
         else:
-            content = response.text
-        prefix = self.registryValue("nick_prefix", msg.channel)
-        for line in content.splitlines():
-            if line:
+            for line in lines:
                 irc.reply(line, prefixNick=prefix)
-        self.history[channel] = chat.history
+        self.history[key] = chat.get_history(curated=True)
 
     chat = wrap(chat, ["text"])
 
