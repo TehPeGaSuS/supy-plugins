@@ -238,6 +238,21 @@ conf.registerChannelValue(
 
 conf.registerChannelValue(
     Gemini,
+    "reply_intact",
+    registry.Boolean(
+        False,
+        _(
+            """
+            Keep the answer's line breaks, one message per line. When False,
+            the lines are joined with spaces into a single reply (still split
+            when longer than one IRC line, see full_reply).
+            """
+        ),
+    ),
+)
+
+conf.registerChannelValue(
+    Gemini,
     "full_reply",
     registry.Boolean(
         True,

@@ -77,6 +77,8 @@ The limits only know about this bot: other bots or programs using the same bille
 
 ## Replies and errors
 
+By default the answer's lines are joined into a single reply; set `reply_intact` to `True` to keep its line breaks, one message per line.
+
 Answers are sent in full: long lines are split into several messages that fit the IRC line limit (taking the bot's real `nick!ident@host`, the channel and any nick prefix into account) instead of being held back for `@more`, whatever `supybot.reply.mores.instant` says. `supybot.reply.mores.maximum` still caps the number of messages. Set `full_reply` to `False` for the normal `@more` behaviour.
 
 When `chat` or `search` fails (model busy, search limit reached, rate limit or quota, timeout, bad API key or model, empty answer), the bot replies with a short error saying why. Commands run directly always get their error. Lines that MessageParser turns into a command (nick mentions) get one at most every `error_cooldown` seconds per channel (default 600, `0` for every error), so a busy API doesn't spam the channel. Set `error_reply` to `False` to turn errors off. Failures are always logged.
@@ -97,6 +99,7 @@ Options marked global apply to the whole bot; the others can be set globally, pe
 | `nick_include` | `True` | Send the user's nick with each message, so the model can tell people apart. |
 | `nick_prefix` | `False` | Prefix replies with the user's nick. |
 | `nick_strip` | `True` | Remove `botnick: ` from the start of answers. |
+| `reply_intact` | `False` | Keep the answer's line breaks instead of joining them into one reply. |
 | `full_reply` | `True` | Send the whole answer instead of holding the rest back for `@more`. |
 | `error_reply` | `True` | Reply with a short error when a command fails. |
 | `error_cooldown` | `600` | Seconds between errors for MessageParser triggers, per channel; `0` sends every error. |

@@ -150,13 +150,19 @@ class GeminiTestCase(ChannelPluginTestCase):
 
     def testNickStrip(self):
         self.fake.reply = "%s: multi\n\nline" % self.irc.nick
-        self.assertResponse("chat hi", "multi")
-        self.assertResponse(" ", "line")
+        self.assertResponse("chat hi", "multi line")
+
+    def testReplyIntact(self):
+        self.fake.reply = "%s: line one\n\nline two" % self.irc.nick
+        with conf.supybot.plugins.Gemini.reply_intact.context(True):
+            self.assertResponse("chat hi", "line one")
+            self.assertResponse(" ", "line two")
 
     def testFullReply(self):
         words = ["word%03d" % i for i in range(300)]  # ~2.4 KB, one line
         self.fake.reply = " ".join(words) + "\nsecond line"
-        with conf.supybot.reply.mores.instant.context(1):
+        with conf.supybot.reply.mores.instant.context(1), \
+                conf.supybot.plugins.Gemini.reply_intact.context(True):
             m = self.getMsg("chat hi")
             msgs = [m]
             while True:
@@ -274,7 +280,8 @@ class GeminiTestCase(ChannelPluginTestCase):
 
     def testFullReplyMaximum(self):
         self.fake.reply = "\n".join("line %d" % i for i in range(10))
-        with conf.supybot.reply.mores.maximum.context(3):
+        with conf.supybot.reply.mores.maximum.context(3), \
+                conf.supybot.plugins.Gemini.reply_intact.context(True):
             self.assertResponse("chat hi", "line 0")
             self.assertResponse(" ", "line 1")
             self.assertResponse(" ", "line 2")

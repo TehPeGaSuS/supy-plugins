@@ -475,6 +475,8 @@ class Gemini(callbacks.Plugin):
         if not lines:
             log.warning("Gemini: answer was only whitespace: %r", content)
             return
+        if not self.registryValue("reply_intact", channel, network):
+            lines = [" ".join(line.strip() for line in lines)]
         if self.registryValue("full_reply", channel, network):
             self._send_full(irc, msg, lines, prefix)
         else:
