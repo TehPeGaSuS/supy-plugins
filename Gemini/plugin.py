@@ -318,26 +318,18 @@ class Gemini(callbacks.Plugin):
             self._save_usage(usage)
 
     @staticmethod
-    def _grounding(response):
-        """(number of search queries run, list of source domains)."""
+    def _search_count(response):
+        """Number of Google searches Gemini ran for this answer."""
         if not response.candidates:
-            return (0, [])
+            return 0
         meta = response.candidates[0].grounding_metadata
         if meta is None:
-            return (0, [])
+            return 0
         queries = len(meta.web_search_queries or [])
-        sources = []
-        for chunk in meta.grounding_chunks or []:
-            web = chunk.web
-            if web is None:
-                continue
-            name = web.domain or web.title or web.uri
-            if name and name not in sources:
-                sources.append(name)
-        if not queries and (sources or meta.search_entry_point):
+        if not queries and (meta.grounding_chunks or meta.search_entry_point):
             # Searched without telling us the queries: count it anyway.
             queries = 1
-        return (queries, sources)
+        return queries
 
     # --- commands ------------------------------------------------------------
 
@@ -383,11 +375,13 @@ class Gemini(callbacks.Plugin):
                 ) % daily
             self._fail(irc, msg, why)
             return
-        prompt = self.registryValue("prompt", channel, network)
+        prompt = ""
         if search:
-            extra = self.registryValue("search_prompt", channel, network)
-            if extra:
-                prompt = "%s\n\n%s" % (prompt, extra)
+            # Replaces the personality prompt: search answers should be
+            # factual, not in character.
+            prompt = self.registryValue("search_prompt", channel, network)
+        if not prompt:
+            prompt = self.registryValue("prompt", channel, network)
         prompt = prompt.replace("$botnick", irc.nick)
         config = types.GenerateContentConfig(
             system_instruction=prompt,
@@ -456,9 +450,8 @@ class Gemini(callbacks.Plugin):
                     % type(e).__name__,
                 )
             return
-        sources = []
         if search:
-            (queries, sources) = self._grounding(response)
+            queries = self._search_count(response)
             self._settle_search(queries)
             log.info("Gemini: search ran %s Google queries", queries)
         log.debug(
@@ -482,9 +475,6 @@ class Gemini(callbacks.Plugin):
         if not lines:
             log.warning("Gemini: answer was only whitespace: %r", content)
             return
-        max_sources = self.registryValue("search_sources", channel, network)
-        if sources and max_sources:
-            lines.append(_("Sources: %s") % ", ".join(sources[:max_sources]))
         if self.registryValue("full_reply", channel, network):
             self._send_full(irc, msg, lines, prefix)
         else:

@@ -388,23 +388,27 @@ class GeminiTestCase(ChannelPluginTestCase):
         self.fake.grounding = (["benfica porto result"] * 2, ["record.pt", "abola.pt", "x.com", "y.org"])
         with conf.supybot.plugins.Gemini.search_api_key.context("billed"):
             self.assertResponse("gemini search who won?", "Benfica won 2-1")
-            self.assertResponse(" ", "Sources: record.pt, abola.pt, x.com")
+            self.assertNoResponse(" ", 1)  # no extra lines
         chat = self.fake.sent[-1]
         self.assertEqual(chat.api_key, "billed")
         self.assertIsNotNone(chat.config.tools[0].google_search)
-        # the search prompt is added to the normal prompt
-        self.assertIn("IRC bot", chat.config.system_instruction)
+        # the search prompt replaces the normal (personality) prompt
         self.assertIn("no Markdown", chat.config.system_instruction)
-        self.assertNotIn("no Markdown", self._chatPrompt())
+        self.assertIn(self.irc.nick, chat.config.system_instruction)
+        self.assertNotIn("$botnick", chat.config.system_instruction)
         usage = self._usage()
         self.assertEqual((usage["day_count"], usage["month_count"]), (2, 2))
         self.assertResponse("searches", "Web searches today: 2/150, this month: 2/4800 (days reset at midnight Pacific time).")
         # search answers go into the shared history, so chat can follow up
-        # (search, then _chatPrompt's "chat hi", then this one)
         self.assertNotError("chat and then?")
         history = self.fake.sent[-1].history
-        self.assertEqual(len(history), 6)
+        self.assertEqual(len(history), 4)  # search + this one
         self.assertEqual(history[1].parts[0].text, "Benfica won 2-1")
+        # whatever the personality prompt says
+        with conf.supybot.plugins.Gemini.prompt.context("Be RUDE"):
+            self.assertNotError("gemini search hi")
+            self.assertNotIn("RUDE", self.fake.sent[-1].config.system_instruction)
+            self.assertEqual(self._chatPrompt(), "Be RUDE")
 
     def testSearchWithoutSearchingCountsNothing(self):
         self.fake.grounding = None
@@ -416,9 +420,7 @@ class GeminiTestCase(ChannelPluginTestCase):
         self.fake.grounding = (["q"], ["a.com"])
         with conf.supybot.plugins.Gemini.search_daily_limit.context(2):
             self.assertNotError("gemini search one")
-            self.assertNotError(" ")  # sources line
             self.assertNotError("gemini search two")
-            self.assertNotError(" ")
             before = len(self.fake.sent)
             self.assertRegexp("gemini search three", "Daily web search limit reached .2.. Try again after midnight")
             self.assertEqual(len(self.fake.sent), before)

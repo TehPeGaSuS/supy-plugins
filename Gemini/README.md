@@ -54,7 +54,7 @@ Gemini 3 models think before answering, and thinking tokens count towards `max_t
 ```
 @gemini search <text>
 ```
-Like `chat`, but Gemini may search the web with Google Search before answering, and the answer ends with a short list of the source websites. `chat` never searches. Use the plugin prefix here: a bare `search` is Limnoria's own `config search` command.
+Like `chat`, but Gemini may search the web with Google Search before answering,. `chat` never searches. Use the plugin prefix here: a bare `search` is Limnoria's own `config search` command.
 
 Google Search grounding needs a Google project with **billing enabled**: the free tier doesn't include it. A billed project gets 5,000 searches a month free (shared across Gemini 3 models), then $14 per 1,000. But billing applies to the whole project, so every `chat` on it would be billed too. To keep chat free, you can have two projects:
 
@@ -73,7 +73,7 @@ To stay inside the free 5,000 searches, the plugin counts the searches Google ru
 ```
 The limits only know about this bot: other bots or programs using the same billed project share Google's 5,000 but not this count. If several bots use the same key, split the limits between them, e.g. three bots with `search_daily_limit 50` and `search_monthly_limit 1600` each.
 
-`search_prompt` is added to `prompt` for searches. By default it asks for plain IRC text: no Markdown, no citation markers, no footnotes and no URLs (Google's source links are long redirects; the bot lists the source sites itself, see `search_sources`).
+`search_prompt` replaces `prompt` for searches, so search answers stay factual whatever personality the bot has for `chat`. By default it asks for neutral, plain IRC text: no jokes or roleplay, no Markdown, no citation markers, no footnotes and no URLs (Google's source links are long redirects). Set it to empty to use `prompt` for searches too.
 
 ## Replies and errors
 
@@ -102,7 +102,6 @@ Options marked global apply to the whole bot; the others can be set globally, pe
 | `error_cooldown` | `600` | Seconds between errors for MessageParser triggers, per channel; `0` sends every error. |
 | `timeout` | `60` | Seconds to wait for Gemini; `0` waits forever (not recommended). |
 | `search_api_key` | (empty) | Key for the `search` command (a billed project); empty uses `api_key`. |
-| `search_prompt` | "This answer may use Google Search results. Reply in plain text for IRC: …" | Added to `prompt` for searches; empty adds nothing. |
-| `search_sources` | `3` | Source websites listed after a search answer; `0` hides them. |
+| `search_prompt` | "You are $botnick, an IRC bot answering with the help of Google Search. Give the facts plainly and neutrally …" | System prompt for searches, instead of `prompt`; empty uses `prompt`. |
 | `search_daily_limit` | `150` | Google searches per day, all networks and channels; `0` disables search. Global. |
 | `search_monthly_limit` | `4800` | Google searches per month, all networks and channels; `0` disables search. Global. |

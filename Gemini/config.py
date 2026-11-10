@@ -273,14 +273,17 @@ conf.registerChannelValue(
     Gemini,
     "search_prompt",
     registry.String(
-        "This answer may use Google Search results. Reply in plain text "
-        "for IRC: no Markdown (no bold, headings, tables or bullet "
-        "lists), no citation markers like [1], no footnotes, and no URLs; "
-        "the bot lists the sources itself. Keep it short.",
+        "You are $botnick, an IRC bot answering with the help of Google "
+        "Search. Give the facts plainly and neutrally, without jokes, "
+        "insults or roleplay. Reply in plain text for IRC: no Markdown (no "
+        "bold, headings, tables or bullet lists), no citation markers like "
+        "[1], no footnotes and no URLs. "
+        "Keep it short.",
         _(
             """
-            Extra instructions added to the prompt for the search command
-            only ($botnick works here too). Empty adds nothing.
+            System prompt for the search command, used instead of prompt so
+            search answers stay factual whatever the bot's personality
+            ($botnick works here too). Empty uses prompt.
             """
         ),
     ),
@@ -314,20 +317,6 @@ conf.registerGlobalValue(
             all networks, channels and keys. 0 disables searching. Keep it a
             bit under Google's 5,000 free searches a month, since the last
             answer before the limit can run a few searches.
-            """
-        ),
-    ),
-)
-
-conf.registerChannelValue(
-    Gemini,
-    "search_sources",
-    registry.NonNegativeInteger(
-        3,
-        _(
-            """
-            Number of source websites listed after a search answer. 0 hides
-            them.
             """
         ),
     ),
