@@ -297,7 +297,7 @@ class GeminiTestCase(ChannelPluginTestCase):
         # a nick mention turned into "chat $1" by MessageParser: the line
         # itself isn't addressed to the bot
         self.assertNotError(
-            'messageparser add "(?i)(.*%s.*)" "chat $1"' % self.irc.nick
+            'messageparser add "(?i)(.*%s.*)" "gemini chat $1"' % self.irc.nick
         )
         self.fake.reply = RuntimeError("boom")
         self.irc.feedMsg(

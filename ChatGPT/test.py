@@ -214,7 +214,7 @@ class ChatGPTTestCase(ChannelPluginTestCase):
 
     def testNoErrorForMessageParser(self):
         self.assertNotError(
-            'messageparser add "(?i)(.*%s.*)" "chat $1"' % self.irc.nick
+            'messageparser add "(?i)(.*%s.*)" "chatgpt chat $1"' % self.irc.nick
         )
         self.fake.reply = RuntimeError("boom")
         line = "hey %s there" % self.irc.nick
